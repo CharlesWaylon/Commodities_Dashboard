@@ -1,0 +1,189 @@
+"""
+Database schema — SQLAlchemy ORM models.
+
+HOW THIS WORKS:
+  SQLAlchemy's ORM (Object-Relational Mapper) lets you define database tables
+  as Python classes. Each class = one table. Each class attribute = one column.
+  SQLAlchemy translates these into the correct SQL for whatever database you use
+  (SQLite now, PostgreSQL later) — you never write CREATE TABLE by hand.
+
+SCHEMA DESIGN:
+  We use two tables in a classic "normalised" relational design:
+
+  ┌────────────────────┐       ┌───────────────────────────────┐
+  │   commodities      │       │        price_history           │
+  │────────────────────│       │───────────────────────────────│
+  │ id  (PK)           │◄──────│ commodity_id  (FK)            │
+  │ name               │  1:N  │ date                          │
+  │ ticker             │       │ open / high / low / close     │
+  │ sector             │       │ volume / interval             │
+  │ unit               │       │ adjusted_close                │
+  │ instrument_type    │       │ adjustment_factor             │
+  └────────────────────┘       └───────────────────────────────┘
+           │
+           │ 1:N   ┌───────────────────────────────┐
+           └──────►│        aligned_prices          │
+                   │───────────────────────────────│
+                   │ commodity_id  (FK)             │
+                   │ date  (canonical calendar)     │
+                   │ adjusted_close  (ffilled)      │
+                   │ is_filled                      │
+                   └───────────────────────────────┘
+
+  Database views (no storage cost — run on demand):
+    v_futures_aligned  → aligned_prices WHERE instrument_type = 'futures'
+    v_proxies_aligned  → aligned_prices WHERE instrument_type IN ('etf_proxy','equity_proxy')
+    v_crypto_aligned   → aligned_prices WHERE instrument_type = 'crypto'
+    v_all_typed        → aligned_prices with instrument_type column attached
+
+  "Normalised" means we store each commodity's name/sector/unit ONCE in
+  `commodities`, then reference it by ID in `price_history`. This avoids
+  repeating "WTI Crude Oil" / "Energy" / "USD/bbl" in thousands of rows.
+  One ID integer is far cheaper to store and join on.
+"""
+
+from sqlalchemy import (
+    Column, Integer, String, Float, BigInteger, Boolean,
+    Date, DateTime, UniqueConstraint, ForeignKey, Index
+)
+from sqlalchemy.orm import DeclarativeBase, relationship
+from datetime import datetime
+
+
+class Base(DeclarativeBase):
+    """
+    All ORM models inherit from Base.
+    Base keeps a registry of every model so SQLAlchemy can create all
+    tables in one call: Base.metadata.create_all(engine)
+    """
+    pass
+
+
+class Commodity(Base):
+    """
+    Reference table — one row per tracked commodity.
+    Think of this as a lookup / dimension table.
+    """
+    __tablename__ = "commodities"
+
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    name            = Column(String(100), nullable=False, unique=True)   # "WTI Crude Oil"
+    ticker          = Column(String(20),  nullable=False, unique=True)   # "CL=F"
+    sector          = Column(String(50),  nullable=False)                # "Energy"
+    unit            = Column(String(30),  nullable=False)                # "USD/bbl"
+    # Instrument classification — populated by pipeline/layer.py.
+    # Values: 'futures' | 'etf_proxy' | 'equity_proxy' | 'crypto'
+    # Critical for model training: futures prices reflect commodity fundamentals;
+    # equity/ETF proxies carry equity market beta that pollutes cross-asset analysis.
+    instrument_type = Column(String(20),  nullable=True)
+
+    # Relationship: one Commodity → many PriceHistory rows
+    # `back_populates` creates a two-way link so you can do:
+    #   commodity.prices      → list of all its price rows
+    #   price_row.commodity   → the parent commodity object
+    prices = relationship("PriceHistory", back_populates="commodity",
+                          cascade="all, delete-orphan")
+    aligned_prices = relationship("AlignedPrice", back_populates="commodity",
+                                  cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<Commodity {self.name} ({self.ticker})>"
+
+
+class PriceHistory(Base):
+    """
+    Time-series OHLCV (Open / High / Low / Close / Volume) data.
+    Each row is one day's candle for one commodity.
+
+    OHLCV explained:
+      Open   — price at market open
+      High   — highest price during the day
+      Low    — lowest price during the day
+      Close  — price at market close  ← most commonly used
+      Volume — number of contracts traded (0 for some commodities)
+    """
+    __tablename__ = "price_history"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    commodity_id = Column(Integer, ForeignKey("commodities.id"), nullable=False)
+    date         = Column(Date,    nullable=False)
+    open         = Column(Float)
+    high         = Column(Float)
+    low          = Column(Float)
+    close        = Column(Float,   nullable=False)
+    volume       = Column(BigInteger, default=0)
+    interval     = Column(String(10), nullable=False, default="1d")  # "1d" or "1wk"
+    ingested_at  = Column(DateTime, default=datetime.utcnow)         # when WE pulled it
+
+    # Roll-adjusted prices (populated by pipeline/roll_adjust.py).
+    # `close` always holds the raw price Yahoo Finance gave us.
+    # `adjusted_close` holds the proportionally back-adjusted price that
+    # eliminates contract-roll discontinuities — use this for any return
+    # calculation, model training, or backtesting.
+    # `adjustment_factor` is the cumulative multiplier applied to reach
+    # adjusted_close from close. Factor = 1.0 means no adjustment was made.
+    adjusted_close    = Column(Float, nullable=True)
+    adjustment_factor = Column(Float, nullable=True, default=1.0)
+
+    commodity = relationship("Commodity", back_populates="prices")
+
+    # UNIQUE constraint: one row per (commodity, date, interval).
+    # This prevents duplicate rows if the ingestion script runs twice on the same day.
+    # The database itself enforces this — no duplicates can ever sneak in.
+    __table_args__ = (
+        UniqueConstraint("commodity_id", "date", "interval",
+                         name="uq_commodity_date_interval"),
+        # Index speeds up the most common query: "give me all rows for ticker X
+        # between date A and date B" — without an index, the DB scans every row.
+        Index("ix_price_history_commodity_date", "commodity_id", "date"),
+    )
+
+    def __repr__(self):
+        return f"<PriceHistory {self.commodity_id} {self.date} close={self.close}>"
+
+
+class AlignedPrice(Base):
+    """
+    Time-aligned price series — every instrument on the same canonical calendar.
+
+    WHY THIS TABLE EXISTS:
+      price_history has mismatched date coverage across instruments:
+        - Bitcoin trades 7 days/week  (~1,827 rows over 5 years)
+        - Futures trade ~252 days/year (~1,260 rows)
+        - ETFs follow US market hours
+        - Some contracts have mid-week holidays others don't
+
+      You cannot build a valid correlation matrix, or feed multiple instruments
+      into a model, when their date indices don't line up. Pairing row 500 of
+      Bitcoin with row 500 of WTI means pairing observations from different dates.
+
+    HOW IT WORKS:
+      1. The canonical calendar is derived empirically from the futures instruments
+         themselves: any date where at least half of the 28 direct futures contracts
+         have a record is treated as a US exchange trading day.
+      2. Every instrument is reindexed to this calendar.
+      3. Days with no observation (weekends for futures, ETF holidays, Bitcoin
+         weekend days collapsed into Monday) are forward-filled — the last known
+         price is carried forward.
+      4. is_filled=True marks rows that were filled rather than observed, so
+         downstream code can weight or exclude them if needed.
+
+    WHAT TO USE IT FOR:
+      - Correlation matrices (requires identical date index)
+      - Multi-instrument model training (LSTM, XGBoost require aligned tensors)
+      - Any cross-asset spread or ratio calculation
+    """
+    __tablename__ = "aligned_prices"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    commodity_id = Column(Integer, ForeignKey("commodities.id"), nullable=False)
+    date         = Column(Date,    nullable=False)
+    adjusted_close = Column(Float, nullable=False)   # forward-filled adjusted close
+    is_filled    = Column(Boolean, default=False)    # True = no real observation; carried forward
+
+    commodity = relationship("Commodity", back_populates="aligned_prices")
+
+    __table_args__ = (
+        UniqueConstraint("commodity_id", "date", name="uq_aligned_commodity_date"),
+        Index("ix_aligned_commodity_date", "commodity_id", "date"),
+    )
