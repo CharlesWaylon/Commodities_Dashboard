@@ -1,0 +1,326 @@
+{
+  "run_date": "20260424",
+  "overall_pass": true,
+  "checks": [
+    {
+      "check": "return_spike",
+      "pass": true,
+      "results": [
+        {
+          "name": "HRC Steel",
+          "worst_z": 7.92,
+          "worst_date": "2024-01-31",
+          "worst_ret": -10.75,
+          "status": "WARN"
+        },
+        {
+          "name": "Lean Hogs",
+          "worst_z": 7.14,
+          "worst_date": "2023-05-15",
+          "worst_ret": 12.43,
+          "status": "WARN"
+        },
+        {
+          "name": "Natural Gas",
+          "worst_z": 6.14,
+          "worst_date": "2022-01-28",
+          "worst_ret": -25.95,
+          "status": "PASS"
+        },
+        {
+          "name": "Live Cattle",
+          "worst_z": 5.36,
+          "worst_date": "2026-03-02",
+          "worst_ret": -4.47,
+          "status": "PASS"
+        },
+        {
+          "name": "Brent Crude Oil",
+          "worst_z": 5.31,
+          "worst_date": "2026-03-23",
+          "worst_ret": -10.92,
+          "status": "PASS"
+        },
+        {
+          "name": "Palladium",
+          "worst_z": 5.23,
+          "worst_date": "2022-03-14",
+          "worst_ret": -13.63,
+          "status": "PASS"
+        },
+        {
+          "name": "Platinum",
+          "worst_z": 5.2,
+          "worst_date": "2026-03-03",
+          "worst_ret": -10.26,
+          "status": "PASS"
+        },
+        {
+          "name": "WTI Crude Oil",
+          "worst_z": 5.18,
+          "worst_date": "2026-04-17",
+          "worst_ret": -11.45,
+          "status": "PASS"
+        },
+        {
+          "name": "Heating Oil",
+          "worst_z": 5.1,
+          "worst_date": "2021-11-26",
+          "worst_ret": -12.11,
+          "status": "PASS"
+        },
+        {
+          "name": "Soybean Meal",
+          "worst_z": 4.97,
+          "worst_date": "2021-12-15",
+          "worst_ret": -7.99,
+          "status": "PASS"
+        },
+        {
+          "name": "Soybeans",
+          "worst_z": 4.94,
+          "worst_date": "2021-06-30",
+          "worst_ret": 6.64,
+          "status": "PASS"
+        },
+        {
+          "name": "Cocoa",
+          "worst_z": 4.9,
+          "worst_date": "2025-06-20",
+          "worst_ret": -12.61,
+          "status": "PASS"
+        },
+        {
+          "name": "Sugar",
+          "worst_z": 4.9,
+          "worst_date": "2023-12-06",
+          "worst_ret": -7.85,
+          "status": "PASS"
+        },
+        {
+          "name": "Corn",
+          "worst_z": 4.86,
+          "worst_date": "2023-07-13",
+          "worst_ret": 7.96,
+          "status": "PASS"
+        },
+        {
+          "name": "Gasoline (RBOB)",
+          "worst_z": 4.82,
+          "worst_date": "2024-09-03",
+          "worst_ret": -10.58,
+          "status": "PASS"
+        },
+        {
+          "name": "Rough Rice (CBOT)",
+          "worst_z": 4.81,
+          "worst_date": "2023-07-14",
+          "worst_ret": -6.22,
+          "status": "PASS"
+        },
+        {
+          "name": "Silver",
+          "worst_z": 4.78,
+          "worst_date": "2026-02-12",
+          "worst_ret": -9.8,
+          "status": "PASS"
+        },
+        {
+          "name": "Soybean Oil",
+          "worst_z": 4.76,
+          "worst_date": "2022-12-01",
+          "worst_ret": -9.08,
+          "status": "PASS"
+        },
+        {
+          "name": "Aluminum (COMEX)",
+          "worst_z": 4.74,
+          "worst_date": "2022-03-08",
+          "worst_ret": -6.94,
+          "status": "PASS"
+        },
+        {
+          "name": "Oats (CBOT)",
+          "worst_z": 4.7,
+          "worst_date": "2025-05-15",
+          "worst_ret": -9.87,
+          "status": "PASS"
+        },
+        {
+          "name": "Wheat",
+          "worst_z": 4.64,
+          "worst_date": "2022-02-28",
+          "worst_ret": 10.08,
+          "status": "PASS"
+        },
+        {
+          "name": "Gold",
+          "worst_z": 4.57,
+          "worst_date": "2021-06-17",
+          "worst_ret": -4.61,
+          "status": "PASS"
+        },
+        {
+          "name": "Copper",
+          "worst_z": 4.52,
+          "worst_date": "2022-11-04",
+          "worst_ret": 7.46,
+          "status": "PASS"
+        },
+        {
+          "name": "Feeder Cattle",
+          "worst_z": 4.44,
+          "worst_date": "2023-03-31",
+          "worst_ret": 4.38,
+          "status": "PASS"
+        },
+        {
+          "name": "Orange Juice (FCOJ-A)",
+          "worst_z": 4.36,
+          "worst_date": "2026-01-12",
+          "worst_ret": -12.47,
+          "status": "PASS"
+        },
+        {
+          "name": "Coffee",
+          "worst_z": 4.11,
+          "worst_date": "2021-07-22",
+          "worst_ret": 10.03,
+          "status": "PASS"
+        },
+        {
+          "name": "Wheat (KC HRW)",
+          "worst_z": 4.07,
+          "worst_date": "2024-07-15",
+          "worst_ret": -8.03,
+          "status": "PASS"
+        },
+        {
+          "name": "Cotton",
+          "worst_z": 3.94,
+          "worst_date": "2022-09-30",
+          "worst_ret": 7.01,
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "check": "date_alignment",
+      "pass": true,
+      "canonical_days": 1258,
+      "total_instruments": 41,
+      "deviations": {
+        "Rough Rice (CBOT)": 1257
+      },
+      "known_exceptions": [
+        "Rough Rice (CBOT)"
+      ],
+      "unexpected": [],
+      "status": "PASS"
+    },
+    {
+      "check": "correlation_sanity",
+      "pass": true,
+      "pairs": [
+        {
+          "pair": "Brent Crude Oil / WTI Crude Oil",
+          "r": 0.951,
+          "expected": "0.88\u20131.0",
+          "status": "PASS",
+          "rationale": "Near-identical crude benchmarks; return correlation typically 0.93\u20130.97"
+        },
+        {
+          "pair": "Gold / Silver",
+          "r": 0.73,
+          "expected": "0.6\u20131.0",
+          "status": "PASS",
+          "rationale": "Both monetary metals; return correlation typically 0.70\u20130.80"
+        },
+        {
+          "pair": "Corn (CBOT) / Soybeans (CBOT)",
+          "r": 0.5,
+          "expected": "0.4\u20131.0",
+          "status": "PASS",
+          "rationale": "Compete for same farmland; return correlation typically 0.45\u20130.65"
+        },
+        {
+          "pair": "Gasoline (RBOB) / Heating Oil (No.2)",
+          "r": 0.649,
+          "expected": "0.55\u20131.0",
+          "status": "PASS",
+          "rationale": "Both refined from crude; seasonal divergence lowers return correlation vs price"
+        },
+        {
+          "pair": "Live Cattle / Feeder Cattle",
+          "r": 0.593,
+          "expected": "0.45\u20131.0",
+          "status": "PASS",
+          "rationale": "Feeder calves become live cattle; same supply chain 6 months apart"
+        },
+        {
+          "pair": "Natural Gas (Henry Hub) / WTI Crude Oil",
+          "r": 0.112,
+          "expected": "0.0\u20130.4",
+          "status": "PASS",
+          "rationale": "Decoupled since US shale revolution; now largely independent markets"
+        }
+      ]
+    },
+    {
+      "check": "historical_events",
+      "pass": true,
+      "results": [
+        {
+          "event": "Russia invades Ukraine",
+          "date": "2022-02-24",
+          "name": "WTI Crude Oil",
+          "max_price": 92.81,
+          "min_expected": 90.0,
+          "unit": "USD/bbl",
+          "rationale": "WTI was ~$96 on invasion day; energy sanctions expected",
+          "status": "PASS"
+        },
+        {
+          "event": "Russia invades Ukraine",
+          "date": "2022-02-24",
+          "name": "Wheat (CBOT SRW)",
+          "max_price": 926.0,
+          "min_expected": 800.0,
+          "unit": "USc/bu",
+          "rationale": "Ukraine + Russia = ~30% of global wheat exports; prices spiked >$13/bu",
+          "status": "PASS"
+        },
+        {
+          "event": "European natural gas crisis peak",
+          "date": "2022-08-26",
+          "name": "Natural Gas (Henry Hub)",
+          "max_price": 9.68,
+          "min_expected": 7.5,
+          "unit": "USD/MMBtu",
+          "rationale": "Henry Hub peaked ~$9.70 in Aug 2022 amid LNG export demand surge",
+          "status": "PASS"
+        },
+        {
+          "event": "Cocoa supply crisis",
+          "date": "2024-03-01",
+          "name": "Cocoa (ICE)",
+          "max_price": 7170.0,
+          "min_expected": 6000.0,
+          "unit": "USD/MT",
+          "rationale": "West Africa crop failures drove Cocoa to $10,000+ by April 2024",
+          "status": "PASS"
+        },
+        {
+          "event": "Palladium / Russia sanctions",
+          "date": "2022-03-09",
+          "name": "Palladium",
+          "max_price": 2979.9,
+          "min_expected": 2400.0,
+          "unit": "USD/oz",
+          "rationale": "Russia supplies ~40% of palladium; sanctions drove prices to $3,000+",
+          "status": "PASS"
+        }
+      ]
+    }
+  ]
+}
