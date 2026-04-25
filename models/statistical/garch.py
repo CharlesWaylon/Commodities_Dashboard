@@ -152,10 +152,13 @@ class GARCHForecaster:
         # Append in-sample conditional vol for full overlay
         in_sample_var = self._fit.conditional_volatility           # in % units
         in_sample_ann = in_sample_var * np.sqrt(252)
+        realized_aligned = realized.reindex(in_sample_ann.index)
+        if hasattr(realized_aligned, "squeeze"):
+            realized_aligned = realized_aligned.squeeze()
         in_sample_df = pd.DataFrame(
             {
-                "conditional_vol_ann": in_sample_ann.values,
-                "realized_vol_ann": realized.reindex(in_sample_ann.index).values,
+                "conditional_vol_ann": np.asarray(in_sample_ann).ravel(),
+                "realized_vol_ann": np.asarray(realized_aligned).ravel(),
             },
             index=in_sample_ann.index,
         )
