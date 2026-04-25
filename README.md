@@ -13,7 +13,7 @@ Built with Python, Streamlit, and Plotly — live data, no paid APIs required.
 | 💰 **Pricing** | Full sortable/filterable table + performance treemap heatmap |
 | 📊 **Charts** | Interactive historical charts (line, candlestick, area) with SMAs & volume |
 | 📰 **News** | Live commodity news aggregated from free RSS feeds (Reuters, CNBC, FT, etc.) |
-| 🤖 **Models** | Statistical analysis (volatility, returns, correlation) + Phase 3 model roadmap |
+| 🤖 **Models** | 5-tab predictive dashboard: statistical, ML, deep learning, quantum, and market signals |
 | 🗄️ **Database** | Inspect stored data, trigger manual ingestion, view coverage per commodity |
 
 ---
@@ -60,6 +60,8 @@ pip install -r requirements.txt
 ```
 
 This installs:
+
+**Core dashboard**
 - `streamlit` — web framework that turns Python scripts into interactive dashboards
 - `plotly` — interactive charting library
 - `yfinance` — fetches market data from Yahoo Finance
@@ -69,6 +71,28 @@ This installs:
 - `apscheduler` — runs the ingestion pipeline on a schedule
 - `sqlalchemy` — ORM that talks to SQLite or PostgreSQL
 - `psycopg2-binary` — PostgreSQL driver
+
+**Tier 1 — Statistical models**
+- `statsmodels` — ARIMA/SARIMA and VAR/VECM
+- `arch` — GARCH and GJR-GARCH volatility models
+
+**Tier 2 — ML models**
+- `scikit-learn` — Random Forest, ElasticNet, StandardScaler
+- `hmmlearn` — Gaussian Hidden Markov Model
+- `xgboost` — gradient-boosted trees
+- `shap` — SHAP TreeExplainer for model explainability
+
+**Tier 3 — Deep learning (optional, heavier)**
+- `torch` — PyTorch for BiLSTM
+- `prophet` — Facebook/Meta Prophet decomposition
+- `pytorch-forecasting` + `lightning` — Temporal Fusion Transformer
+
+**Tier 4 — Quantum (optional, experimental)**
+- `pennylane` — quantum circuit simulation
+- `pennylane-qiskit` — IBM Quantum hardware backend
+
+**Feature engineering**
+- `transformers` — FinBERT NLP sentiment (optional, GPU recommended)
 
 ### 4. Set up PostgreSQL
 
@@ -146,8 +170,37 @@ Commodities_Dashboard/
 │   ├── 1_Pricing.py          ← Full price table + treemap
 │   ├── 2_Charts.py           ← Historical charts + comparison
 │   ├── 3_News.py             ← RSS news aggregator
-│   ├── 4_Models.py           ← Stats analysis + model roadmap
+│   ├── 4_Models.py           ← 5-tab predictive model dashboard (see Models section below)
 │   └── 5_Database.py         ← DB inspector + manual ingestion trigger
+│
+├── models/                   ← Predictive model library
+│   ├── features.py           ← Core feature matrix builder (48 features)
+│   ├── config.py             ← Shared constants (commodities list, train/test split)
+│   ├── statistical/          ← Tier 1: classical econometric models
+│   │   ├── arima.py          ← ARIMA/SARIMA price forecasting (AIC grid search)
+│   │   ├── garch.py          ← GARCH/GJR-GARCH volatility forecasting
+│   │   ├── kalman.py         ← Kalman Filter dynamic hedge ratio
+│   │   └── var_vecm.py       ← VAR/VECM Granger causality + impulse response
+│   ├── ml/                   ← Tier 2: machine learning models
+│   │   ├── hmm_regime.py     ← Gaussian HMM 4-state regime detector
+│   │   ├── random_forest.py  ← Random Forest with rolling re-fit
+│   │   ├── xgboost_shap.py   ← XGBoost + SHAP waterfall explainability
+│   │   └── elastic_net.py    ← Elastic Net / Lasso sparse factor model
+│   ├── deep/                 ← Tier 3: deep learning (requires torch/prophet)
+│   │   ├── lstm.py           ← Bidirectional LSTM multi-commodity forecaster
+│   │   ├── prophet_decomp.py ← Meta-Prophet trend + seasonality decomposition
+│   │   └── tft.py            ← Temporal Fusion Transformer (multi-horizon quantile)
+│   └── quantum/              ← Tier 4: quantum models (requires pennylane)
+│       ├── kernel_benchmark.py ← Quantum kernel SVM vs classical baseline
+│       ├── qaoa_portfolio.py   ← QAOA cardinality-constrained portfolio optimiser
+│       └── qnn_hybrid.py       ← QNN hybrid layer vs classical network comparison
+│
+├── features/                 ← Forward-looking external signal library
+│   ├── assembler.py          ← Single entry point: builds the augmented feature matrix
+│   ├── energy_transition.py  ← Uranium spread, battery metals PC1, ETS stress
+│   ├── macro_overlays.py     ← DXY/VIX/TLT + WASDE/OPEC+ calendar dummies
+│   ├── climate_weather.py    ← ENSO MEI v2, PDSI Corn Belt, HDD/CDD deviations
+│   └── sentiment.py          ← FinBERT NLP sentiment + EIA inventory surprise
 │
 ├── database/                 ← Database layer
 │   ├── models.py             ← SQLAlchemy ORM table definitions (schema)
@@ -525,25 +578,190 @@ Edit `services/news_data.py` → `RSS_FEEDS` dict. Any publication that publishe
 
 ---
 
-## Phase 3 — Predictive Models (Roadmap)
+## Predictive Models
 
-Phase 2 (the data pipeline) is complete. Phase 3 will use the clean, roll-adjusted price history to build predictive models:
+The Models page (`pages/4_Models.py`) runs live model inference on real market data across five tabs. All models load from the `models/` and `features/` packages and use `@st.cache_data` / `@st.cache_resource` to avoid re-running on every interaction.
 
-```
-PostgreSQL (adjusted_close series — clean, roll-adjusted)
-       │
-       ├── Feature engineering (rolling stats, spreads, seasonality flags)
-       │
-       ├── ARIMA / SARIMA    — classical time-series forecasting
-       ├── Prophet           — Facebook's trend + seasonality decomposition
-       ├── XGBoost           — gradient boosted trees on engineered features
-       └── LSTM              — deep learning sequence model
-              │
-              ▼
-       Forecast outputs → Models page in this dashboard
-```
+**Primary accuracy metric throughout: Spearman IC (Information Coefficient).** IC > 0.05 is considered actionable for a daily commodity signal.
 
-**Why `adjusted_close` matters for models:** Training a model on the raw `close` series means the model sees fictional −11% one-day crashes at every futures roll date. Those non-events pollute every feature (rolling volatility, momentum, z-scores) calculated from the series. `adjusted_close` gives models a return series where every data point reflects a real price move.
+---
+
+### Tab 1 — Statistical Models
+
+#### ARIMA / SARIMA
+**What it does:** Forecasts the price level 1–30 days ahead. The model is described by three parameters — AR (how many past prices to use), I (how many times to difference the series to make it stationary), and MA (how many past forecast errors to correct for). The dashboard grid-searches ~64 combinations and selects the order with the lowest AIC score. For seasonal commodities (Natural Gas, agricultural grains), a SARIMA seasonal extension adds a 5-period seasonal cycle.
+
+**Dashboard output:** Price chart with 95% confidence interval bands, winning model order (e.g., ARIMA(3,1,3)), AIC score, Day-1 and Day-N forecast prices.
+
+**Key insight:** A tight confidence interval signals the model is confident. A wide CI signals high uncertainty — both are informative. The ARIMA forecast is best interpreted as a mean-reversion baseline, not an absolute price call.
+
+---
+
+#### GARCH / GJR-GARCH
+**What it does:** Forecasts *volatility*, not price direction. GARCH models the empirical fact that volatile days cluster together — a large move today predicts elevated volatility tomorrow. GJR-GARCH adds an asymmetry term (γ) for the leverage effect: bad news raises volatility more than equally-sized good news. This is a well-documented feature of energy markets.
+
+Model selection is automatic: energy commodities (WTI, Natural Gas) use GJR-GARCH; metals and grains use GARCH. Both use Student-t innovations to handle fat-tailed commodity return distributions.
+
+**Dashboard output:** Overlay chart of GARCH conditional volatility vs 21-day realized volatility (annualized %), plus a 21-day forward forecast. Metrics include current conditional vol, forward vol, and the leverage coefficient γ.
+
+**Key insight:** When GARCH forecast vol rises above realized vol, it's a forward warning — options premiums are likely to expand before the realized move arrives. A negative γ (e.g., WTI at −0.077) confirms the asymmetric response is statistically significant.
+
+---
+
+#### Kalman Filter Dynamic Hedge Ratio
+**What it does:** Estimates the time-varying β relationship between two commodity prices in real time using a state-space model. β drifts each day as a random walk; the Kalman filter optimally balances prior estimates against new observations. The spread z-score measures how far the current spread is from its recent norm in standard-deviation units.
+
+Four built-in pairs: WTI ↔ Natural Gas, Gold ↔ Silver, Corn ↔ Soybeans, Wheat ↔ Corn.
+
+**Dashboard output:** Two-panel chart — time-varying β (top) and spread z-score with ±2σ threshold lines (bottom). Metrics include current β, current z-score, and a plain-English signal (Long spread / Neutral / Short spread).
+
+**Key insight:** When z-score exceeds +2.0, the spread is stretched and historically mean-reverts. This is the primary signal for commodity pair trades. A β that drifts significantly over time indicates a structural relationship shift — for example, the Gold/Silver ratio expanding during risk-off regimes.
+
+---
+
+#### VAR Granger Causality
+**What it does:** A Vector Autoregression model fits all commodities in a group (Energy, Metals, or Grains) simultaneously and asks: does knowing Commodity A's past values help predict Commodity B's future values, above and beyond what B's own history already tells you? This is the Granger causality test. A low p-value means yes, A Granger-causes B.
+
+**Dashboard output:** A p-value heatmap (green = strong causality, red = none) plus the optimal VAR lag order selected by BIC.
+
+**Key insight:** WTI not Granger-causing Natural Gas (p ≈ 0.985) is economically correct — US Henry Hub gas is priced by domestic storage and weather, not global crude oil. Confirming this in real data is the model working as intended. Finding an unexpected causal link (e.g., Copper → Gold) can indicate a macro regime where industrial demand is driving safe-haven flows.
+
+---
+
+### Tab 2 — ML Models
+
+#### HMM Market Regime Detector
+**What it does:** An unsupervised Gaussian Hidden Markov Model trained on two daily observations — log-return and 21-day rolling volatility. It infers which of four hidden market states the commodity was most likely in on each day. States are labeled by sorting on mean return and injecting a High-Vol label at the highest-variance middle state: **Bear** (low return), **High-Vol** (middle return, highest variance), **Neutral** (middle return, lower variance), **Bull** (high return).
+
+**Dashboard output:** Price chart with each day colour-coded by regime, a state probability heatmap for the last 126 trading days (shows gradual regime transitions before they become obvious), regime breakdown metrics, and today's current regime.
+
+**Key insight:** The probability heatmap is more useful than the binary regime label. Watching the Bull probability creep from 5% to 30% over several weeks is an early-warning signal before the model formally flips to Bull. Very few Bull days (e.g., WTI had only 6 out of 756 in the last 3 years) reveal the persistent bearish macro backdrop.
+
+---
+
+#### XGBoost + SHAP Explainability
+**What it does:** A gradient-boosted tree ensemble that predicts next-day log-return using 48 engineered features (momentum at multiple horizons, mean-reversion z-scores, rolling volatility ratios, cross-commodity return spreads). Trained on an 85%/15% walk-forward split with early stopping.
+
+SHAP (SHapley Additive exPlanations) solves the black-box problem: for every prediction, each feature receives a signed contribution value derived from game-theoretic Shapley values — what did this feature add, relative to the average prediction across all data?
+
+**Dashboard output:** Two side-by-side charts. Left: global SHAP importance (average absolute SHAP across all dates — what matters most overall). Right: a waterfall chart for today's prediction (which specific features pushed today's forecast up or down). Metrics: IC, top bullish driver, top bearish driver for today.
+
+**Key insight:** The global importance chart answers "what drives WTI returns in general." The waterfall answers "why is the model bullish/bearish *today specifically*." Cross-commodity drivers appearing in the waterfall (e.g., Gold z-score pushing WTI) reveal macro linkages — flight-to-safety Gold spikes often lead energy by a day during risk-off events.
+
+---
+
+#### Random Forest
+**What it does:** An ensemble of 300 decision trees, each trained on a bootstrap sample and a random feature subset (√N features per split). The final prediction is the mean across all trees. Gini impurity feature importance measures how much a feature reduces impurity across *all* splits in *all* trees — a structural signal of explanatory power across the full training window.
+
+Rolling re-fit: the model re-trains on a 252-day rolling window every 21 days, so importance rankings adapt as the macro regime shifts.
+
+**Dashboard output:** Horizontal bar chart of top 20 features by Gini importance, IC score, and top feature share.
+
+**Key insight:** Gini importance differs from SHAP in a useful way — it's a global structural measure (what matters across all market conditions) rather than a prediction-attribution measure (what matters for this specific observation). When momentum features dominate the Gini chart, it means the commodity is in a trend-following regime. When volatility-ratio features dominate, it suggests a mean-reversion regime.
+
+---
+
+#### Elastic Net / Lasso Factor Model
+**What it does:** A linear model with combined L1 (Lasso) and L2 (Ridge) regularisation. L1 forces most coefficients exactly to zero, automatically selecting the minimal set of factors that explain the target. L2 prevents collinear features from blowing up. The regularisation strength and L1/L2 mix are tuned via 5-fold time-series cross-validation.
+
+**Dashboard output:** Bar chart of non-zero coefficients (green = positive/bullish, red = negative/bearish), IC, number of active features, sparsity percentage, regularisation strength, and a plain-English factor narrative ("WTI return is driven by: momentum_5d (+), DXY_zscore (−)").
+
+**Key insight:** Extreme sparsity (e.g., 97.9% of features zeroed out, leaving 1 active) tells you the signal is very concentrated right now. A single dominant factor is sometimes more reliable than a complex multi-factor model — and easier to monitor. The factor narrative makes the model legible to a non-technical audience.
+
+---
+
+### Tab 3 — Market Signals
+
+#### DXY / VIX / TLT Macro Overlay
+Three instruments that proxy for three distinct macro regimes, fetched free via Yahoo Finance:
+
+- **DXY (^DXY):** US Dollar Index. Most commodity futures are USD-priced, so a strong dollar depresses commodity demand from non-USD buyers. Gold and oil are particularly sensitive. The dashboard shows the 63-day z-score (not raw level) so you see dollar *strength* relative to recent history.
+- **VIX (^VIX):** CBOE implied equity volatility ("fear gauge"). Above 20 = risk-off; above 30 = crisis. In risk-off regimes, commodity correlations converge and momentum signals weaken — this is when most systematic strategies fail. The bar chart colours each day green (risk-on), purple (risk-off), or red (crisis).
+- **TLT:** iShares 20+ Year Treasury ETF. TLT price moves inversely to long-term US interest rates. Rising rates = falling TLT = commodity headwind (higher inventory discount rates, stronger USD carry, competition from fixed income). The 21-day momentum shows whether rates are trending up or down.
+
+**Dashboard output:** Three-panel chart (one per instrument), plus five live metrics: VIX level and regime label, DXY z-score, TLT 21d momentum, days to next WASDE report, days to next OPEC+ meeting.
+
+---
+
+#### WASDE & OPEC+ Calendar Dummies
+Two recurring events that cause predictable volatility spikes in specific commodity groups:
+
+- **WASDE (USDA World Agricultural Supply and Demand Estimates):** Published monthly, typically the 2nd Tuesday at 12:00 noon ET. Agricultural futures (Corn, Wheat, Soybeans) experience elevated volatility in the 1–7 days before and 5 days after release as traders position around surprise estimates. Release dates are hardcoded through 2026, with an algorithmic 2nd-Tuesday fallback for future dates.
+- **OPEC+ meetings:** Typically twice yearly (June and November/December), with extraordinary meetings when production policy changes urgently. Energy futures (WTI, Brent, Heating Oil, Gasoline) trade elevated vol in the 2 weeks before a scheduled meeting. 24 historical and future meeting dates are hardcoded through 2026.
+
+The dashboard shows signed days-to-event (negative = days before, positive = days after) and flags whether the current date is inside the event window.
+
+---
+
+#### ENSO Climate Signal (MEI v2)
+**What it does:** The Multivariate ENSO Index v2 from NOAA PSL (no API key required). El Niño / La Niña disrupts global precipitation and atmospheric circulation, with lagged effects on specific commodity groups:
+
+- **El Niño (MEI > +0.5):** Drier SE Asia → bearish palm oil, cocoa, coffee (3–6 month lead). Wetter US Gulf Coast → bullish US soy. Drier Australia → bearish Australian wheat.
+- **La Niña (MEI < −0.5):** Wetter SE Asia. Drier South America → bearish Brazil soy (2–4 month lead). Cooler US winters → higher natural gas demand.
+- **Neutral:** No directional bias from ENSO.
+
+**Dashboard output:** Bar chart of MEI v2 (last 2 years) coloured by phase, live MEI reading, 3-month lag signal, 6-month lag signal, and a plain-English interpretation of the current phase and which commodities to watch.
+
+---
+
+#### Energy Transition Signals
+Three proprietary signals built from free market data:
+
+- **Uranium Spread Proxy:** URA (Global X Uranium ETF) price vs its 90-day simple moving average, z-scored over 63 days. A positive z-score indicates uranium miners are outperforming trend, signalling increased nuclear energy interest.
+- **Battery Metals PC1:** First principal component of LIT (lithium), GLNCY (cobalt/zinc), and REMX (rare earths) returns — a single index capturing the shared "battery metals demand" factor across EV-critical materials.
+- **ETS Policy Stress:** KRBN (KraneShares Global Carbon ETF) volatility-weighted return, measuring how aggressively carbon markets are pricing in regulatory tightening.
+
+---
+
+### Tab 4 — Deep Learning (on-demand)
+
+These models are computationally expensive and run only when you click the button. They require optional heavy dependencies (`torch`, `prophet`, `pytorch-forecasting`).
+
+#### BiLSTM Multi-Commodity Forecaster
+A 2-layer bidirectional Long Short-Term Memory network with a shared encoder and per-commodity output heads. It processes 63-day sequences in both forward and backward directions, capturing asymmetric temporal patterns (e.g., recoveries look different from drawdowns). Trains on all commodities jointly — multi-task learning — which prevents overfitting on individual sparse series. Uses Adam optimiser with ReduceLROnPlateau and early stopping (patience = 15 epochs).
+
+#### Meta-Prophet Decomposition
+Facebook/Meta's additive decomposition model separates each price series into trend + yearly seasonality + weekly seasonality + holiday effects. Ten major macro events (Covid crash, Ukraine invasion, Fed rate hike cycle, etc.) are injected as change-point priors. The dashboard shows a 90-day price forecast, detected changepoints matched to known macro events, seasonal strength scores, and a trend regime classification (accelerating, decelerating, or reversing).
+
+#### Temporal Fusion Transformer (TFT)
+Produces multi-horizon quantile forecasts [q10, q50, q90] for 1-day, 5-day, and 20-day horizons simultaneously via pytorch-forecasting. The Variable Selection Network (VSN) inside TFT learns which features to weight at which time steps. Attention weight outputs show the model's temporal "memory" — how far back it is looking for each prediction horizon. Best suited for longer-horizon planning where interval forecasts (not just point estimates) are required.
+
+---
+
+### Tab 5 — Quantum Models (experimental, on-demand)
+
+These are research-grade models. They require `pennylane >= 0.38` and run as classical simulations unless an IBM Quantum backend is configured via `pennylane-qiskit`.
+
+#### Quantum Kernel SVM Benchmark
+Encodes commodity return features into quantum circuits using three circuit families — RY/RZ (basic rotation), ZZFeatureMap (entangling map from Qiskit), and IQP (Instantaneous Quantum Polynomial) — at 4, 6, and 8 qubits. Computes a quantum kernel matrix and trains an SVM classifier. Benchmarks Spearman IC vs a classical RBF-kernel SVM baseline. Includes depolarizing noise simulation at five noise levels to model realistic IBM quantum hardware degradation.
+
+#### QAOA Portfolio Optimiser
+Formulates asset selection as a Quadratic Unconstrained Binary Optimization (QUBO) problem — each qubit represents one commodity asset, and the Quantum Approximate Optimization Algorithm searches for the binary allocation (include/exclude) that maximises expected return minus λ×variance, subject to an exact cardinality constraint (pick exactly K assets). The cost landscape chart shows how solution quality varies across the QAOA circuit parameter space (γ, β), letting you inspect whether the optimiser converged.
+
+#### QNN Hybrid Layer Comparison
+A hybrid quantum-classical neural network where classical linear layers feed into a PennyLane `qml.qnn.TorchLayer` (trained via parameter-shift gradients — the quantum-native backpropagation method), then back to classical output layers. The `comparison_study()` function trains both a QNN and an equivalent fully classical network side-by-side on the same data split and reports IC, training loss curves, and wall-clock runtime. The goal is empirical benchmarking — does the quantum layer provide any advantage on financial time-series data?
+
+---
+
+### Feature Engineering (`features/` package)
+
+All models in Tabs 1–2 use a 48-column feature matrix built from price history. The `features/` package adds external signals on top of this base:
+
+| Signal group | Columns | Source | API key needed |
+|---|---|---|---|
+| Price momentum | `*_mom5`, `*_mom21`, `*_zscore`, `*_vol21` | yfinance | No |
+| Cross-commodity | Return spreads, correlation ratios | yfinance | No |
+| DXY / VIX / TLT | `dxy_zscore63`, `vix`, `vix_risk_off`, `tlt_mom21` | yfinance | No |
+| Calendar dummies | `days_to_wasde`, `is_wasde_window`, `days_to_opec` | Hardcoded dates | No |
+| ENSO | `mei`, `mei_lag3m`, `mei_lag6m`, `enso_phase` | NOAA PSL flat file | No |
+| Energy transition | `uranium_spread_zscore`, `battery_demand_index`, `ets_stress_zscore` | yfinance | No |
+| PDSI / HDD / CDD | `pdsi_cornbelt`, `hdd_deviation_pct`, `cdd_deviation_pct` | NOAA CDO API | Yes — free at ncdc.noaa.gov/cdo-web/token |
+| FinBERT sentiment | `sentiment_wti_crude_oil`, etc. | HuggingFace model | No (GPU recommended) |
+| EIA inventory | `eia_crude_surprise`, `eia_crude_surprise_z` | EIA API v2 | Yes — free at eia.gov/opendata |
+
+The `augment_model_features()` function in `features/assembler.py` filters to columns with ≥ 50% data coverage, preventing sparse external signals from contaminating the ML training matrix when API keys are absent.
+
+**Why `adjusted_close` matters for models:** Training on the raw `close` series means every model sees fictional −11% crashes at futures roll dates. These non-events corrupt every feature derived from the series (momentum, z-scores, rolling volatility). `adjusted_close` gives models a return series where every data point reflects a real price move.
 
 ---
 
