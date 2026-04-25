@@ -13,3 +13,7 @@ psycopg2-binary>=2.9.0
 statsmodels>=0.14.0
 arch>=6.3.0
 scikit-learn>=1.4.0
+# ML models (Tier 2)
+hmmlearn>=0.3.0
+xgboost>=2.0.0
+shap>=0.45.0
