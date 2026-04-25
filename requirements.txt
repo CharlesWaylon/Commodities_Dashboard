@@ -17,3 +17,8 @@ scikit-learn>=1.4.0
 hmmlearn>=0.3.0
 xgboost>=2.0.0
 shap>=0.45.0
+# Deep learning models (Tier 3)
+torch>=2.0.0
+prophet>=1.1.5
+pytorch-forecasting>=1.0.0
+lightning>=2.0.0
