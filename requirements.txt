@@ -22,3 +22,6 @@ torch>=2.0.0
 prophet>=1.1.5
 pytorch-forecasting>=1.0.0
 lightning>=2.0.0
+# Quantum models (Tier 4)
+pennylane>=0.38.0
+pennylane-qiskit>=0.38.0
