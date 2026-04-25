@@ -287,6 +287,8 @@ def fetch_mei(lag_months: list = [3, 6]) -> pd.DataFrame:
         for i, val in enumerate(parts[1:13]):
             try:
                 mei_val = float(val)
+                if abs(mei_val) >= 999:   # NOAA uses -999.00 as missing sentinel
+                    continue
                 # Bimonthly periods: DJ=1, JF=2, FM=3, MA=4, AM=5, MJ=6, ...
                 # Centre each bimonthly period on its second month
                 month = min(i + 2, 12)

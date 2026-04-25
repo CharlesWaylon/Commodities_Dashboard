@@ -139,10 +139,10 @@ class XGBoostForecaster:
         self._model = xgb.XGBRegressor(**XGB_PARAMS)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            self._model.set_params(early_stopping_rounds=EARLY_STOPPING_ROUNDS)
             self._model.fit(
                 X_fit_sc, y_fit,
                 eval_set=[(X_val_sc, y_val)],
-                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
                 verbose=False,
             )
 
@@ -156,7 +156,7 @@ class XGBoostForecaster:
         """Predict next-day log-returns, returning a DatetimeIndex Series."""
         if self._model is None:
             raise RuntimeError("Call fit() first.")
-        X = feat_df[self._feature_names].fillna(method="ffill")
+        X = feat_df[self._feature_names].ffill()
         valid = ~X.isna().any(axis=1)
         preds = np.full(len(X), np.nan)
         preds[valid] = self._model.predict(
