@@ -25,3 +25,5 @@ lightning>=2.0.0
 # Quantum models (Tier 4)
 pennylane>=0.38.0
 pennylane-qiskit>=0.38.0
+# Forward-looking feature engineering
+transformers>=4.40.0
