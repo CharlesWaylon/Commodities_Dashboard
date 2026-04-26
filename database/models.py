@@ -30,6 +30,19 @@ SCHEMA DESIGN:
                    │ is_filled                      │
                    └───────────────────────────────┘
 
+  ┌────────────────────┐
+  │   ingestion_log    │  ← one row per ticker per run; audit trail for failures
+  │────────────────────│
+  │ run_id  (UUID)     │
+  │ started_at (UTC)   │
+  │ ticker / name      │
+  │ status             │  'ok' | 'empty' | 'error'
+  │ rows_inserted      │
+  │ rows_skipped       │
+  │ error_msg          │
+  │ duration_ms        │
+  └────────────────────┘
+
   Database views (no storage cost — run on demand):
     v_futures_aligned  → aligned_prices WHERE instrument_type = 'futures'
     v_proxies_aligned  → aligned_prices WHERE instrument_type IN ('etf_proxy','equity_proxy')
@@ -47,7 +60,7 @@ from sqlalchemy import (
     Date, DateTime, UniqueConstraint, ForeignKey, Index
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class Base(DeclarativeBase):
@@ -113,7 +126,7 @@ class PriceHistory(Base):
     close        = Column(Float,   nullable=False)
     volume       = Column(BigInteger, default=0)
     interval     = Column(String(10), nullable=False, default="1d")  # "1d" or "1wk"
-    ingested_at  = Column(DateTime, default=datetime.utcnow)         # when WE pulled it
+    ingested_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # when WE pulled it (UTC)
 
     # Roll-adjusted prices (populated by pipeline/roll_adjust.py).
     # `close` always holds the raw price Yahoo Finance gave us.
@@ -187,3 +200,42 @@ class AlignedPrice(Base):
         UniqueConstraint("commodity_id", "date", name="uq_aligned_commodity_date"),
         Index("ix_aligned_commodity_date", "commodity_id", "date"),
     )
+
+
+class IngestionLog(Base):
+    """
+    One row per commodity per ingestion run.
+
+    Gives a full audit trail: which tickers succeeded, which returned empty,
+    and which raised exceptions — along with row counts and the error message.
+    Without this table, a yfinance failure for a ticker leaves no trace; the
+    ticker just silently disappears from new data until someone notices.
+
+    run_id ties all rows from a single run_ingestion() call together so you can
+    quickly see whether an entire run failed or just individual tickers.
+
+    status values:
+      'ok'    — rows were fetched and written (inserted > 0 or all duplicates)
+      'empty' — yfinance returned an empty DataFrame for this ticker
+      'error' — an exception was raised fetching or writing this ticker
+    """
+    __tablename__ = "ingestion_log"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    run_id        = Column(String(36), nullable=False)   # UUID4 shared across one run_ingestion() call
+    started_at    = Column(DateTime, nullable=False)     # UTC — when this ticker's fetch began
+    ticker        = Column(String(20),  nullable=False)
+    name          = Column(String(100), nullable=False)
+    status        = Column(String(20),  nullable=False)  # 'ok' | 'empty' | 'error'
+    rows_inserted = Column(Integer, default=0)
+    rows_skipped  = Column(Integer, default=0)
+    error_msg     = Column(String(500), nullable=True)
+    duration_ms   = Column(Integer, nullable=True)       # fetch + write time in milliseconds
+
+    __table_args__ = (
+        Index("ix_ingestion_log_run_id",    "run_id"),
+        Index("ix_ingestion_log_started_at", "started_at"),
+    )
+
+    def __repr__(self):
+        return f"<IngestionLog {self.ticker} {self.status} @ {self.started_at}>"

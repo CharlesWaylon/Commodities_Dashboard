@@ -8,7 +8,7 @@ filter by sector, and see both absolute and percentage changes at a glance.
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from services.price_data import fetch_current_prices
+from services.price_data import fetch_current_prices, COMMODITY_TICKERS, COMMODITY_IS_PROXY
 from utils.formatting import sector_emoji
 
 st.set_page_config(page_title="Pricing | Commodities", page_icon="💰", layout="wide")
@@ -29,6 +29,7 @@ with st.sidebar:
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
+    st.caption("Clears the 5-min cache and re-fetches from Yahoo Finance.")
 
 st.title("💰 Commodity Pricing")
 st.caption("Sorted, filtered pricing data for all tracked commodities")
@@ -39,6 +40,34 @@ with st.spinner("Loading prices..."):
 if df.empty:
     st.error("Could not load price data.")
     st.stop()
+
+# ── Data quality header ────────────────────────────────────────────────────────
+n_expected = len(COMMODITY_TICKERS)
+n_fetched  = len(df)
+n_missing  = n_expected - n_fetched
+n_proxies  = int(df["Is_Proxy"].sum()) if "Is_Proxy" in df.columns else 0
+
+if n_missing:
+    missing_names = [
+        name for name, ticker in COMMODITY_TICKERS.items()
+        if ticker not in df["Ticker"].values
+    ]
+    st.warning(
+        f"⚠️ **{n_missing} of {n_expected} instrument(s) are missing** from this table — "
+        "Yahoo Finance returned no data for them. They may be temporarily unavailable or "
+        "the ticker has changed. Missing: " + ", ".join(missing_names[:8])
+        + ("…" if len(missing_names) > 8 else "")
+        + ". Check the [Database page](/Database) ingestion log."
+    )
+
+if n_proxies:
+    st.info(
+        f"ℹ️ **{n_proxies} of {n_fetched} instruments are ETF or equity proxies** (marked *). "
+        "These track a related fund or stock rather than a direct futures price. "
+        "Proxy prices settle at NYSE close (~4 pm ET / 21:00 UTC) — up to **2.5 hours later** "
+        "than NYMEX futures (~1:30 pm ET / 18:30 UTC). Prices shown for proxies and futures "
+        "within the same page load may be from different points in the trading session."
+    )
 
 # ── Filters ────────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns([2, 2, 2])
@@ -91,18 +120,26 @@ def highlight_change(val):
         pass
     return ""
 
-display = filtered[["Name", "Sector", "Price", "Unit", "Change", "Pct_Change"]].copy()
+display = filtered[["Name", "Sector", "Price", "Unit", "Change", "Pct_Change", "Is_Proxy"]].copy()
 
 # Format numbers for display
 display["Price"]      = display.apply(lambda r: f"{r['Price']:,.4f}", axis=1)
 display["Change"]     = display["Change"].apply(lambda x: f"{x:+.4f}")
 display["Pct_Change"] = display["Pct_Change"].apply(lambda x: f"{x:+.2f}%")
 display["Sector"]     = display["Sector"].apply(lambda s: f"{sector_emoji(s)} {s}")
+display["Type"]       = display["Is_Proxy"].apply(lambda p: "Proxy *" if p else "Futures")
+display = display.drop(columns=["Is_Proxy"])
 
-display.columns = ["Commodity", "Sector", "Price", "Unit", "Change", "% Change"]
+display.columns = ["Commodity", "Sector", "Price", "Unit", "Change", "% Change", "Type"]
 
 styled = display.style.applymap(highlight_change, subset=["% Change"])
 st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+
+st.caption(
+    "**Type** column: *Futures* = direct exchange-traded contract price. "
+    "*Proxy* = ETF or equity tracking a related asset — carries equity-market beta "
+    "and settles on NYSE time, not the commodity exchange close."
+)
 
 st.divider()
 

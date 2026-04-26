@@ -9,12 +9,14 @@ This page documents the roadmap and provides a working demo of
 a basic statistical model you can run right now on live data.
 """
 
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from services.price_data import COMMODITY_TICKERS, fetch_historical
+from services.price_data import COMMODITY_TICKERS, COMMODITY_IS_PROXY, fetch_historical
+from models.config import MODELING_COMMODITIES
 
 st.set_page_config(page_title="Models | Commodities", page_icon="🤖", layout="wide")
 
@@ -30,6 +32,46 @@ with st.sidebar:
 - 📰 [News](/News)
 - 🤖 **Models** ← you are here
     """)
+    st.divider()
+
+    # ── Signal / data-source coverage ─────────────────────────────────────────
+    st.markdown("**📡 Active Data Sources**")
+
+    # Price data — always active if we got this far
+    st.caption("🟢 Yahoo Finance (yfinance) — prices")
+
+    # Database pipeline
+    _db_active = False
+    try:
+        from database.db import db_info as _db_info
+        _dbstats = _db_info()
+        _db_active = _dbstats.get("price_rows", 0) > 0
+    except Exception:
+        pass
+    st.caption(
+        ("🟢 Database pipeline — " + f"{_dbstats['price_rows']:,} rows stored")
+        if _db_active
+        else "🔴 Database pipeline — not populated (run pipeline/ingest.py)"
+    )
+
+    # Optional enrichment keys
+    _news_key     = bool(os.getenv("NEWS_API_KEY"))
+    _alphavantage = bool(os.getenv("ALPHA_VANTAGE_KEY"))
+    st.caption(
+        "🟢 NewsAPI key — configured" if _news_key
+        else "🔴 NewsAPI key — not set (RSS-only news)"
+    )
+    st.caption(
+        "🟢 Alpha Vantage key — configured" if _alphavantage
+        else "🔴 Alpha Vantage — not set (yfinance-only prices)"
+    )
+
+    st.divider()
+    st.markdown("**⚗️ Model status**")
+    st.caption("🟢 Statistical analysis — live (this page)")
+    st.caption("🟡 Walk-forward CV — implemented (CLI only)")
+    st.caption("🔴 ARIMA / Prophet / XGBoost — Phase 3 roadmap")
+    st.caption("⚠️ Quantum hybrid — classical simulator only (PennyLane `default.qubit`)")
     st.divider()
 
 st.title("🤖 Analytics & Models")
@@ -94,6 +136,13 @@ with dcol2:
 
 ticker = COMMODITY_TICKERS[commodity]
 
+if COMMODITY_IS_PROXY.get(commodity, False):
+    st.warning(
+        f"⚠️ **{commodity}** is an ETF/equity proxy, not a direct futures price. "
+        "Statistics here reflect the proxy instrument's equity-market behaviour and may "
+        "include stock-market beta unrelated to the underlying commodity."
+    )
+
 with st.spinner(f"Loading {commodity} data..."):
     df = fetch_historical(ticker, period=period)
 
@@ -103,6 +152,15 @@ if df.empty or "Close" not in df.columns:
 
 close   = df["Close"].dropna()
 returns = close.pct_change().dropna()
+
+# Surface gaps: if rows with NaN close exist, forward-fill silently drops them
+n_raw  = len(df)
+n_used = len(close)
+if n_used < n_raw * 0.95:
+    st.warning(
+        f"⚠️ {n_raw - n_used} of {n_raw} rows were dropped (missing close prices). "
+        "Statistics below reflect the remaining {n_used} trading days only."
+    )
 
 # ── Key Stats ──────────────────────────────────────────────────────────────────
 st.markdown("#### Descriptive Statistics")
@@ -189,7 +247,8 @@ st.caption("How correlated are commodity returns? High correlation = they move t
 corr_commodities = st.multiselect(
     "Select commodities",
     list(COMMODITY_TICKERS.keys()),
-    default=["Gold", "WTI Crude Oil", "Silver", "Copper", "Wheat", "Natural Gas"],
+    default=list(MODELING_COMMODITIES.keys()),
+    help="Defaults to direct futures only. ETF/equity proxies (marked *) carry equity-market beta.",
 )
 
 if len(corr_commodities) >= 2:
@@ -220,21 +279,46 @@ if len(corr_commodities) >= 2:
 else:
     st.info("Select at least 2 commodities to compute correlations.")
 
-# ── Phase 2 Teaser ─────────────────────────────────────────────────────────────
+# ── Model inventory ────────────────────────────────────────────────────────────
 st.divider()
-st.subheader("🔜 Coming in Phase 2")
+st.subheader("📋 Model Inventory")
+st.caption(
+    "What exists in the codebase today vs what is planned. "
+    "Run `python -m models.run_experiment` to execute the implemented models from the CLI."
+)
+
 st.markdown("""
-The models tab will grow alongside the data pipeline. Here's what's planned:
-
-| Model | Purpose | Library |
-|---|---|---|
-| **ARIMA** | Short-term price forecasting | `statsmodels` |
-| **Prophet** | Trend + seasonality decomposition | `prophet` |
-| **Rolling Z-Score** | Mean reversion signals | `pandas` |
-| **Hidden Markov Model** | Market regime detection (bull/bear) | `hmmlearn` |
-| **LSTM Neural Net** | Deep learning price prediction | `pytorch` |
-| **XGBoost** | Feature-based price direction | `xgboost` |
-
-All models will be trained on data stored in the Phase 2 PostgreSQL database.
-Results will populate this page automatically once the pipeline is live.
+| Model | Status | Limitation / Note | Run via |
+|---|---|---|---|
+| Persistence (lag-1 return) | ✅ Implemented | Naive baseline only | `models/run_experiment.py` |
+| Rolling Mean (5-day) | ✅ Implemented | Naive baseline only | `models/run_experiment.py` |
+| **Quantum Hybrid Regressor** | ⚠️ Prototype | **Classical simulator** — uses PennyLane `default.qubit`, not real quantum hardware. O(n²) runtime; limited to ~50 training samples. Not a production model. | `models/run_experiment.py` |
+| Walk-forward CV | ✅ Implemented | 5-fold anchored CV added to `models/data_loader.py`; not yet wired into the UI | `models/data_loader.py` |
+| Rolling Z-Score | 🔜 Phase 3 | Planned mean-reversion signal | — |
+| ARIMA | 🔜 Phase 3 | Grid search parameters TBD; requires ≥50 observations per series | — |
+| Prophet | 🔜 Phase 3 | Trend + seasonality decomposition | — |
+| Hidden Markov Model | 🔜 Phase 3 | Market regime detection (bull/bear) | — |
+| LSTM Neural Net | 🔜 Phase 3 | Requires Phase 2 database for sufficient training data | — |
+| XGBoost | 🔜 Phase 3 | Feature-based price direction classification | — |
 """)
+
+with st.expander("⚠️ Known data pipeline caveats"):
+    st.markdown("""
+**Forward-fill limit (3 bars):** `models/data_loader.py` forward-fills missing price bars up
+to a limit of 3 days before dropping the row entirely. Any commodity with a data gap wider than
+3 consecutive trading days will have those rows silently removed from the feature matrix.
+This can cause the training set to shrink unexpectedly for thinly-traded instruments
+(e.g., Rough Rice, Oats). No warning is currently raised — check row counts in experiment output.
+
+**Quantum model scope:** The quantum hybrid regressor in `models/quantum/` runs on PennyLane's
+`default.qubit` classical simulator. It has **not** been connected to IBM Quantum, AWS Braket,
+or any other real quantum backend. Runtime is O(n²) in the number of training samples — the
+default cap of 50 training samples exists to keep it tractable on a laptop. Treat as a
+research prototype, not a production forecasting tool.
+
+**Single train-test split (legacy):** The original 80/20 chronological split in
+`models/run_experiment.py` tests only one market regime. Walk-forward cross-validation
+(`models/data_loader.walk_forward_splits`) was added to address this but is not yet
+integrated into the experiment runner — Spearman IC scores from the current CLI output
+are optimistic.
+    """)

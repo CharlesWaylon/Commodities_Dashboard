@@ -24,14 +24,16 @@ RUN MANUALLY:
 
 import argparse
 import logging
-from datetime import date, timedelta
+import time
+import uuid
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import yfinance as yf
 from sqlalchemy.exc import IntegrityError
 
 from database.db import init_db, get_db
-from database.models import Commodity, PriceHistory
+from database.models import Commodity, PriceHistory, IngestionLog
 from services.price_data import COMMODITY_TICKERS, COMMODITY_SECTORS, COMMODITY_UNITS
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
@@ -78,12 +80,15 @@ def seed_commodities(db) -> dict[str, int]:
 
 
 # ── Step 2 & 3: Fetch + Upsert ─────────────────────────────────────────────────
-def ingest_commodity(db, commodity_id: int, ticker: str, name: str, backfill: bool) -> tuple[int, int]:
+def ingest_commodity(
+    db, commodity_id: int, ticker: str, name: str, backfill: bool
+) -> tuple[int, int, str, str | None]:
     """
     Download OHLCV data for one commodity and write new rows to the DB.
-    Returns (inserted_count, skipped_count).
+    Returns (inserted_count, skipped_count, status, error_msg).
+      status: 'ok' | 'empty' | 'error'
+      error_msg: exception text if status == 'error', else None
     """
-    # Choose period: 5 years on backfill, 5 days on incremental
     period   = FULL_BACKFILL_PERIOD if backfill else INCREMENTAL_PERIOD
     interval = "1d"
 
@@ -93,13 +98,12 @@ def ingest_commodity(db, commodity_id: int, ticker: str, name: str, backfill: bo
                           progress=False, auto_adjust=True)
     except Exception as e:
         log.warning(f"  yfinance error for {ticker}: {e}")
-        return 0, 0
+        return 0, 0, "error", str(e)[:500]
 
     if raw.empty:
         log.warning(f"  No data returned for {ticker}")
-        return 0, 0
+        return 0, 0, "empty", None
 
-    # Flatten MultiIndex columns if yfinance returns them (happens for single tickers too)
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
 
@@ -107,12 +111,11 @@ def ingest_commodity(db, commodity_id: int, ticker: str, name: str, backfill: bo
     skipped  = 0
 
     for row_date, row in raw.iterrows():
-        # row_date is a pandas Timestamp — convert to Python date for SQLAlchemy
         price_date = row_date.date() if hasattr(row_date, "date") else row_date
 
         close_val = row.get("Close")
         if pd.isna(close_val):
-            continue  # Skip rows with no closing price
+            continue
 
         price_row = PriceHistory(
             commodity_id = commodity_id,
@@ -126,35 +129,35 @@ def ingest_commodity(db, commodity_id: int, ticker: str, name: str, backfill: bo
         )
 
         try:
-            # begin_nested() creates a SAVEPOINT — a mini-transaction inside the main one.
-            # If this INSERT fails (duplicate row), only this savepoint is rolled back.
-            # Without this, db.rollback() would wipe ALL inserts made so far in the session.
+            # begin_nested() creates a SAVEPOINT so a duplicate row only rolls
+            # back this single insert, not the entire session.
             with db.begin_nested():
                 db.add(price_row)
             inserted += 1
         except IntegrityError:
-            # Duplicate row — savepoint automatically rolled back, session stays clean.
             skipped += 1
 
-    return inserted, skipped
+    return inserted, skipped, "ok", None
 
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 def run_ingestion(backfill: bool = False):
     """
     Full ingestion run: seed → fetch → upsert all commodities.
+    Writes one IngestionLog row per commodity so every failure is traceable.
     Called by the scheduler and by the CLI entry point below.
     """
     log.info("=" * 60)
     log.info(f"Ingestion started  (backfill={backfill})")
     log.info("=" * 60)
 
-    # init_db() creates tables if they don't exist yet — safe to call every time.
     init_db()
     log.info("Database tables verified.")
 
+    run_id         = str(uuid.uuid4())
     total_inserted = 0
     total_skipped  = 0
+    log_rows       = []
 
     with get_db() as db:
         log.info("Seeding commodities reference table...")
@@ -166,10 +169,35 @@ def run_ingestion(backfill: bool = False):
             if commodity_id is None:
                 continue
 
-            ins, skip = ingest_commodity(db, commodity_id, ticker, name, backfill)
+            t0 = time.monotonic()
+            ins, skip, status, error_msg = ingest_commodity(
+                db, commodity_id, ticker, name, backfill
+            )
+            duration_ms = int((time.monotonic() - t0) * 1000)
+
             total_inserted += ins
             total_skipped  += skip
-            log.info(f"  {name:25s}  inserted={ins:4d}  skipped={skip:4d}")
+            log.info(
+                f"  {name:25s}  status={status:<5}  "
+                f"inserted={ins:4d}  skipped={skip:4d}"
+                + (f"  ERROR: {error_msg}" if error_msg else "")
+            )
+
+            log_rows.append(IngestionLog(
+                run_id        = run_id,
+                started_at    = datetime.now(timezone.utc),
+                ticker        = ticker,
+                name          = name,
+                status        = status,
+                rows_inserted = ins,
+                rows_skipped  = skip,
+                error_msg     = error_msg,
+                duration_ms   = duration_ms,
+            ))
+
+        # Write all log rows in the same session so they commit atomically
+        # with the price data.
+        db.add_all(log_rows)
 
     log.info("=" * 60)
     log.info(f"Ingestion complete.  Inserted={total_inserted}  Skipped={total_skipped}")

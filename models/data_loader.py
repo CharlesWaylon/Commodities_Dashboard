@@ -125,3 +125,63 @@ def train_test_split_by_date(
     """
     split_idx = int(len(df) * (1 - test_fraction))
     return df.iloc[:split_idx], df.iloc[split_idx:]
+
+
+def walk_forward_splits(
+    df: pd.DataFrame,
+    n_splits: int = 5,
+    test_fraction: float = 0.20,
+) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    """
+    Anchored walk-forward cross-validation for time-series data.
+
+    Each fold expands the training window (anchored at the first observation)
+    and tests on the next non-overlapping window. This produces honest
+    out-of-sample performance estimates across multiple market regimes —
+    unlike a single 80/20 split, which tests only one contiguous period.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Date-indexed DataFrame (rows = trading days).
+    n_splits : int
+        Number of folds. Each test window covers
+        ``len(df) * test_fraction / n_splits`` days.
+    test_fraction : float
+        Total fraction of the dataset used for testing across all folds.
+
+    Returns
+    -------
+    list of (train_df, test_df) tuples
+        Each pair has an expanding train window and a sliding test window.
+        Folds are ordered chronologically; later folds have more training data.
+
+    Example
+    -------
+    With 500 rows, n_splits=5, test_fraction=0.20:
+      Fold 0: train=rows 0–399,  test=rows 400–419
+      Fold 1: train=rows 0–419,  test=rows 420–439
+      Fold 2: train=rows 0–439,  test=rows 440–459
+      Fold 3: train=rows 0–459,  test=rows 460–479
+      Fold 4: train=rows 0–479,  test=rows 480–499
+    """
+    n = len(df)
+    total_test_rows = int(n * test_fraction)
+    fold_size = total_test_rows // n_splits
+    first_test_start = n - total_test_rows
+
+    if fold_size < 1:
+        raise ValueError(
+            f"fold_size={fold_size}: not enough rows ({n}) for {n_splits} folds "
+            f"with test_fraction={test_fraction}. Reduce n_splits or gather more data."
+        )
+
+    splits = []
+    for i in range(n_splits):
+        test_start = first_test_start + i * fold_size
+        test_end = test_start + fold_size
+        if test_end > n:
+            break
+        splits.append((df.iloc[:test_start], df.iloc[test_start:test_end]))
+
+    return splits
