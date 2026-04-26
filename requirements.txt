@@ -1,7 +1,7 @@
 streamlit>=1.32.0
 plotly>=5.22.0
 pandas>=2.2.0
-numpy>=1.26.0
+numpy>=1.26.0,<2.0
 yfinance>=0.2.38
 feedparser>=6.0.11
 requests>=2.32.0
@@ -9,3 +9,22 @@ python-dotenv>=0.21.0
 sqlalchemy>=2.0.0
 apscheduler>=3.10.0
 psycopg2-binary>=2.9.0
+# Statistical models (Tier 1)
+scipy>=1.14.0
+statsmodels>=0.14.0
+arch>=6.3.0
+scikit-learn>=1.5.0
+# ML models (Tier 2)
+hmmlearn>=0.3.0
+xgboost>=2.0.0
+shap>=0.45.0,<0.47.0
+# Deep learning models (Tier 3)
+torch>=2.0.0
+prophet>=1.1.5
+pytorch-forecasting>=1.0.0
+lightning>=2.0.0
+# Quantum models (Tier 4)
+pennylane>=0.38.0
+pennylane-qiskit>=0.38.0
+# Forward-looking feature engineering
+transformers>=4.40.0
