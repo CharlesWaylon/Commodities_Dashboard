@@ -10,7 +10,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from services.price_data import COMMODITY_TICKERS, COMMODITY_UNITS, fetch_historical
+from services.price_data import COMMODITY_TICKERS, COMMODITY_UNITS, COMMODITY_IS_PROXY, fetch_historical
+from models.config import MODELING_COMMODITIES
 
 st.set_page_config(page_title="Charts | Commodities", page_icon="📊", layout="wide")
 
@@ -64,8 +65,9 @@ with col3:
 with col4:
     show_sma = st.multiselect("Moving Averages", [20, 50, 200], default=[20, 50])
 
-ticker = COMMODITY_TICKERS[commodity]
-unit   = COMMODITY_UNITS.get(commodity, "USD")
+ticker    = COMMODITY_TICKERS[commodity]
+unit      = COMMODITY_UNITS.get(commodity, "USD")
+is_proxy  = COMMODITY_IS_PROXY.get(commodity, False)
 
 # ── Fetch Data ─────────────────────────────────────────────────────────────────
 with st.spinner(f"Loading {commodity} history..."):
@@ -76,6 +78,15 @@ with st.spinner(f"Loading {commodity} history..."):
 if df.empty:
     st.warning("No historical data available for this commodity.")
     st.stop()
+
+if is_proxy:
+    st.info(
+        f"ℹ️ **{commodity}** is an ETF or equity proxy, not a direct futures contract. "
+        "The chart shows the proxy instrument's price history, which includes equity-market "
+        "beta and tracks NYSE trading hours. Proxy prices settle ~2.5 h later than NYMEX "
+        "futures in the same session — the most recent bar may reflect an earlier intraday "
+        "snapshot than direct futures on the same chart."
+    )
 
 # Ensure we have OHLCV columns
 required = ["Open", "High", "Low", "Close"]
@@ -194,7 +205,9 @@ st.caption("Normalized to 100 at start of period — compare relative performanc
 compare_names = st.multiselect(
     "Select commodities to compare",
     list(COMMODITY_TICKERS.keys()),
-    default=["Gold", "WTI Crude Oil", "Wheat"],
+    default=list(MODELING_COMMODITIES.keys())[:3],  # first 3 clean futures from config
+    help="Defaults to direct futures only. Mixing proxy and futures instruments in the same "
+         "normalized chart can be misleading — proxies carry equity-market beta.",
 )
 
 if compare_names:
