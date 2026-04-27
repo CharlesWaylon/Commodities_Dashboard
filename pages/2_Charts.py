@@ -170,7 +170,7 @@ fig.update_layout(
 fig.update_xaxes(gridcolor="#2C3347", zeroline=False)
 fig.update_yaxes(gridcolor="#2C3347", zeroline=False)
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
 
 # ── Stats Row ──────────────────────────────────────────────────────────────────
 st.divider()
@@ -194,7 +194,7 @@ st.caption("Normalized to 100 at start of period — compare relative performanc
 compare_names = st.multiselect(
     "Select commodities to compare",
     list(COMMODITY_TICKERS.keys()),
-    default=["Gold", "WTI Crude Oil", "Wheat"],
+    default=["Gold (COMEX)", "WTI Crude Oil", "Wheat (CBOT SRW)"],
 )
 
 if compare_names:
@@ -227,4 +227,4 @@ if compare_names:
     )
     comp_fig.update_xaxes(gridcolor="#2C3347")
     comp_fig.update_yaxes(gridcolor="#2C3347")
-    st.plotly_chart(comp_fig, use_container_width=True)
+    st.plotly_chart(comp_fig, width='stretch')
