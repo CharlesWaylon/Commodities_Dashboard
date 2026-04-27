@@ -9,3 +9,21 @@ python-dotenv>=0.21.0
 sqlalchemy>=2.0.0
 apscheduler>=3.10.0
 psycopg2-binary>=2.9.0
+# Statistical models (Tier 1)
+statsmodels>=0.14.0
+arch>=6.3.0
+scikit-learn>=1.4.0
+# ML models (Tier 2)
+hmmlearn>=0.3.0
+xgboost>=2.0.0
+shap>=0.45.0
+# Deep learning models (Tier 3)
+torch>=2.0.0
+prophet>=1.1.5
+pytorch-forecasting>=1.0.0
+lightning>=2.0.0
+# Quantum models (Tier 4)
+pennylane>=0.38.0
+pennylane-qiskit>=0.38.0
+# Forward-looking feature engineering
+transformers>=4.40.0

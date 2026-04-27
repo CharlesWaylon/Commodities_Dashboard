@@ -1,0 +1,19 @@
+# ── Streamlit Cloud Requirements ──────────────────────────────────────────────
+# This file is used for Streamlit Community Cloud deployment.
+# Heavy ML/quantum packages (torch, pennylane, etc.) are excluded because
+# they exceed the free tier's 1 GB memory limit.
+# The Models and Database pages gracefully degrade in the cloud environment.
+
+streamlit>=1.32.0
+plotly>=5.22.0
+pandas>=2.2.0
+numpy>=1.26.0
+yfinance>=0.2.38
+feedparser>=6.0.11
+requests>=2.32.0
+python-dotenv>=0.21.0
+sqlalchemy>=2.0.0
+
+# Statistical models (lightweight — kept for cloud)
+statsmodels>=0.14.0
+scikit-learn>=1.4.0
