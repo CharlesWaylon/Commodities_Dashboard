@@ -176,8 +176,18 @@ def run_alignment():
             PriceHistory.adjusted_close.isnot(None),
         ).all()
 
-    commodities = {r.id: (r.name, r.ticker) for r in commodity_rows}
-    futures_ids = {r.id for r in commodity_rows if r.ticker.endswith("=F")}
+    commodities  = {r.id: (r.name, r.ticker) for r in commodity_rows}
+    futures_ids  = {r.id for r in commodity_rows if r.ticker.endswith("=F")}
+    # instrument_type may be NULL before pipeline/layer.py has run; fall back to
+    # ticker-based classification so the fill-rate thresholds still work.
+    inst_types   = {}
+    for r in commodity_rows:
+        if r.ticker.endswith("=F"):
+            inst_types[r.id] = "futures"
+        elif r.ticker == "BTC-USD":
+            inst_types[r.id] = "crypto"
+        else:
+            inst_types[r.id] = "proxy"  # ETF or equity proxy
 
     df = pd.DataFrame(price_rows, columns=["commodity_id", "date", "adjusted_close"])
     df["date"] = pd.to_datetime(df["date"])
@@ -247,25 +257,50 @@ def run_alignment():
     print(f"  {'Rows forward-filled (synthetic):':<40} {n_filled:,}  ({pct_filled:.1f}%)")
 
     # ── Per-instrument fill rate ───────────────────────────────────────────────
+    #
+    # Expected fill rates by instrument type:
+    #   futures  — 0–5%  : gaps only from instrument-specific exchange holidays
+    #   proxy    — 2–10% : NYSE has ~6 extra holidays vs NYMEX per year
+    #              (MLK Day, Presidents Day, Juneteenth, Labor Day,
+    #               Columbus Day, Veterans Day) → fills are EXPECTED, not gaps
+    #   crypto   — 0%    : Bitcoin trades every day; no fills expected on US calendar
+    #
+    # All timestamps stored as UTC. Equity/ETF proxy final prices settle at
+    # NYSE close (21:00 UTC / 4 pm ET) — 2.5 h after NYMEX futures (18:30 UTC).
+    # A scheduler run at 18:05 UTC captures futures settlement but NOT proxy
+    # closes; those only appear in the *following* day's incremental pull.
+    # This means proxy rows ingested same-day as futures are priced 2.5 h earlier
+    # in the session and the true forward-fill gap for proxies is understated by
+    # one partial trading session.
+
+    _WARN_PCT = {"futures": 5.0, "proxy": 10.0, "crypto": 2.0}
+
     print(f"\n  FILL RATE BY INSTRUMENT  (sorted by % filled — highest = most gaps)")
-    print(f"  {'Instrument':<35} {'Ticker':<10} {'Rows':>6}  {'Filled':>7}  {'Fill%':>6}")
-    print("  " + "-" * 70)
+    print(f"  {'Instrument':<35} {'Ticker':<10} {'Type':<8} {'Rows':>6}  {'Filled':>7}  {'Fill%':>6}")
+    print("  " + "-" * 80)
 
     for comm_id, group in combined.groupby("commodity_id"):
         name, ticker = commodities[comm_id]
+        itype    = inst_types.get(comm_id, "futures")
         n_rows   = len(group)
         n_fill   = int(group["is_filled"].sum())
         pct_fill = n_fill / n_rows * 100
-        flag     = " ⚠" if pct_fill > 15 else "  "
+        warn_pct = _WARN_PCT.get(itype, 5.0)
+        flag     = " ⚠" if pct_fill > warn_pct else "  "
         print(
-            f"  {name:<35} {ticker:<10} {n_rows:>6}  {n_fill:>7}  {pct_fill:>5.1f}%{flag}"
+            f"  {name:<35} {ticker:<10} {itype:<8} {n_rows:>6}  {n_fill:>7}  {pct_fill:>5.1f}%{flag}"
         )
 
     print()
     print("  WHAT THIS MEANS:")
-    print("  Fill% > 0%   → normal. The instrument doesn't trade every day in the calendar.")
-    print("  Fill% ≈ 28%  → expected for futures vs Bitcoin 7-day calendar.")
-    print("  Fill% ⚠ >15% → investigate; may indicate data gaps beyond normal holidays.")
+    print("  futures  Fill% > 5%   → investigate; real data gap beyond exchange holidays.")
+    print("  proxy    Fill% > 10%  → investigate; NYSE-vs-NYMEX calendar diff accounts for ~2–8%.")
+    print("  crypto   Fill% > 2%   → investigate; Bitcoin trades 24/7 so fills are unexpected.")
+    print()
+    print("  TIMEZONE NOTE:")
+    print("  All ingested_at timestamps are UTC. NYMEX futures settle ~18:30 UTC;")
+    print("  NYSE equity/ETF proxies settle ~21:00 UTC. A scheduler run at 18:05 UTC")
+    print("  captures futures closes but proxy closes only appear in the next run.")
     print()
     print("  USE aligned_prices FOR:")
     print("  • Correlation matrices    • Cross-asset model training")

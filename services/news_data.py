@@ -41,6 +41,7 @@ def fetch_news(max_per_feed: int = 10, filter_keywords: bool = True) -> pd.DataF
     Returns DataFrame: title, summary, link, published, source.
     """
     articles = []
+    failed_feeds = []
 
     for source, url in RSS_FEEDS.items():
         try:
@@ -71,11 +72,21 @@ def fetch_news(max_per_feed: int = 10, filter_keywords: bool = True) -> pd.DataF
                     "source":    source,
                 })
         except Exception:
-            # Silently skip feeds that are temporarily unavailable
+            failed_feeds.append(source)
             continue
 
     if not articles:
+        st.warning(
+            "⚠️ All news feeds are currently unavailable — showing **sample articles**, "
+            "not current market news. Check your network connection."
+        )
         return _mock_news()
+
+    if failed_feeds:
+        st.info(
+            f"ℹ️ {len(failed_feeds)} of {len(RSS_FEEDS)} feed(s) were unreachable and skipped: "
+            + ", ".join(failed_feeds)
+        )
 
     df = pd.DataFrame(articles)
     df = df.drop_duplicates(subset="title")
