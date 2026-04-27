@@ -195,7 +195,7 @@ with tab1:
             ))
             dark_layout(fig_arima, height=400,
                         title=f"{stat_commodity} — ARIMA{arima_result['order']} {stat_horizon}d Forecast")
-            st.plotly_chart(fig_arima, use_container_width=True)
+            st.plotly_chart(fig_arima, width='stretch')
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Model Order", str(arima_result["order"]))
@@ -242,7 +242,7 @@ with tab1:
                 ))
             dark_layout(fig_garch, height=380,
                         title=f"{stat_commodity} — {garch.model} Conditional Volatility (Annualised %)")
-            st.plotly_chart(fig_garch, use_container_width=True)
+            st.plotly_chart(fig_garch, width='stretch')
 
             g1, g2, g3, g4 = st.columns(4)
             g1.metric("Model", garch.model)
@@ -252,7 +252,7 @@ with tab1:
                       help="GJR-GARCH asymmetry: negative γ = bad news raises vol more than good news")
 
             with st.expander("Model Parameters"):
-                st.dataframe(params.style.format("{:.6f}"), use_container_width=True)
+                st.dataframe(params.style.format("{:.6f}"), width='stretch')
         except Exception as e:
             st.warning(f"GARCH failed: {e}")
 
@@ -279,7 +279,7 @@ with tab1:
                 kf.fit(prices[y_name], prices[x_name])
                 beta   = kf._beta
                 zscore = kf.spread_zscore()
-                info   = kf.summary()
+                info   = kf.hedge_info()
 
                 fig_kf = make_subplots(rows=2, cols=1, shared_xaxes=True,
                     row_heights=[0.55, 0.45], vertical_spacing=0.06,
@@ -297,7 +297,7 @@ with tab1:
                 fig_kf.add_hline(y=-2.0, line_dash="dot", line_color=GREEN,  opacity=0.6, row=2, col=1)
                 fig_kf.add_hline(y=0.0,  line_dash="dash", line_color="#888", opacity=0.4, row=2, col=1)
                 dark_layout(fig_kf, height=460, title=f"Kalman Filter — {pair_name}")
-                st.plotly_chart(fig_kf, use_container_width=True)
+                st.plotly_chart(fig_kf, width='stretch')
 
                 k1, k2, k3, k4 = st.columns(4)
                 z_now = float(zscore.dropna().iloc[-1])
@@ -305,7 +305,7 @@ with tab1:
                 k2.metric("Spread Z-Score", f"{z_now:.2f}")
                 signal = "Short spread" if z_now > 2 else ("Long spread" if z_now < -2 else "Neutral")
                 k3.metric("Signal", signal)
-                k4.metric("β Range", f"{float(beta.min()):.2f} – {float(beta.max()):.2f}")
+                k4.metric("β Range", f"{info['beta_min']:.2f} – {info['beta_max']:.2f}")
             except Exception as e:
                 st.warning(f"Kalman failed: {e}")
     else:
@@ -345,7 +345,7 @@ with tab1:
                 margin=dict(t=50, l=60, r=20, b=40),
                 coloraxis_colorbar=dict(title="p-value"),
             )
-            st.plotly_chart(fig_gc, use_container_width=True)
+            st.plotly_chart(fig_gc, width='stretch')
 
             v1, v2 = st.columns(2)
             v1.metric("VAR Lag Order", var._lag_order)
@@ -412,7 +412,7 @@ with tab2:
                 ))
             dark_layout(fig_hmm, height=380,
                         title=f"{hmm_commodity} Price — Colour-coded by HMM Regime")
-            st.plotly_chart(fig_hmm, use_container_width=True)
+            st.plotly_chart(fig_hmm, width='stretch')
 
             # State probabilities heatmap (last 126 days)
             prob_tail = probs.tail(126)
@@ -428,7 +428,7 @@ with tab2:
                 font_color="#FAFAFA", height=250,
                 margin=dict(t=40, l=80, r=20, b=40),
             )
-            st.plotly_chart(fig_prob, use_container_width=True)
+            st.plotly_chart(fig_prob, width='stretch')
 
             cols = st.columns(len(counts))
             for col_widget, (regime, cnt) in zip(cols, counts.items()):
@@ -470,7 +470,7 @@ with tab2:
                 ))
                 dark_layout(fig_shap, height=380, title="Global SHAP Feature Importance (Top 15)")
                 fig_shap.update_layout(yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_shap, use_container_width=True)
+                st.plotly_chart(fig_shap, width='stretch')
 
             with x2:
                 # Waterfall for latest observation
@@ -487,7 +487,7 @@ with tab2:
                             title=f"SHAP Waterfall — {waterfall['date']}")
                 fig_wf.update_layout(yaxis=dict(autorange="reversed"))
                 fig_wf.add_vline(x=0, line_color="#888", line_width=1)
-                st.plotly_chart(fig_wf, use_container_width=True)
+                st.plotly_chart(fig_wf, width='stretch')
 
             xc1, xc2, xc3 = st.columns(3)
             xc1.metric("Spearman IC", f"{xgb_ic:.4f}",
@@ -519,7 +519,7 @@ with tab2:
             ))
             dark_layout(fig_rf, height=400, title=f"RF Gini Importance — {ml_commodity} (Top 20)")
             fig_rf.update_layout(yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_rf, use_container_width=True)
+            st.plotly_chart(fig_rf, width='stretch')
 
             r1, r2, r3 = st.columns(3)
             r1.metric("Spearman IC", f"{rf_ic:.4f}",
@@ -557,7 +557,7 @@ with tab2:
             dark_layout(fig_en, height=400, title=f"Elastic Net Coefficients — {ml_commodity}")
             fig_en.update_layout(yaxis=dict(autorange="reversed"))
             fig_en.add_vline(x=0, line_color="#888", line_width=1)
-            st.plotly_chart(fig_en, use_container_width=True)
+            st.plotly_chart(fig_en, width='stretch')
 
             e1, e2, e3, e4 = st.columns(4)
             e1.metric("Spearman IC", f"{en_ic:.4f}")
@@ -617,7 +617,7 @@ with tab3:
         fig_macro.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.5, row=3, col=1)
 
         dark_layout(fig_macro, height=520, title="Macro Regime Dashboard")
-        st.plotly_chart(fig_macro, use_container_width=True)
+        st.plotly_chart(fig_macro, width='stretch')
 
         vix_now = float(macro_df["vix"].dropna().iloc[-1])
         dxy_z   = float(macro_df["dxy_zscore63"].dropna().iloc[-1])
@@ -665,7 +665,7 @@ with tab3:
         fig_mei.add_hline(y=0.5,  line_dash="dot", line_color=RED,  opacity=0.7)
         fig_mei.add_hline(y=-0.5, line_dash="dot", line_color=BLUE, opacity=0.7)
         dark_layout(fig_mei, height=320, title="MEI v2 — El Niño (red) / La Niña (blue)")
-        st.plotly_chart(fig_mei, use_container_width=True)
+        st.plotly_chart(fig_mei, width='stretch')
 
         enso_now = float(mei_df["mei"].dropna().iloc[-1])
         phase    = "🔴 El Niño" if enso_now >= 0.5 else ("🔵 La Niña" if enso_now <= -0.5 else "⚪ Neutral")
@@ -719,7 +719,7 @@ with tab3:
                 ), row=i, col=1)
                 fig_et.add_hline(y=0, line_dash="dash", line_color="#555", opacity=0.6, row=i, col=1)
             dark_layout(fig_et, height=100 + 170 * len(et_cols), title="Energy Transition Signals")
-            st.plotly_chart(fig_et, use_container_width=True)
+            st.plotly_chart(fig_et, width='stretch')
 
             et_cols_metrics = st.columns(len(et_cols))
             for col_w, col_name in zip(et_cols_metrics, et_cols):
@@ -753,7 +753,7 @@ with tab4:
                 from models.deep.prophet_decomp import ProphetDecomposer
                 pd_model = ProphetDecomposer(commodity=dl_commodity)
                 pd_model.fit(prices)
-                forecast_df = pd_model.forecast(periods=90)
+                future_df, forecast_df = pd_model.forecast(periods=90)
                 ss = pd_model.seasonal_strength()
                 cp_summary = pd_model.changepoint_summary()
                 tr = pd_model.trend_regime()
@@ -777,19 +777,19 @@ with tab4:
                 ))
                 dark_layout(fig_pr, height=420,
                             title=f"{dl_commodity} — Prophet 90-Day Forecast")
-                st.plotly_chart(fig_pr, use_container_width=True)
+                st.plotly_chart(fig_pr, width='stretch')
 
                 p1, p2, p3 = st.columns(3)
-                p1.metric("Yearly seasonal strength", f"{ss.get('yearly_strength', 0):.3f}")
-                p2.metric("Weekly seasonal strength", f"{ss.get('weekly_strength', 0):.3f}")
-                p3.metric("Trend regime", tr)
+                p1.metric("Yearly seasonal strength", f"{ss.get('yearly', 0):.3f}")
+                p2.metric("Weekly seasonal strength", f"{ss.get('weekly', 0):.3f}")
+                p3.metric("Trend regime", tr.get("regime", "Unknown"))
 
-                if not cp_summary.empty:
+                if cp_summary:
                     st.markdown("**Key Changepoints detected:**")
-                    for cp in cp_summary.head(5).itertuples(index=False):
-                        st.caption(f"- {cp.changepoint_date} | {cp.nearest_macro} | Δtrend: {cp.delta:+.4f}")
-            except ImportError:
-                st.warning("Prophet not installed. Run: `pip install prophet`")
+                    for cp in cp_summary[:5]:
+                        st.caption(f"- {cp['date']} | {cp['label']} | Δtrend: {cp['delta']:+.4f}")
+            except ImportError as e:
+                st.warning(f"Prophet not installed: `pip install prophet`\n\n{e}")
             except Exception as e:
                 st.warning(f"Prophet error: {e}")
     else:
@@ -804,10 +804,10 @@ with tab4:
             try:
                 from models.deep.lstm import LSTMForecaster
                 lstm = LSTMForecaster(seq_len=63)
-                lstm.fit(prices, verbose=True)
-                forecasts = lstm.predict_sequence(prices)
+                lstm.fit(prices, epochs=30)
+                forecasts = lstm.forecast(prices, horizon=21)
                 st.success("BiLSTM trained successfully!")
-                st.dataframe(forecasts.round(5), use_container_width=True)
+                st.dataframe(forecasts.round(5), width='stretch')
             except ImportError as e:
                 st.warning(f"PyTorch not installed or GPU unavailable: {e}")
             except Exception as e:
@@ -824,11 +824,11 @@ with tab4:
         with st.spinner("Training TFT — this may take 5-15 min…"):
             try:
                 from models.deep.tft import CommodityTFT
-                tft = CommodityTFT(lookback=63)
+                tft = CommodityTFT(max_encoder_length=63, max_prediction_length=20)
                 tft.fit(prices, max_epochs=20)
                 fc_df = tft.forecast(prices)
                 st.success("TFT trained!")
-                st.dataframe(fc_df.round(5), use_container_width=True)
+                st.dataframe(fc_df.round(5), width='stretch')
             except ImportError as e:
                 st.warning(f"pytorch-forecasting not installed: {e}")
             except Exception as e:
@@ -875,7 +875,7 @@ with tab5:
                 st.dataframe(results.style.format("{:.4f}", subset=["ic_ideal", "runtime_s"]),
                              use_container_width=True)
             except ImportError as e:
-                st.warning(f"Quantum module unavailable (`pip install pennylane`): {e}")
+                st.warning(f"PennyLane not installed: {e}")
             except Exception as e:
                 st.warning(f"Kernel benchmark error: {e}")
     else:
@@ -917,9 +917,9 @@ with tab5:
                 fig_ql.update_layout(paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
                                      font_color="#FAFAFA", height=350,
                                      margin=dict(t=50, l=55, r=20, b=40))
-                st.plotly_chart(fig_ql, use_container_width=True)
+                st.plotly_chart(fig_ql, width='stretch')
             except ImportError as e:
-                st.warning(f"Quantum module unavailable (`pip install pennylane`): {e}")
+                st.warning(f"PennyLane not installed: {e}")
             except Exception as e:
                 st.warning(f"QAOA error: {e}")
     else:
@@ -941,9 +941,9 @@ with tab5:
                 X = clean.drop(columns=[tgt.name]).values[-300:, :4]
                 y = clean[tgt.name].values[-300:]
                 result = comparison_study(X, y, n_qubits=4)
-                st.dataframe(result["summary"], use_container_width=True)
+                st.dataframe(result["summary"], width='stretch')
             except ImportError as e:
-                st.warning(f"Quantum module unavailable (`pip install pennylane`): {e}")
+                st.warning(f"PennyLane not installed: {e}")
             except Exception as e:
                 st.warning(f"QNN error: {e}")
     else:

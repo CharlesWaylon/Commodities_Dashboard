@@ -138,7 +138,7 @@ if info["price_rows"] > 0:
     coverage["To"]   = coverage["To"].dt.strftime("%Y-%m-%d")
     coverage["Latest_Close"] = coverage["Latest_Close"].apply(lambda x: f"{x:,.4f}")
 
-    st.dataframe(coverage, use_container_width=True, hide_index=True)
+    st.dataframe(coverage, width='stretch', hide_index=True)
     st.divider()
 
     # ── Raw Data Viewer ────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ if info["price_rows"] > 0:
         display = sub.head(30)[["Date", "Close"]].copy()
         display["Date"]  = display["Date"].dt.strftime("%Y-%m-%d")
         display["Close"] = display["Close"].apply(lambda x: f"{x:,.4f}")
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.dataframe(display, width='stretch', hide_index=True)
 
     with col_chart:
         st.caption(f"All stored close prices for **{selected}**")
@@ -175,7 +175,7 @@ if info["price_rows"] > 0:
             xaxis=dict(gridcolor="#2C3347"),
             yaxis=dict(gridcolor="#2C3347"),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 else:
     st.info("No data in the database yet. Use the ingestion buttons above to populate it.")

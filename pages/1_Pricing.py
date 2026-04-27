@@ -101,8 +101,8 @@ display["Sector"]     = display["Sector"].apply(lambda s: f"{sector_emoji(s)} {s
 
 display.columns = ["Commodity", "Sector", "Price", "Unit", "Change", "% Change"]
 
-styled = display.style.applymap(highlight_change, subset=["% Change"])
-st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+styled = display.style.map(highlight_change, subset=["% Change"])
+st.dataframe(styled, width='stretch', hide_index=True, height=500)
 
 st.divider()
 
@@ -132,4 +132,4 @@ fig.update_traces(
     textfont_size=14,
     hovertemplate="<b>%{label}</b><br>Daily Change: %{color:.2f}%<extra></extra>",
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
