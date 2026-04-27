@@ -38,15 +38,20 @@ try:
     from database.db import init_db, get_db, db_info
     from database.models import Commodity, PriceHistory
     from pipeline.ingest import run_ingestion
+    init_db()  # Ensure tables exist
+    info = db_info()
     db_available = True
-except Exception as e:
-    db_available = False
-    st.error(f"Could not load database module: {e}")
+except Exception:
+    st.info(
+        "🗄️ **Database Inspector is only available when running locally.**\n\n"
+        "This page connects to a local SQLite database that lives on your machine. "
+        "When viewing the dashboard online, live prices and charts are still fully "
+        "functional — this inspector is just for pipeline management.\n\n"
+        "To use this page, run `streamlit run app.py` on your own computer."
+    )
     st.stop()
 
 # ── DB Status ──────────────────────────────────────────────────────────────────
-init_db()  # Ensure tables exist
-info = db_info()
 
 st.subheader("📊 Database Status")
 c1, c2, c3, c4, c5 = st.columns(5)
