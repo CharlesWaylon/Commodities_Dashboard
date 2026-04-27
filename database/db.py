@@ -115,7 +115,6 @@ def db_info() -> dict:
     with get_db() as db:
         n_commodities = db.query(Commodity).count()
         n_price_rows  = db.query(PriceHistory).count()
-        # Use scalar aggregates so we read the value inside the session — no lazy load needed
         oldest_date = db.query(func.min(PriceHistory.date)).scalar()
         newest_date = db.query(func.max(PriceHistory.date)).scalar()
     return {
@@ -124,4 +123,53 @@ def db_info() -> dict:
         "price_rows":  n_price_rows,
         "oldest_date": oldest_date,
         "newest_date": newest_date,
+    }
+
+
+def staleness_info() -> dict:
+    """
+    Return data freshness information for the price_history table.
+
+    days_stale is computed as calendar days between today and the newest stored
+    price date. Values to interpret:
+      0–1  → current (today's or yesterday's close is stored)
+      2–3  → borderline (weekend or US holiday gap — scheduler may still be ok)
+      4+   → stale — the ingestion pipeline has likely missed at least one run
+
+    Note on equity/ETF proxies: these trade on NYSE hours, which differ from
+    NYMEX futures (e.g., Juneteenth, MLK Day). On those days futures data
+    updates but proxy data does not. A staleness of 1–2 days for proxies only
+    is expected on those dates; check per_type for detail.
+    """
+    from database.models import Commodity, PriceHistory
+    from sqlalchemy import func
+    from datetime import date
+
+    today = date.today()
+
+    with get_db() as db:
+        newest_overall = db.query(func.max(PriceHistory.date)).scalar()
+
+        # Per instrument_type newest date — reveals if only some types are stale
+        per_type_rows = (
+            db.query(Commodity.instrument_type, func.max(PriceHistory.date))
+            .join(PriceHistory, Commodity.id == PriceHistory.commodity_id)
+            .group_by(Commodity.instrument_type)
+            .all()
+        )
+
+    if newest_overall is None:
+        return {"newest_date": None, "days_stale": None, "per_type": {}}
+
+    days_stale = (today - newest_overall).days
+    per_type   = {
+        (t or "unknown"): (today - d).days
+        for t, d in per_type_rows
+        if d is not None
+    }
+
+    return {
+        "newest_date": newest_overall,
+        "days_stale":  days_stale,
+        "per_type":    per_type,
     }

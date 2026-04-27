@@ -221,6 +221,7 @@ def fetch_current_prices() -> pd.DataFrame:
         close = data["Close"]
 
         rows = []
+        failed = []
         for name, ticker in COMMODITY_TICKERS.items():
             try:
                 series = close[ticker].dropna()
@@ -234,6 +235,7 @@ def fetch_current_prices() -> pd.DataFrame:
                     change = 0.0
                     pct    = 0.0
                 else:
+                    failed.append(name)
                     continue
 
                 rows.append({
@@ -247,7 +249,16 @@ def fetch_current_prices() -> pd.DataFrame:
                     "Is_Proxy":   COMMODITY_IS_PROXY.get(name, False),
                 })
             except Exception:
+                failed.append(name)
                 continue
+
+        if failed:
+            st.warning(
+                f"⚠️ Could not retrieve prices for {len(failed)} instrument(s): "
+                + ", ".join(failed[:5])
+                + ("…" if len(failed) > 5 else "")
+                + ". Data shown may be incomplete."
+            )
 
         return pd.DataFrame(rows)
 

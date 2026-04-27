@@ -10,7 +10,7 @@ Run with:  streamlit run app.py
 
 import streamlit as st
 import pandas as pd
-from services.price_data import fetch_current_prices, COMMODITY_SECTORS
+from services.price_data import fetch_current_prices, COMMODITY_SECTORS, COMMODITY_TICKERS, COMMODITY_IS_PROXY
 from utils.formatting import color_delta, sector_emoji, format_price
 
 st.set_page_config(
@@ -34,10 +34,15 @@ with st.sidebar:
 - 🤖 **Models** — analytics pipeline
     """)
     st.divider()
-    st.caption("Data: Yahoo Finance · Refreshes every 5 min")
+    st.caption("Data: Yahoo Finance · Cached 5 min")
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
+    st.caption(
+        "Proxy instruments (marked *) settle on NYSE time (~21:00 UTC). "
+        "NYMEX futures settle earlier (~18:30 UTC). Same-session prices "
+        "may be from different points in the trading day."
+    )
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.title("🏠 Market Overview")
@@ -59,13 +64,31 @@ losers  = df[df["Pct_Change"] < 0]
 best    = df.loc[df["Pct_Change"].idxmax()]
 worst   = df.loc[df["Pct_Change"].idxmin()]
 
+n_expected = len(COMMODITY_TICKERS)
+n_fetched  = len(df)
+n_missing  = n_expected - n_fetched
+n_proxies  = int(df["Is_Proxy"].sum()) if "Is_Proxy" in df.columns else 0
+
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("📦 Commodities Tracked", len(df))
+k1.metric(
+    "📦 Instruments Loaded",
+    f"{n_fetched} / {n_expected}",
+    delta=f"{n_missing} failed to fetch" if n_missing else "all loaded",
+    delta_color="inverse" if n_missing else "normal",
+    help=f"{n_proxies} of {n_fetched} are ETF/equity proxies (marked *). "
+         "Proxies track related funds or stocks, not direct commodity futures.",
+)
 k2.metric("🟢 Advancing", len(gainers), f"{len(gainers)/len(df)*100:.0f}% of market")
 k3.metric("🏆 Top Gainer", best["Name"],
           f"{best['Pct_Change']:+.2f}%", delta_color="normal")
 k4.metric("📉 Top Loser", worst["Name"],
           f"{worst['Pct_Change']:+.2f}%", delta_color="inverse")
+
+if n_missing:
+    st.warning(
+        f"⚠️ {n_missing} instrument(s) could not be fetched from Yahoo Finance and are "
+        "missing from this page. Check the [Database page](/Database) ingestion log for details."
+    )
 
 st.divider()
 
@@ -83,9 +106,14 @@ for sector in ["Energy", "Metals", "Agriculture", "Livestock"]:
     for i, (_, row) in enumerate(sector_df.iterrows()):
         col = cols[i % len(cols)]
         delta_str = f"{row['Pct_Change']:+.2f}%"
+        label = row["Name"]
+        unit  = row["Unit"]
+        # Flag proxy instruments so users know the price isn't a direct futures quote
+        if row.get("Is_Proxy"):
+            unit = f"{unit} · proxy"
         col.metric(
-            label=row["Name"],
-            value=f"{row['Price']:,.2f} {row['Unit']}",
+            label=label,
+            value=f"{row['Price']:,.2f} {unit}",
             delta=delta_str,
         )
 
