@@ -173,10 +173,16 @@ class KalmanHedgeRatio:
             "current_beta":      round(float(beta.iloc[-1]), 4),
             "beta_mean":         round(float(beta.mean()), 4),
             "beta_std":          round(float(beta.std()), 4),
+            "beta_min":          round(float(beta.min()), 4),
+            "beta_max":          round(float(beta.max()), 4),
             "spread_mean":       round(float(spread.mean()), 4),
             "spread_std":        round(float(spread.std()), 4),
             "current_zscore":    round(float(self.spread_zscore().iloc[-1]), 3),
         }
+
+    def hedge_info(self) -> dict:
+        """Alias for summary() — returns hedge ratio statistics."""
+        return self.summary()
 
 
 # ── Convenience runner ─────────────────────────────────────────────────────────
