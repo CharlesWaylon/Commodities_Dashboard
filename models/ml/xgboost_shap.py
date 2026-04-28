@@ -68,6 +68,11 @@ XGB_PARAMS = dict(
 EARLY_STOPPING_ROUNDS = 30
 VALIDATION_FRACTION   = 0.15
 
+# Feature selection: always keep ALL own-commodity features, then add the top
+# N cross-commodity features ranked by absolute Spearman correlation with the
+# training target.  Keeps the feature matrix small relative to sample count.
+N_CROSS_FEATURES = 15
+
 
 class XGBoostForecaster:
     """
@@ -121,6 +126,27 @@ class XGBoostForecaster:
             Next-day log-return from build_target().
         """
         X_df, y = self._prepare(feat_df, target)
+
+        # ── Feature selection ──────────────────────────────────────────────
+        # 1. Always include every feature derived from the target commodity
+        #    itself (its own lags, vol, momentum, z-score).
+        # 2. Supplement with the N_CROSS_FEATURES cross-commodity features
+        #    most correlated with the target on the training portion only
+        #    (evaluated on training rows to avoid look-ahead bias).
+        own_prefix = f"{self.commodity}_"
+        own_cols   = [c for c in X_df.columns if c.startswith(own_prefix)]
+        cross_cols = [c for c in X_df.columns if not c.startswith(own_prefix)]
+
+        train_cut  = int(len(X_df) * (1 - TEST_FRACTION))
+        cross_corr = (
+            X_df[cross_cols].iloc[:train_cut]
+            .corrwith(y.iloc[:train_cut])
+            .abs()
+        )
+        top_cross = cross_corr.nlargest(N_CROSS_FEATURES).index.tolist()
+        X_df = X_df[own_cols + top_cross]
+        # ──────────────────────────────────────────────────────────────────
+
         self._feature_names = X_df.columns.tolist()
 
         split = int(len(X_df) * (1 - TEST_FRACTION))
@@ -173,6 +199,7 @@ class XGBoostForecaster:
         if self._model is None:
             raise RuntimeError("Call fit() first.")
         X_df, y = self._prepare(feat_df, target)
+        X_df = X_df[self._feature_names]
         split = int(len(X_df) * (1 - TEST_FRACTION))
         X_test_sc = self._scaler.transform(X_df.iloc[split:].values)
         preds = self._model.predict(X_test_sc)
@@ -234,8 +261,14 @@ class XGBoostForecaster:
         sv = self._explainer.shap_values(X_sc)[0]
         forecast = float(self._model.predict(X_sc)[0])
 
+        def _to_float(x):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return float("nan")
+
         features = sorted(
-            [(name, float(s), float(v))
+            [(name, float(s), _to_float(v))
              for name, s, v in zip(self._feature_names, sv, row.values)],
             key=lambda t: abs(t[1]),
             reverse=True,

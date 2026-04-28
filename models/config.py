@@ -31,7 +31,7 @@ MODELING_COMMODITIES = {
 DEFAULT_TARGET = "WTI Crude Oil"
 
 # ── Data retrieval ─────────────────────────────────────────────────────────────
-HISTORY_PERIOD   = "2y"     # how far back to pull from yfinance
+HISTORY_PERIOD   = "5y"     # how far back to pull from yfinance
 HISTORY_INTERVAL = "1d"     # daily bars
 
 # ── Feature engineering ────────────────────────────────────────────────────────

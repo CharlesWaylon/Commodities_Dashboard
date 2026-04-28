@@ -187,7 +187,7 @@ def build_augmented_features(
         combined = combined.join(df, how="outer")
 
     combined = combined.reindex(target_idx).ffill(limit=3)
-    return combined.astype(float, errors="ignore")
+    return combined.apply(pd.to_numeric, errors="coerce")
 
 
 def feature_coverage(df: pd.DataFrame) -> pd.DataFrame:
