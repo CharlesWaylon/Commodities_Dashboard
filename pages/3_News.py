@@ -9,12 +9,15 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
 from services.news_data import fetch_news, RSS_FEEDS
+from utils.theme import apply_theme, render_topbar
 
-st.set_page_config(page_title="News | Commodities", page_icon="📰", layout="wide")
+st.set_page_config(page_title="Accendio | News", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
+apply_theme()
+render_topbar()
 
 with st.sidebar:
-    st.title("📈 Commodities Hub")
-    st.caption("Future of Commodities Club")
+    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
+    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
     st.markdown("""
 **Navigation**
@@ -33,7 +36,7 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-st.title("📰 Market News")
+st.title("Market News")
 st.caption("Live news from Reuters, Bloomberg, FT, CNBC, OilPrice, Mining.com & more")
 
 # ── Load News ──────────────────────────────────────────────────────────────────

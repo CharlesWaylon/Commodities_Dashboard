@@ -10,31 +10,35 @@ import pandas as pd
 import plotly.express as px
 from services.price_data import fetch_current_prices
 from utils.formatting import sector_emoji
+from utils.theme import apply_theme, render_topbar
 
-st.set_page_config(page_title="Pricing | Commodities", page_icon="💰", layout="wide")
+st.set_page_config(page_title="Accendio | Pricing", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
+apply_theme()
+
+with st.spinner(""):
+    df = fetch_current_prices()
+
+render_topbar(df)
 
 with st.sidebar:
-    st.title("📈 Commodities Hub")
-    st.caption("Future of Commodities Club")
+    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
+    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
     st.markdown("""
 **Navigation**
-- 🏠 [Overview](/)
-- 💰 **Pricing** ← you are here
-- 📊 [Charts](/Charts)
-- 📰 [News](/News)
-- 🤖 [Models](/Models)
+- [Overview](/)
+- **Pricing** ← you are here
+- [Charts](/Charts)
+- [News](/News)
+- [Models](/Models)
     """)
     st.divider()
-    if st.button("🔄 Refresh Data"):
+    if st.button("↻  Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-st.title("💰 Commodity Pricing")
+st.title("Pricing")
 st.caption("Sorted, filtered pricing data for all tracked commodities")
-
-with st.spinner("Loading prices..."):
-    df = fetch_current_prices()
 
 if df.empty:
     st.error("Could not load price data.")

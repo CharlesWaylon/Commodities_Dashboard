@@ -51,7 +51,8 @@ def load_price_matrix_from_db(
     ticker_to_name = {v: k for k, v in commodities.items()}
 
     query = """
-        SELECT c.ticker, ph.date, ph.close
+        SELECT c.ticker, ph.date,
+               COALESCE(ph.adjusted_close, ph.close) AS close
         FROM price_history ph
         JOIN commodities c ON c.id = ph.commodity_id
         WHERE ph.interval = '1d'

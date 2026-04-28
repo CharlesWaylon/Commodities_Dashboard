@@ -202,6 +202,19 @@ def run_ingestion(backfill: bool = False):
     log.info("=" * 60)
     log.info(f"Ingestion complete.  Inserted={total_inserted}  Skipped={total_skipped}")
     log.info("=" * 60)
+
+    # ── Roll adjustment ────────────────────────────────────────────────────────
+    # Always run after ingestion so adjusted_close stays current.
+    # Even on incremental runs (few new rows), roll detection is fast because
+    # it reads the full series and recomputes only what changed.
+    if total_inserted > 0:
+        log.info("New rows detected — running roll adjustment...")
+        from pipeline.roll_adjust import run_roll_adjust
+        run_roll_adjust()
+        log.info("Roll adjustment complete.")
+    else:
+        log.info("No new rows inserted — skipping roll adjustment.")
+
     return total_inserted, total_skipped
 
 

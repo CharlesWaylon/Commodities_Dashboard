@@ -11,24 +11,27 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from services.price_data import COMMODITY_TICKERS, COMMODITY_UNITS, fetch_historical
+from utils.theme import apply_theme, render_topbar
 
-st.set_page_config(page_title="Charts | Commodities", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Accendio | Charts", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
+apply_theme()
+render_topbar()
 
 with st.sidebar:
-    st.title("📈 Commodities Hub")
-    st.caption("Future of Commodities Club")
+    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
+    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
     st.markdown("""
 **Navigation**
-- 🏠 [Overview](/)
-- 💰 [Pricing](/Pricing)
-- 📊 **Charts** ← you are here
-- 📰 [News](/News)
-- 🤖 [Models](/Models)
+- [Overview](/)
+- [Pricing](/Pricing)
+- **Charts** ← you are here
+- [News](/News)
+- [Models](/Models)
     """)
     st.divider()
 
-st.title("📊 Price Charts")
+st.title("Price Charts")
 st.caption("Interactive historical price charts for all tracked commodities")
 
 # ── Controls ───────────────────────────────────────────────────────────────────

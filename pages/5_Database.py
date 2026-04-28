@@ -12,12 +12,15 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import date
+from utils.theme import apply_theme, render_topbar
 
-st.set_page_config(page_title="Database | Commodities", page_icon="🗄️", layout="wide")
+st.set_page_config(page_title="Accendio | Database", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
+apply_theme()
+render_topbar()
 
 with st.sidebar:
-    st.title("📈 Commodities Hub")
-    st.caption("Future of Commodities Club")
+    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
+    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
     st.markdown("""
 **Navigation**
