@@ -8,6 +8,8 @@ Note: this module does NOT import streamlit, so it can be run outside
 the dashboard (from a script, notebook, or scheduler) without error.
 """
 
+import os
+import sqlite3
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -18,6 +20,65 @@ from models.config import (
     HISTORY_PERIOD,
     HISTORY_INTERVAL,
 )
+
+# Path to the dashboard's SQLite database
+_DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data", "commodities.db",
+)
+
+
+def load_price_matrix_from_db(
+    commodities: Optional[dict] = None,
+    db_path: str = _DB_PATH,
+) -> pd.DataFrame:
+    """
+    Load daily closing prices from the local SQLite database.
+
+    Faster than yfinance and covers all 41 instruments already ingested.
+    Falls back to ``load_price_matrix`` (yfinance) for any ticker not found
+    in the database.
+
+    Returns
+    -------
+    pd.DataFrame
+        Shape (n_days, n_commodities). Columns are display names.
+    """
+    if commodities is None:
+        commodities = MODELING_COMMODITIES
+
+    conn = sqlite3.connect(db_path)
+    ticker_to_name = {v: k for k, v in commodities.items()}
+
+    query = """
+        SELECT c.ticker, ph.date, ph.close
+        FROM price_history ph
+        JOIN commodities c ON c.id = ph.commodity_id
+        WHERE ph.interval = '1d'
+          AND ph.close IS NOT NULL
+        ORDER BY ph.date
+    """
+    raw = pd.read_sql(query, conn, parse_dates=["date"])
+    conn.close()
+
+    # Keep only tickers we asked for
+    raw = raw[raw["ticker"].isin(ticker_to_name)]
+    if raw.empty:
+        raise RuntimeError("No matching rows found in database for requested commodities.")
+
+    # Pivot: rows = dates, columns = tickers
+    matrix = raw.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
+    matrix.index.name = "Date"
+
+    # Rename tickers → display names
+    matrix = matrix.rename(columns=ticker_to_name)
+
+    # Keep only columns we asked for
+    present = [c for c in commodities if c in matrix.columns]
+    matrix = matrix[present]
+
+    matrix = matrix.ffill(limit=3).dropna()
+    return matrix
 
 
 def load_price_matrix(

@@ -139,9 +139,33 @@ def load_enso():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_features(_prices):
-    from models.features import build_feature_matrix, build_target
-    feat = build_feature_matrix(_prices)
-    return feat
+    from models.features import build_feature_matrix
+    return build_feature_matrix(_prices)
+
+# ── Elastic Net — all-41-instrument helpers ────────────────────────────────────
+@st.cache_data(ttl=14400, show_spinner=False)
+def load_prices_en():
+    from models.data_loader import load_price_matrix_from_db
+    return load_price_matrix_from_db()
+
+@st.cache_data(ttl=14400, show_spinner=False)
+def get_features_en(_prices_en):
+    from models.features import build_feature_matrix
+    return build_feature_matrix(_prices_en)
+
+@st.cache_data(ttl=14400, show_spinner=False)
+def run_en_all_cached(_prices_en):
+    from models.ml.elastic_net import run_all as _run_all
+    results = _run_all(_prices_en)
+    return {
+        name: {
+            "ic":        r["ic"],
+            "sparsity":  r["sparsity"],
+            "narrative": r["narrative"],
+            "coefs":     r["coefficient_table"].to_dict("records"),
+        }
+        for name, r in results.items()
+    }
 
 with st.spinner("Loading market data…"):
     prices = load_prices()
@@ -446,7 +470,7 @@ with tab1:
                 coloraxis_colorbar=dict(title="p-value"),
             )
             fig_gc.update_xaxes(tickangle=-40)
-            st.plotly_chart(fig_gc, use_container_width=True)
+            st.plotly_chart(fig_gc, width='stretch')
 
             v1, v2, v3 = st.columns(3)
             v1.metric("VAR Lag Order", var._lag_order)
@@ -725,7 +749,7 @@ with tab1:
                 )
                 fig_irf.update_xaxes(title_text="Days", gridcolor=GRID)
                 fig_irf.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
-                st.plotly_chart(fig_irf, use_container_width=True)
+                st.plotly_chart(fig_irf, width='stretch')
             except Exception as e:
                 st.caption(f"IRF unavailable: {e}")
 
@@ -759,7 +783,7 @@ with tab1:
                     xaxis=dict(title="Commodity", gridcolor=GRID, tickangle=-40),
                     yaxis=dict(title="% of forecast error variance", gridcolor=GRID),
                 )
-                st.plotly_chart(fig_fevd, use_container_width=True)
+                st.plotly_chart(fig_fevd, width='stretch')
             except Exception as e:
                 st.caption(f"FEVD unavailable: {e}")
 
@@ -942,41 +966,196 @@ with tab2:
 
     # ── Elastic Net ────────────────────────────────────────────────────────────
     st.markdown("#### Elastic Net / Lasso Factor Model")
-    st.caption("Sparse linear model: Lasso regularisation selects the minimal driver set.")
-    with st.spinner(f"Fitting Elastic Net on {ml_commodity}…"):
+    st.caption(
+        "Sparse cross-commodity factor model across **all 41 dashboard instruments**. "
+        "Lasso (L1) regularisation drives noise features to exactly zero, leaving only genuine drivers. "
+        "The coefficient table is the explanation — no SHAP required. "
+        "Primary metric: Spearman IC (>0.08 = strong, >0.04 = acceptable)."
+    )
+
+    from models.config import MODELING_COMMODITIES as _EN_COMMODITIES
+    en_commodity = st.selectbox(
+        "Target instrument",
+        list(_EN_COMMODITIES.keys()),
+        index=0,
+        key="en_comm",
+    )
+
+    # Load full 41-instrument price matrix from local DB
+    with st.spinner("Loading full instrument set from database…"):
+        prices_en = load_prices_en()
+    feat_en = get_features_en(prices_en)
+
+    with st.spinner(f"Fitting Elastic Net on {en_commodity}…"):
         try:
             from models.ml.elastic_net import ElasticNetFactorModel
-            en = ElasticNetFactorModel(commodity=ml_commodity)
-            en.fit(feat_matrix, ml_target)
-            en_ic      = en.ic_score(feat_matrix, ml_target)
+            from models.features import build_target
+            en = ElasticNetFactorModel(commodity=en_commodity)
+            en_target = build_target(prices_en, en_commodity)
+            en.fit(feat_en, en_target)
+            en_ic      = en.ic_score(feat_en, en_target)
             coef_table = en.coefficient_table()
             sparsity   = en.sparsity()
             narrative  = en.factor_narrative(top_n=5)
 
-            nonzero = coef_table[coef_table["coefficient"] != 0].copy()
-            nonzero = nonzero.sort_values("coefficient", key=abs, ascending=False).head(20)
-            colors  = [GREEN if c > 0 else RED for c in nonzero["coefficient"]]
+            # IC grade
+            if en_ic >= 0.08:
+                _grade, _gcol = "STRONG",     GREEN
+            elif en_ic >= 0.04:
+                _grade, _gcol = "ACCEPTABLE", AMBER
+            elif en_ic > 0.0:
+                _grade, _gcol = "WEAK",       BLUE
+            else:
+                _grade, _gcol = "NO SIGNAL",  RED
 
-            fig_en = go.Figure(go.Bar(
-                x=nonzero["coefficient"],
-                y=nonzero["feature"],
-                orientation="h",
-                marker_color=colors,
-            ))
-            dark_layout(fig_en, height=400, title=f"Elastic Net Coefficients — {ml_commodity}")
-            fig_en.update_layout(yaxis=dict(autorange="reversed"))
-            fig_en.add_vline(x=0, line_color="#888", line_width=1)
-            st.plotly_chart(fig_en, width='stretch')
+            ec_left, ec_right = st.columns([3, 2])
 
-            e1, e2, e3, e4 = st.columns(4)
-            e1.metric("Spearman IC", f"{en_ic:.4f}")
-            e2.metric("Active features", sparsity["n_features_nonzero"])
-            e3.metric("Sparsity", f"{sparsity['sparsity_pct']:.1f}%")
-            e4.metric("α (regularisation)", f"{sparsity['alpha']:.4f}")
+            with ec_left:
+                if not coef_table.empty:
+                    top_coefs  = coef_table.head(20)
+                    colors_en  = [GREEN if c > 0 else RED for c in top_coefs["coefficient"]]
+                    fig_en = go.Figure(go.Bar(
+                        x=top_coefs["coefficient"],
+                        y=top_coefs["feature"],
+                        orientation="h",
+                        marker_color=colors_en,
+                        hovertemplate="%{y}: %{x:.6f}<extra></extra>",
+                    ))
+                    dark_layout(fig_en, height=460,
+                                title=f"Surviving Factors — {en_commodity} (Top 20 of {sparsity['n_features_nonzero']})")
+                    fig_en.update_layout(yaxis=dict(autorange="reversed"))
+                    fig_en.add_vline(x=0, line_color="#888", line_width=1)
+                    st.plotly_chart(fig_en, width='stretch')
+                else:
+                    st.warning("All features zeroed out — price-derived features carry no signal for this instrument. "
+                               "Consider adding macro/sentiment signals via features/assembler.py.")
 
-            st.info(f"**Factor narrative:** {narrative}")
+            with ec_right:
+                # Grade badge
+                _color_name = {"STRONG": "green", "ACCEPTABLE": "orange",
+                               "WEAK": "blue", "NO SIGNAL": "red"}[_grade]
+                st.markdown(f"**Signal grade:** :{_color_name}[**{_grade}**]")
+                st.divider()
+
+                ea, eb = st.columns(2)
+                ea.metric("Spearman IC", f"{en_ic:+.4f}")
+                eb.metric("Active features",
+                          f"{sparsity['n_features_nonzero']} / {sparsity['n_features_total']}")
+                ec, ed = st.columns(2)
+                ec.metric("Sparsity", f"{sparsity['sparsity_pct']:.0f}%")
+                ed.metric("l1_ratio (CV)", f"{sparsity['l1_ratio']:.2f}")
+                st.divider()
+
+                st.markdown("**Factor narrative**")
+                st.info(narrative if narrative.strip() else
+                        "No surviving factors — model predicts the unconditional mean.")
+
+                # Coefficient table (collapsible)
+                with st.expander("Full coefficient table"):
+                    if coef_table.empty:
+                        st.write("No non-zero coefficients.")
+                    else:
+                        st.dataframe(coef_table, width='stretch', hide_index=True)
+
         except Exception as e:
             st.warning(f"Elastic Net failed: {e}")
+
+    st.divider()
+
+    # ── All-instrument IC leaderboard ──────────────────────────────────────────
+    st.markdown("##### All-Instrument Leaderboard")
+    st.caption(
+        "Fits Elastic Net for every dashboard instrument and ranks by Spearman IC. "
+        "Cached for 4 hours after first run (~2 min)."
+    )
+
+    _run_lb = st.button("Run full leaderboard (41 instruments)", key="en_run_all")
+    if _run_lb:
+        st.session_state["en_lb_triggered"] = True
+
+    if st.session_state.get("en_lb_triggered"):
+        with st.spinner("Fitting all 41 models (cached after first run)…"):
+            try:
+                _all = run_en_all_cached(prices_en)
+
+                _lb_rows = []
+                for _name, _r in _all.items():
+                    _ic = _r["ic"]
+                    _sp = _r["sparsity"]
+                    if _ic >= 0.08:   _g = "STRONG"
+                    elif _ic >= 0.04: _g = "ACCEPTABLE"
+                    elif _ic > 0.0:   _g = "WEAK"
+                    else:             _g = "NO SIGNAL"
+                    _lb_rows.append({
+                        "Instrument":       _name,
+                        "IC (Spearman)":    _ic,
+                        "Grade":            _g,
+                        "Active features":  _sp["n_features_nonzero"],
+                        "Total features":   _sp["n_features_total"],
+                        "Sparsity %":       _sp["sparsity_pct"],
+                        "Top driver":       (_r["coefs"][0]["feature"]
+                                             if _r["coefs"] else "—"),
+                    })
+
+                _lb_df = pd.DataFrame(_lb_rows).sort_values("IC (Spearman)", ascending=False)
+
+                _grade_colors = {
+                    "STRONG":     GREEN,
+                    "ACCEPTABLE": AMBER,
+                    "WEAK":       BLUE,
+                    "NO SIGNAL":  RED,
+                }
+                _bar_colors = [_grade_colors[g] for g in _lb_df["Grade"]]
+
+                fig_lb = go.Figure(go.Bar(
+                    x=_lb_df["IC (Spearman)"],
+                    y=_lb_df["Instrument"],
+                    orientation="h",
+                    marker_color=_bar_colors,
+                    text=[f"{v:+.3f}" for v in _lb_df["IC (Spearman)"]],
+                    textposition="outside",
+                    hovertemplate="%{y}<br>IC: %{x:.4f}<extra></extra>",
+                ))
+                dark_layout(fig_lb, height=1000,
+                            title="Elastic Net Spearman IC — All 41 Dashboard Instruments")
+                fig_lb.update_layout(yaxis=dict(autorange="reversed"),
+                                     xaxis=dict(range=[-0.2, 0.22]))
+                fig_lb.add_vline(x=0,    line_color="#888", line_width=1)
+                fig_lb.add_vline(x=0.04, line_color=AMBER, line_width=1, line_dash="dash",
+                                 annotation_text="0.04 threshold",
+                                 annotation_position="top right",
+                                 annotation_font_color=AMBER)
+                fig_lb.add_vline(x=0.08, line_color=GREEN, line_width=1, line_dash="dash",
+                                 annotation_text="0.08 strong",
+                                 annotation_position="top right",
+                                 annotation_font_color=GREEN)
+                st.plotly_chart(fig_lb, width='stretch')
+
+                # Summary metrics row
+                _strong_n = sum(1 for r in _lb_rows if r["Grade"] == "STRONG")
+                _acc_n    = sum(1 for r in _lb_rows if r["Grade"] == "ACCEPTABLE")
+                _weak_n   = sum(1 for r in _lb_rows if r["Grade"] == "WEAK")
+                _noise_n  = sum(1 for r in _lb_rows if r["Grade"] == "NO SIGNAL")
+                _avg_ic   = float(np.mean([r["IC (Spearman)"] for r in _lb_rows]))
+                _pos_n    = sum(1 for r in _lb_rows if r["IC (Spearman)"] > 0)
+
+                lc1, lc2, lc3, lc4, lc5, lc6 = st.columns(6)
+                lc1.metric("Avg IC",           f"{_avg_ic:+.4f}")
+                lc2.metric("IC > 0",           f"{_pos_n} / {len(_lb_rows)}")
+                lc3.metric("STRONG  (≥0.08)",  _strong_n,   delta=None)
+                lc4.metric("ACCEPTABLE (≥0.04)", _acc_n,    delta=None)
+                lc5.metric("WEAK",             _weak_n,     delta=None)
+                lc6.metric("NO SIGNAL",        _noise_n,    delta=None)
+
+                # Full sortable table
+                with st.expander("Full results table"):
+                    _display_df = _lb_df.copy()
+                    _display_df["IC (Spearman)"] = _display_df["IC (Spearman)"].map("{:+.4f}".format)
+                    _display_df["Sparsity %"]    = _display_df["Sparsity %"].map("{:.0f}%".format)
+                    st.dataframe(_display_df, width='stretch', hide_index=True)
+
+            except Exception as _e:
+                st.warning(f"Full leaderboard failed: {_e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

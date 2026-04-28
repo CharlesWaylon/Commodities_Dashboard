@@ -12,19 +12,55 @@ propagates through the whole models/ package.
 # Keys are display names matching COMMODITY_TICKERS in services/price_data.py.
 
 MODELING_COMMODITIES = {
-    # Energy
-    "WTI Crude Oil":         "CL=F",
-    "Natural Gas (Henry Hub)": "NG=F",
-    # Metals
-    "Gold (COMEX)":          "GC=F",
-    "Silver (COMEX)":        "SI=F",
-    "Copper (COMEX)":        "HG=F",
-    # Agriculture
-    "Corn (CBOT)":           "ZC=F",
-    "Wheat (CBOT SRW)":      "ZW=F",
-    "Soybeans (CBOT)":       "ZS=F",
+    # Energy — futures
+    "WTI Crude Oil":           "CL=F",
+    "Brent Crude Oil":         "BZ=F",
+    "Natural Gas":             "NG=F",
+    "Gasoline (RBOB)":         "RB=F",
+    "Heating Oil":             "HO=F",
+    # Energy — ETFs / equities
+    "Carbon Credits*":         "KRBN",
+    "LNG / Intl Gas*":         "LNG",
+    "Metallurgical Coal*":     "HCC",
+    "Thermal Coal*":           "BTU",
+    "Uranium*":                "URA",
+    # Metals — futures
+    "Gold (COMEX)":            "GC=F",
+    "Silver (COMEX)":          "SI=F",
+    "Copper (COMEX)":          "HG=F",
+    "Platinum":                "PL=F",
+    "Palladium":               "PA=F",
+    "Aluminum (COMEX)":        "ALI=F",
+    "HRC Steel":               "HRC=F",
+    # Metals — ETFs / equities
+    "Gold (Physical/London)*": "SGOL",
+    "Silver (Physical)*":      "SIVR",
+    "Iron Ore / Steel*":       "SLX",
+    "Lithium*":                "LIT",
+    "Rare Earths*":            "REMX",
+    "Zinc & Cobalt*":          "GLNCY",
+    # Agriculture — futures
+    "Corn (CBOT)":             "ZC=F",
+    "Wheat (CBOT SRW)":        "ZW=F",
+    "Wheat (KC HRW)":          "KE=F",
+    "Soybeans (CBOT)":         "ZS=F",
+    "Soybean Meal":            "ZM=F",
+    "Soybean Oil":             "ZL=F",
+    "Coffee":                  "KC=F",
+    "Cocoa":                   "CC=F",
+    "Sugar":                   "SB=F",
+    "Cotton":                  "CT=F",
+    "Orange Juice (FCOJ-A)":   "OJ=F",
+    "Oats (CBOT)":             "ZO=F",
+    "Rough Rice (CBOT)":       "ZR=F",
+    # Agriculture — ETF
+    "Lumber*":                 "WOOD",
     # Livestock
-    "Live Cattle":           "LE=F",
+    "Live Cattle":             "LE=F",
+    "Feeder Cattle":           "GF=F",
+    "Lean Hogs":               "HE=F",
+    # Digital Assets
+    "Bitcoin":                 "BTC-USD",
 }
 
 # Primary regression target — the commodity whose *next-day return* we forecast

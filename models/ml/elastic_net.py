@@ -131,14 +131,25 @@ class ElasticNetFactorModel:
 
         self._scaler = StandardScaler()
         X_sc = self._scaler.fit_transform(X_train.values)
+        y_train_vals = y_train.values
 
         # Time-series cross-validation: sklearn's CV with no shuffling
         from sklearn.model_selection import TimeSeriesSplit
         tscv = TimeSeriesSplit(n_splits=CV_FOLDS)
 
+        # Cap alpha search at 50% of alpha_max to prevent the degenerate all-zeros
+        # solution that ElasticNetCV's auto path selects on low-SNR financial data.
+        # alpha_max is the smallest alpha that zeros all Lasso coefficients.
+        alpha_max = float(np.max(np.abs(X_sc.T @ y_train_vals)) / len(y_train_vals))
+        alphas = np.logspace(
+            np.log10(max(alpha_max * 1e-4, 1e-8)),
+            np.log10(alpha_max * 0.5),
+            N_ALPHAS,
+        )
+
         if self.mode == "lasso":
             self._model = LassoCV(
-                n_alphas=N_ALPHAS,
+                alphas=alphas,
                 cv=tscv,
                 max_iter=5000,
                 random_state=RANDOM_SEED,
@@ -146,7 +157,7 @@ class ElasticNetFactorModel:
         else:
             self._model = ElasticNetCV(
                 l1_ratio=L1_RATIOS,
-                n_alphas=N_ALPHAS,
+                alphas=alphas,
                 cv=tscv,
                 max_iter=5000,
                 random_state=RANDOM_SEED,
@@ -230,6 +241,8 @@ class ElasticNetFactorModel:
         split = int(len(X_df) * (1 - TEST_FRACTION))
         X_test_sc = self._scaler.transform(X_df.iloc[split:].values)
         preds = self._model.predict(X_test_sc)
+        if np.std(preds) == 0:
+            return 0.0
         ic, _ = spearmanr(preds, y.iloc[split:].values)
         return round(float(ic), 4)
 
