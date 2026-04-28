@@ -29,7 +29,9 @@
       "Bash(pip index *)",
       "Bash(pip install *)",
       "Bash(python -c \"import shap; print\\(shap.__version__\\)\")",
-      "Bash(python test_feature_comparison.py)"
+      "Bash(python test_feature_comparison.py)",
+      "Bash(python ml_elastic_net_audit.py)",
+      "Bash(python ml_full_audit.py)"
     ]
   }
 }
