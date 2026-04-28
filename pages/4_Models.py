@@ -20,28 +20,29 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import sys, os
+from utils.theme import apply_theme, render_topbar, PLOTLY_LAYOUT
 
-st.set_page_config(page_title="Models | Commodities", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Accendio | Models", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
+apply_theme()
+render_topbar()
 
-# ── Dark-theme helpers ─────────────────────────────────────────────────────────
-BG       = "#0E1117"
-PLOT_BG  = "#1C2333"
-GRID     = "#2C3347"
-AMBER    = "#F5A623"
+# ── Accendio theme constants ───────────────────────────────────────────────────
+BG       = "#060912"
+PLOT_BG  = "#0C1228"
+GRID     = "#1A2A5E"
+AMBER    = "#F59E0B"
 BLUE     = "#4FC3F7"
 GREEN    = "#66BB6A"
 RED      = "#EF5350"
 PURPLE   = "#AB47BC"
 
 def dark_layout(fig, height=420, title=""):
-    fig.update_layout(
-        paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
-        font_color="#FAFAFA", title_text=title,
-        height=height, margin=dict(t=50, l=55, r=20, b=40),
-        legend=dict(bgcolor=PLOT_BG, borderwidth=0),
-    )
-    fig.update_xaxes(gridcolor=GRID, zerolinecolor=GRID)
-    fig.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
+    fig.update_layout(**{
+        **PLOTLY_LAYOUT,
+        "height": height,
+        "title_text": title,
+        "margin": dict(t=50, l=55, r=20, b=40),
+    })
     return fig
 
 REGIME_COLORS = {
@@ -53,20 +54,20 @@ REGIME_COLORS = {
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("📈 Commodities Hub")
-    st.caption("Future of Commodities Club")
+    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
+    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
     st.markdown("""
 **Navigation**
-- 🏠 [Overview](/)
-- 💰 [Pricing](/Pricing)
-- 📊 [Charts](/Charts)
-- 📰 [News](/News)
-- 🤖 **Models** ← you are here
+- [Overview](/)
+- [Pricing](/Pricing)
+- [Charts](/Charts)
+- [News](/News)
+- **Models** ← you are here
     """)
     st.divider()
 
-st.title("🤖 Analytics & Predictive Models")
+st.title("Analytics & Predictive Models")
 st.caption("Live model inference on real market data — Spearman IC is the primary accuracy metric")
 
 # ── Data loading ───────────────────────────────────────────────────────────────
@@ -100,7 +101,8 @@ def load_prices_db(period="3y"):
     import sqlite3 as _sql
     _conn = _sql.connect(os.path.join(os.path.dirname(__file__), "..", "data", "commodities.db"))
     _raw = pd.read_sql(
-        "SELECT c.name, ph.date, ph.close FROM price_history ph "
+        "SELECT c.name, ph.date, COALESCE(ph.adjusted_close, ph.close) AS close "
+        "FROM price_history ph "
         "JOIN commodities c ON c.id = ph.commodity_id WHERE ph.interval = '1d' ORDER BY ph.date",
         _conn,
     )
