@@ -22,7 +22,14 @@
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('pages/4_Models.py'\\).read\\(\\)\\); print\\('✓ syntax ok'\\)\")",
       "Bash(python3 -)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(python3)",
+      "Bash(python test_xgboost_all.py)",
+      "Bash(pip index *)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import shap; print\\(shap.__version__\\)\")",
+      "Bash(python test_feature_comparison.py)"
     ]
   }
 }
