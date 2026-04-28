@@ -18,7 +18,11 @@
       "Bash(python -m pipeline.layer)",
       "Bash(python -m pipeline.validate)",
       "Bash(pandoc --track-changes=all \"/Users/charlesmerkel/Desktop/Future_of_Commodities/ClarityDashboard_MasterDoc.docx\" -o /tmp/master_doc.md)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('pages/4_Models.py'\\).read\\(\\)\\); print\\('✓ syntax ok'\\)\")",
+      "Bash(python3 -)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

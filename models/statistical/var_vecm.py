@@ -51,21 +51,68 @@ from statsmodels.tsa.vector_ar.vecm import VECM, select_coint_rank
 from statsmodels.tsa.stattools import adfuller
 from typing import Optional, Literal
 
-# Pre-defined commodity groups for joint modeling
+# Pre-defined commodity groups for joint modeling.
+# Column names match the 'name' field in the commodities DB table exactly.
 COMMODITY_GROUPS = {
+    # ── Traditional commodity complexes ───────────────────────────────────────
     "energy": [
         "WTI Crude Oil",
-        "Natural Gas (Henry Hub)",
+        "Brent Crude Oil",
+        "Natural Gas",
+        "Gasoline (RBOB)",
+        "Heating Oil",
+    ],
+    "energy_transition": [
+        "LNG / Intl Gas*",
+        "Thermal Coal*",
+        "Metallurgical Coal*",
+        "Uranium*",
+        "Carbon Credits*",
+        "Lumber*",
+    ],
+    "precious_metals": [
+        "Gold",
+        "Silver",
+        "Platinum",
+        "Palladium",
+        "Gold (Physical/London)*",
+        "Silver (Physical)*",
+    ],
+    "industrial_metals": [
+        "Copper",
+        "Aluminum (COMEX)",
+        "HRC Steel",
+        "Iron Ore / Steel*",
+        "Zinc & Cobalt*",
     ],
     "grains": [
-        "Corn (CBOT)",
-        "Wheat (CBOT SRW)",
-        "Soybeans (CBOT)",
+        "Corn",
+        "Wheat",
+        "Soybeans",
     ],
-    "metals": [
-        "Gold (COMEX)",
-        "Silver (COMEX)",
-        "Copper (COMEX)",
+    "ag_extended": [
+        "Soybean Oil",
+        "Soybean Meal",
+        "Oats (CBOT)",
+        "Rough Rice (CBOT)",
+        "Wheat (KC HRW)",
+    ],
+    "livestock": [
+        "Live Cattle",
+        "Feeder Cattle",
+        "Lean Hogs",
+    ],
+    "softs": [
+        "Coffee",
+        "Sugar",
+        "Cotton",
+        "Cocoa",
+        "Orange Juice (FCOJ-A)",
+    ],
+    "new_commodities": [
+        "Lithium*",
+        "Rare Earths*",
+        "Bitcoin",
     ],
 }
 
@@ -219,8 +266,9 @@ class CommodityVAR:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     gc_res = grangercausalitytests(xy, maxlag=max_lag, verbose=False)
-                    # Take the p-value at max_lag from the F-test
-                    p = gc_res[max_lag][0]["ssr_ftest"][1]
+                    # Use minimum p-value across all tested lags (catches
+                    # causality that peaks at shorter lags, not just max_lag)
+                    p = min(gc_res[lag][0]["ssr_ftest"][1] for lag in range(1, max_lag + 1))
                     pmat.loc[caused, cause] = round(p, 4)
 
         return pmat
@@ -341,7 +389,9 @@ def run_energy_system(prices: pd.DataFrame) -> dict:
     Parameters
     ----------
     prices : pd.DataFrame
-        Closing prices. Must include "WTI Crude Oil" and "Natural Gas (Henry Hub)".
+        Closing prices using DB column names. Must include at least two of:
+        "WTI Crude Oil", "Brent Crude Oil", "Natural Gas", "Gasoline (RBOB)",
+        "Heating Oil".
 
     Returns
     -------

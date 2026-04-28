@@ -72,7 +72,10 @@ st.caption("Live model inference on real market data — Spearman IC is the prim
 # ── Data loading ───────────────────────────────────────────────────────────────
 CORE_TICKERS = {
     "WTI Crude Oil":           "CL=F",
+    "Brent Crude Oil":         "BZ=F",
     "Natural Gas (Henry Hub)": "NG=F",
+    "Gasoline (RBOB)":         "RB=F",
+    "Heating Oil":             "HO=F",
     "Gold (COMEX)":            "GC=F",
     "Silver (COMEX)":          "SI=F",
     "Copper (COMEX)":          "HG=F",
@@ -90,6 +93,25 @@ def load_prices(period="3y"):
     )
     prices = raw["Close"].rename(columns={v: k for k, v in CORE_TICKERS.items()})
     return prices.ffill().dropna()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_prices_db(period="3y"):
+    """Load all 41 commodities from SQLite — used exclusively by the VAR section."""
+    import sqlite3 as _sql
+    _conn = _sql.connect(os.path.join(os.path.dirname(__file__), "..", "data", "commodities.db"))
+    _raw = pd.read_sql(
+        "SELECT c.name, ph.date, ph.close FROM price_history ph "
+        "JOIN commodities c ON c.id = ph.commodity_id WHERE ph.interval = '1d' ORDER BY ph.date",
+        _conn,
+    )
+    _conn.close()
+    _df = _raw.pivot(index="date", columns="name", values="close")
+    _df.index = pd.to_datetime(_df.index)
+    _df = _df.sort_index().ffill(limit=3)
+    if period.endswith("y"):
+        _cutoff = _df.index.max() - pd.DateOffset(years=int(period[:-1]))
+        _df = _df[_df.index >= _cutoff]
+    return _df
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_macro(period="2y", _price_index=None):
@@ -262,28 +284,79 @@ with tab1:
     st.markdown("#### Kalman Dynamic Hedge Ratio")
     st.caption("Time-varying β between a commodity pair — signals mean-reversion in the spread.")
 
-    HEDGE_PAIRS = {
-        "WTI ↔ Brent": ("WTI Crude Oil", "Natural Gas (Henry Hub)"),
-        "Gold ↔ Silver": ("Gold (COMEX)", "Silver (COMEX)"),
-        "Corn ↔ Soybeans": ("Corn (CBOT)", "Soybeans (CBOT)"),
-        "Wheat ↔ Corn": ("Wheat (CBOT SRW)", "Corn (CBOT)"),
-    }
-    pair_name = st.selectbox("Pair", list(HEDGE_PAIRS.keys()), key="kalman_pair")
-    y_name, x_name = HEDGE_PAIRS[pair_name]
+    from models.statistical.kalman import HEDGE_PAIRS, KalmanHedgeRatio
 
-    if y_name in prices.columns and x_name in prices.columns:
+    pair_options = list(HEDGE_PAIRS.keys()) + ["Custom…"]
+    pair_choice  = st.selectbox("Pair", pair_options, key="kalman_pair")
+
+    if pair_choice == "Custom…":
+        available_cols = sorted(prices.columns.tolist())
+        c1, c2 = st.columns(2)
+        y_name     = c1.selectbox("Y leg (long)", available_cols, key="kalman_y")
+        x_default  = 1 if len(available_cols) > 1 else 0
+        x_name     = c2.selectbox("X leg (hedge)", available_cols, index=x_default, key="kalman_x")
+        pair_label = f"{y_name} / {x_name}"
+    else:
+        y_name, x_name = HEDGE_PAIRS[pair_choice]
+        pair_label = pair_choice
+
+    zscore_window = st.slider(
+        "Z-score lookback (days)", min_value=21, max_value=126, value=63, step=7,
+        key="kalman_zscore_window",
+        help="Rolling window for spread mean and std. Shorter = more sensitive; longer = more stable.",
+    )
+
+    if y_name == x_name:
+        st.info("Select two different instruments.")
+    elif y_name not in prices.columns or x_name not in prices.columns:
+        st.info("Price data for this pair not fully loaded. Try another pair.")
+    else:
         with st.spinner("Running Kalman filter…"):
             try:
-                from models.statistical.kalman import KalmanHedgeRatio
-                kf = KalmanHedgeRatio()
+                kf = KalmanHedgeRatio(pair=pair_label)
                 kf.fit(prices[y_name], prices[x_name])
-                beta   = kf._beta
-                zscore = kf.spread_zscore()
-                info   = kf.hedge_info()
+                beta          = kf.hedge_ratios()
+                beta_lo, beta_hi = kf.beta_ci()
+                zscore        = kf.spread_zscore(window=zscore_window)
+                info          = kf.hedge_info()
+                coint_p       = kf.cointegration_pvalue()
+
+                # Cointegration badge
+                import math
+                if not math.isnan(coint_p):
+                    if coint_p < 0.05:
+                        st.success(
+                            f"Cointegrated — Engle-Granger p = {coint_p:.3f} "
+                            f"(< 0.05). Spread mean-reversion is statistically supported."
+                        )
+                    elif coint_p < 0.10:
+                        st.warning(
+                            f"Weak cointegration — Engle-Granger p = {coint_p:.3f} "
+                            f"(0.05–0.10). Treat signals with caution."
+                        )
+                    else:
+                        st.error(
+                            f"Not cointegrated — Engle-Granger p = {coint_p:.3f} "
+                            f"(> 0.10). Hedge ratio and spread may be spurious."
+                        )
 
                 fig_kf = make_subplots(rows=2, cols=1, shared_xaxes=True,
                     row_heights=[0.55, 0.45], vertical_spacing=0.06,
-                    subplot_titles=["Dynamic Hedge Ratio (β)", "Spread Z-Score"])
+                    subplot_titles=["Dynamic Hedge Ratio (β) with 95% CI", "Spread Z-Score"])
+
+                # 95% CI band — upper boundary (invisible line, used as fill target)
+                fig_kf.add_trace(go.Scatter(
+                    x=beta_hi.index, y=beta_hi,
+                    line=dict(width=0), showlegend=False, hoverinfo="skip",
+                    name="β upper CI"), row=1, col=1)
+                # Lower boundary with fill back to upper
+                fig_kf.add_trace(go.Scatter(
+                    x=beta_lo.index, y=beta_lo,
+                    line=dict(width=0), fill="tonexty",
+                    fillcolor="rgba(245,158,11,0.15)",
+                    showlegend=False, hoverinfo="skip",
+                    name="β lower CI"), row=1, col=1)
+                # β central estimate
                 fig_kf.add_trace(go.Scatter(
                     x=beta.index, y=beta,
                     line=dict(color=AMBER, width=1.5), name="β (hedge ratio)"), row=1, col=1)
@@ -296,64 +369,400 @@ with tab1:
                 fig_kf.add_hline(y=2.0,  line_dash="dot", line_color=RED,    opacity=0.6, row=2, col=1)
                 fig_kf.add_hline(y=-2.0, line_dash="dot", line_color=GREEN,  opacity=0.6, row=2, col=1)
                 fig_kf.add_hline(y=0.0,  line_dash="dash", line_color="#888", opacity=0.4, row=2, col=1)
-                dark_layout(fig_kf, height=460, title=f"Kalman Filter — {pair_name}")
+                dark_layout(fig_kf, height=480, title=f"Kalman Filter — {pair_label}")
                 st.plotly_chart(fig_kf, width='stretch')
 
                 k1, k2, k3, k4 = st.columns(4)
-                z_now = float(zscore.dropna().iloc[-1])
+                z_now  = float(zscore.dropna().iloc[-1])
+                ci_now = float(beta_hi.iloc[-1]) - float(beta_lo.iloc[-1])
                 k1.metric("Current β", f"{info['current_beta']:.3f}")
                 k2.metric("Spread Z-Score", f"{z_now:.2f}")
                 signal = "Short spread" if z_now > 2 else ("Long spread" if z_now < -2 else "Neutral")
                 k3.metric("Signal", signal)
-                k4.metric("β Range", f"{info['beta_min']:.2f} – {info['beta_max']:.2f}")
+                k4.metric("β 95% CI width", f"{ci_now:.3f}",
+                          help="Width of the Kalman uncertainty band. Wider = less confident in current β.")
             except Exception as e:
                 st.warning(f"Kalman failed: {e}")
-    else:
-        st.info("Price data for this pair not fully loaded. Try another pair.")
 
     st.divider()
 
     # ── VAR Granger Causality ──────────────────────────────────────────────────
     st.markdown("#### VAR Granger Causality")
     st.caption("Does commodity A's history help predict commodity B? Low p-value = yes.")
+    st.warning(
+        "**Methodology note:** Granger causality detects lead-lag *relationships* between price series — "
+        "it does not imply economic causation and is **not a directional trading signal**. "
+        "Walk-forward backtesting shows VAR 1-step directional accuracy is near-random (28–43%) "
+        "for liquid commodity futures. Use these outputs to understand *structural linkages*, "
+        "not to forecast tomorrow's price move.",
+        icon="⚠️",
+    )
 
     VAR_GROUPS = {
-        "Energy (WTI + NG)":         ("energy",  None),
-        "Metals (Gold, Silver, Copper)": ("metals", None),
-        "Grains (Corn, Wheat, Soybeans)": ("grains", None),
+        "Energy (WTI, Brent, NG, RBOB, HO)":              ("energy",            None),
+        "Energy Transition (LNG, Coal, Uranium, Carbon)":  ("energy_transition",  None),
+        "Precious Metals (Gold, Silver, Pt, Pd)":          ("precious_metals",    None),
+        "Industrial Metals (Cu, Al, Steel, Iron, Zn)":     ("industrial_metals",  None),
+        "Grains (Corn, Wheat, Soybeans)":                  ("grains",             None),
+        "Ag Extended (Soy Oil/Meal, Oats, Rice, KC Wht)":  ("ag_extended",        None),
+        "Livestock (Cattle, Hogs)":                        ("livestock",          None),
+        "Softs (Coffee, Sugar, Cotton, Cocoa, OJ)":        ("softs",              None),
+        "New Commodities (Lithium, Rare Earths, Bitcoin)": ("new_commodities",    None),
     }
     var_group = st.selectbox("Commodity group", list(VAR_GROUPS.keys()), key="var_group")
-    g_key, g_cols = VAR_GROUPS[var_group]
+    g_key, _ = VAR_GROUPS[var_group]
+
+    # Shared color palette — defined here so both IRF and FEVD blocks can access it
+    VAR_COLORS = [AMBER, BLUE, GREEN, RED, PURPLE, "#26C6DA", "#FFA726", "#EC407A",
+                  "#7E57C2", "#26A69A", "#EF9A9A", "#80CBC4"]
 
     with st.spinner("Fitting VAR…"):
         try:
             from models.statistical.var_vecm import CommodityVAR
+            prices_db = load_prices_db()
             var = CommodityVAR(group=g_key)
-            var.fit(prices)
-            gc = var.granger_causality(max_lag=5)
+            var.fit(prices_db)
 
+            # ── Granger causality heatmap ──────────────────────────────────────
+            gc = var.granger_causality(max_lag=5)
+            # Shorten labels for readability on the heatmap
+            short = {c: c.replace(" (COMEX)", "").replace(" (CBOT)", "")
+                       .replace(" (Henry Hub)", "").replace(" (FCOJ-A)", "")
+                       .replace("*", "").strip()
+                     for c in gc.columns}
+            gc_plot = gc.rename(index=short, columns=short)
+            hmap_h = max(350, 80 * len(var._cols))
             fig_gc = px.imshow(
-                gc.astype(float),
+                gc_plot.astype(float),
                 color_continuous_scale="RdYlGn_r",
                 zmin=0, zmax=0.1,
                 text_auto=".3f",
-                title=f"Granger Causality p-values (rows → cause, cols → effect)",
+                title="Granger Causality p-values — row caused by column (min p across lags 1–5)",
             )
             fig_gc.update_layout(
                 paper_bgcolor=BG, plot_bgcolor=BG,
-                font_color="#FAFAFA", height=350,
-                margin=dict(t=50, l=60, r=20, b=40),
+                font_color="#FAFAFA", height=hmap_h,
+                margin=dict(t=55, l=120, r=20, b=100),
                 coloraxis_colorbar=dict(title="p-value"),
             )
-            st.plotly_chart(fig_gc, width='stretch')
+            fig_gc.update_xaxes(tickangle=-40)
+            st.plotly_chart(fig_gc, use_container_width=True)
 
-            v1, v2 = st.columns(2)
+            v1, v2, v3 = st.columns(3)
             v1.metric("VAR Lag Order", var._lag_order)
+            v2.metric("Commodities in system", len(var._cols))
+            sig_total = int((gc < 0.05).sum().sum())
+            total_pairs = int(gc.count().sum())
+            v3.metric("Significant pairs (p<0.05)", f"{sig_total} / {total_pairs}")
+
+            # ── Dynamic economic interpretation ───────────────────────────────
+            interp_lines = []
+
+            def _p(row, col):
+                try:
+                    return gc.loc[row, col]
+                except KeyError:
+                    return float("nan")
+
+            def _sig_causes(effect, threshold=0.05):
+                """Return list of commodities that significantly Granger-cause `effect`."""
+                return [c for c in gc.columns if c != effect and _p(effect, c) < threshold]
+
+            def _sig_effects(cause, threshold=0.05):
+                """Return list of commodities significantly caused by `cause`."""
+                return [r for r in gc.index if r != cause and _p(r, cause) < threshold]
+
+            if g_key == "energy":
+                wti_ng = _p("Natural Gas", "WTI Crude Oil")
+                ng_wti = _p("WTI Crude Oil", "Natural Gas")
+                if wti_ng > 0.05 and ng_wti > 0.05:
+                    interp_lines.append(
+                        "⚡ **WTI and Natural Gas show no significant lead-lag relationship** — "
+                        "reflects their structural decoupling post-2022 as U.S. LNG export capacity "
+                        "expanded. Natural Gas now trades on global supply dynamics, not oil signals."
+                    )
+                if _p("Brent Crude Oil", "WTI Crude Oil") < 0.05:
+                    interp_lines.append(
+                        "🛢️ **WTI Granger-causes Brent** — U.S. crude sets the short-run benchmark; "
+                        "Brent adjusts with a measurable lag."
+                    )
+                refined = [n for n, col in [("RBOB Gasoline", "Gasoline (RBOB)"), ("Heating Oil", "Heating Oil")]
+                           if _p(col, "WTI Crude Oil") < 0.05]
+                if refined:
+                    interp_lines.append(
+                        f"⛽ **WTI Granger-causes {', '.join(refined)}** — crude feedstock costs "
+                        "propagate into refined product prices within 1–5 trading days."
+                    )
+
+            elif g_key == "energy_transition":
+                coal_pair = _p("Metallurgical Coal*", "Thermal Coal*")
+                if coal_pair < 0.05:
+                    interp_lines.append(
+                        "⛏️ **Thermal Coal Granger-causes Met Coal** — thermal price signals "
+                        "spill across coal grades as miners and buyers substitute between end uses."
+                    )
+                if _p("Carbon Credits*", "Thermal Coal*") < 0.05 or _p("Thermal Coal*", "Carbon Credits*") < 0.05:
+                    interp_lines.append(
+                        "🌿 **Carbon Credits and Thermal Coal are linked** — carbon pricing "
+                        "incentivizes fuel-switching, creating a feedback loop between EUA prices "
+                        "and coal demand."
+                    )
+                u_causes = _sig_causes("Uranium*")
+                if not u_causes:
+                    interp_lines.append(
+                        "☢️ **Uranium trades independently** of coal and carbon — driven by "
+                        "long-term utility contracting cycles rather than short-run energy prices."
+                    )
+                if _p("Lumber*", "Carbon Credits*") < 0.05:
+                    interp_lines.append(
+                        "🌲 **Carbon Credits Granger-cause Lumber** — forest carbon sequestration "
+                        "values influence timber harvest decisions."
+                    )
+
+            elif g_key == "precious_metals":
+                gold_to_silver = _p("Silver", "Gold")
+                silver_to_gold = _p("Gold", "Silver")
+                if gold_to_silver < 0.05:
+                    interp_lines.append(
+                        "🥇 **Gold Granger-causes Silver** — institutional gold flows lead; "
+                        "silver follows as the high-beta precious metals proxy."
+                    )
+                if silver_to_gold < 0.05:
+                    interp_lines.append(
+                        "🥈 **Silver Granger-causes Gold** — industrial demand signals "
+                        "in silver can anticipate broader precious metals moves."
+                    )
+                pd_indep = not _sig_causes("Palladium")
+                pt_indep = not _sig_causes("Platinum")
+                if pd_indep:
+                    interp_lines.append(
+                        "🚗 **Palladium trades independently** — dominated by auto catalyst demand "
+                        "(ICE vehicles) and Russian supply risk rather than monetary metal flows."
+                    )
+                phys_gold = _p("Gold (Physical/London)*", "Gold")
+                if phys_gold < 0.05:
+                    interp_lines.append(
+                        "🏦 **Spot Gold Granger-causes the Physical ETF** — futures price "
+                        "discovery leads the London AM/PM fix."
+                    )
+
+            elif g_key == "industrial_metals":
+                cu_effects = _sig_effects("Copper")
+                if cu_effects:
+                    targets = ", ".join(c.replace("*", "").strip() for c in cu_effects)
+                    interp_lines.append(
+                        f"🔧 **Copper Granger-causes {targets}** — copper's role as a macro "
+                        "bellwether ('Dr. Copper') propagates demand signals across the base metals complex."
+                    )
+                if _p("HRC Steel", "Iron Ore / Steel*") < 0.05 or _p("Iron Ore / Steel*", "HRC Steel") < 0.05:
+                    interp_lines.append(
+                        "🏗️ **HRC Steel and Iron Ore are causally linked** — steelmaking input "
+                        "costs (iron ore, coking coal) feed through to hot-rolled coil prices."
+                    )
+                zn_indep = not _sig_causes("Zinc & Cobalt*")
+                if zn_indep:
+                    interp_lines.append(
+                        "🔋 **Zinc & Cobalt trade independently** — battery metal dynamics "
+                        "and galvanizing demand are driven by separate supply chains."
+                    )
+
+            elif g_key == "grains":
+                corn_effects = _sig_effects("Corn")
+                if corn_effects:
+                    targets_str = " and ".join(f"**{r.split('(')[0].strip()}**" for r in corn_effects)
+                    interp_lines.append(
+                        f"🌽 **Corn Granger-causes {targets_str}** — shared acreage competition "
+                        "and feed-cost dynamics make corn the primary grain complex driver. "
+                        "FEVD shows corn accounts for ~20–24% of Wheat and Soybean forecast variance."
+                    )
+                if _p("Soybeans", "Wheat") < 0.05:
+                    interp_lines.append(
+                        "🌾 **Wheat Granger-causes Soybeans** — crop rotation and substitution "
+                        "signals in global export markets."
+                    )
+                if _p("Corn", "Soybeans") < 0.05:
+                    interp_lines.append(
+                        "🫘 **Soybeans Granger-cause Corn** — the soy/corn price ratio is a "
+                        "key acreage-switching signal watched by commodity traders."
+                    )
+
+            elif g_key == "ag_extended":
+                crush = _p("Soybean Meal", "Soybean Oil") < 0.05 or _p("Soybean Oil", "Soybean Meal") < 0.05
+                if crush:
+                    interp_lines.append(
+                        "🫘 **Soybean Oil and Soybean Meal are causally linked** — both are "
+                        "crush co-products; the soy crush spread drives processing margins and "
+                        "creates feedback between the two."
+                    )
+                wheat_link = _p("Wheat (KC HRW)", "Oats (CBOT)") < 0.05 or _p("Wheat", "Wheat (KC HRW)") < 0.05
+                if wheat_link:
+                    interp_lines.append(
+                        "🌾 **Inter-wheat price discovery detected** — CBOT SRW and KC HRW "
+                        "wheat trade on different protein/quality specs but share export demand signals."
+                    )
+                rice_indep = not _sig_causes("Rough Rice (CBOT)")
+                if rice_indep:
+                    interp_lines.append(
+                        "🍚 **Rough Rice trades independently** — primarily driven by Asian "
+                        "demand and weather in Southeast Asia, decoupled from U.S. grain complex dynamics."
+                    )
+
+            elif g_key == "livestock":
+                fc_lc = _p("Feeder Cattle", "Live Cattle")
+                lc_fc = _p("Live Cattle", "Feeder Cattle")
+                if fc_lc < 0.05:
+                    interp_lines.append(
+                        "🐄 **Live Cattle Granger-causes Feeder Cattle** — finished cattle prices "
+                        "set the ceiling for what feedlots will pay for feeder cattle, "
+                        "creating a downstream pricing cascade."
+                    )
+                if lc_fc < 0.05:
+                    interp_lines.append(
+                        "🐂 **Feeder Cattle Granger-causes Live Cattle** — input cost signals "
+                        "from the feeder market propagate forward to finished cattle prices."
+                    )
+                hogs_indep = not _sig_causes("Lean Hogs")
+                if hogs_indep:
+                    interp_lines.append(
+                        "🐷 **Lean Hogs trade independently of cattle** — pork and beef supply "
+                        "chains are largely separate, with hog prices driven by packer margins "
+                        "and feed costs independent of the cattle cycle."
+                    )
+
+            elif g_key == "softs":
+                coffee_sugar = _p("Sugar", "Coffee") < 0.05 or _p("Coffee", "Sugar") < 0.05
+                if coffee_sugar:
+                    interp_lines.append(
+                        "☕ **Coffee and Sugar are causally linked** — both are tropical crops "
+                        "heavily exposed to Brazilian weather and Real/USD FX, creating "
+                        "correlated supply shocks."
+                    )
+                cocoa_indep = not _sig_causes("Cocoa")
+                if cocoa_indep:
+                    interp_lines.append(
+                        "🍫 **Cocoa trades independently** — West African supply concentration "
+                        "(Ghana/Ivory Coast ~60% of global output) means price discovery "
+                        "is driven by regional crop conditions rather than broader soft commodity signals."
+                    )
+                oj_indep = not _sig_causes("Orange Juice (FCOJ-A)")
+                if oj_indep:
+                    interp_lines.append(
+                        "🍊 **Orange Juice trades independently** — Florida and Brazil citrus "
+                        "greening disease and USDA crop estimates dominate price discovery, "
+                        "disconnected from other softs."
+                    )
+
+            elif g_key == "new_commodities":
+                btc_effects = _sig_effects("Bitcoin")
+                li_re = _p("Rare Earths*", "Lithium*") < 0.05 or _p("Lithium*", "Rare Earths*") < 0.05
+                if li_re:
+                    interp_lines.append(
+                        "🔋 **Lithium and Rare Earths are causally linked** — both are critical "
+                        "battery and EV supply chain inputs; demand signals from one propagate to the other."
+                    )
+                if btc_effects:
+                    targets = ", ".join(c.replace("*", "").strip() for c in btc_effects)
+                    interp_lines.append(
+                        f"₿ **Bitcoin Granger-causes {targets}** — risk-appetite spillover: "
+                        "Bitcoin acts as a high-beta risk asset; moves can lead commodity ETFs "
+                        "that share speculative investor bases (Lithium, Rare Earths)."
+                    )
+                btc_causes = _sig_causes("Bitcoin")
+                if not btc_causes and not btc_effects:
+                    interp_lines.append(
+                        "₿ **Bitcoin trades independently** of Lithium and Rare Earths — "
+                        "crypto price discovery is dominated by on-chain flows and macro "
+                        "liquidity rather than physical commodity fundamentals."
+                    )
+
+            if not interp_lines:
+                interp_lines.append(
+                    f"No dominant lead-lag relationships detected at p < 0.05 "
+                    f"({sig_total}/{total_pairs} pairs significant). "
+                    "This may reflect efficient price discovery, a structural break in the "
+                    "sample window, or lag dynamics beyond 5 days for this group."
+                )
+
+            st.info("\n\n".join(interp_lines))
+
+            st.divider()
+
+            # ── IRF line chart ─────────────────────────────────────────────────
+            st.markdown("##### Impulse Response Functions (10-day horizon)")
+            st.caption("One-standard-deviation shock to each commodity → response across the system.")
             try:
                 irf = var.impulse_response(steps=10)
-                v2.metric("IRF pairs computed", len(irf.index.get_level_values(0).unique()))
-            except Exception:
-                v2.metric("IRF", "N/A")
+                shock_names = irf.columns.get_level_values("shock").unique().tolist()
+                n_shocks = len(shock_names)
+                from plotly.subplots import make_subplots as _make_subplots
+                irf_cols = min(n_shocks, 3)
+                irf_rows = (n_shocks + irf_cols - 1) // irf_cols
+                fig_irf = _make_subplots(
+                    rows=irf_rows, cols=irf_cols,
+                    subplot_titles=[s.replace("*", "").split("(")[0].strip() for s in shock_names],
+                    shared_yaxes=False,
+                )
+                for s_idx, shock in enumerate(shock_names):
+                    r, c = divmod(s_idx, irf_cols)
+                    for r_idx, resp in enumerate(irf[shock].columns.tolist()):
+                        fig_irf.add_trace(
+                            go.Scatter(
+                                x=list(range(11)), y=irf[(shock, resp)].values,
+                                mode="lines",
+                                name=resp.replace("*", "").split("(")[0].strip(),
+                                line=dict(color=VAR_COLORS[r_idx % len(VAR_COLORS)], width=2),
+                                showlegend=(s_idx == 0),
+                            ),
+                            row=r + 1, col=c + 1,
+                        )
+                    fig_irf.add_hline(y=0, line_dash="dash", line_color="#555",
+                                      row=r + 1, col=c + 1)
+                fig_irf.update_layout(
+                    paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
+                    font_color="#FAFAFA", height=280 * irf_rows,
+                    margin=dict(t=50, l=50, r=20, b=40),
+                    legend=dict(bgcolor=PLOT_BG, borderwidth=0),
+                )
+                fig_irf.update_xaxes(title_text="Days", gridcolor=GRID)
+                fig_irf.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
+                st.plotly_chart(fig_irf, use_container_width=True)
+            except Exception as e:
+                st.caption(f"IRF unavailable: {e}")
+
+            st.divider()
+
+            # ── FEVD stacked bar chart ─────────────────────────────────────────
+            st.markdown("##### Forecast Error Variance Decomposition (10-day horizon)")
+            st.caption("What fraction of each commodity's forecast error originates from shocks in other commodities?")
+            try:
+                fevd = var.fevd(steps=10)
+                def _short(name):
+                    return name.replace("*", "").replace(" (COMEX)", "").replace(" (CBOT)", "") \
+                               .replace(" (Henry Hub)", "").replace(" (FCOJ-A)", "").strip()
+                fevd_plot = fevd.copy()
+                fevd_plot.index = [_short(c) for c in fevd_plot.index]
+                fevd_plot.columns = [_short(c) for c in fevd_plot.columns]
+                fig_fevd = go.Figure()
+                for i, shock_col in enumerate(fevd_plot.columns):
+                    fig_fevd.add_trace(go.Bar(
+                        name=shock_col,
+                        x=fevd_plot.index.tolist(),
+                        y=(fevd_plot[shock_col] * 100).round(1).tolist(),
+                        marker_color=VAR_COLORS[i % len(VAR_COLORS)],
+                    ))
+                fig_fevd.update_layout(
+                    barmode="stack",
+                    paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
+                    font_color="#FAFAFA", height=360,
+                    margin=dict(t=30, l=50, r=20, b=100),
+                    legend=dict(bgcolor=PLOT_BG, borderwidth=0, title="Shock source"),
+                    xaxis=dict(title="Commodity", gridcolor=GRID, tickangle=-40),
+                    yaxis=dict(title="% of forecast error variance", gridcolor=GRID),
+                )
+                st.plotly_chart(fig_fevd, use_container_width=True)
+            except Exception as e:
+                st.caption(f"FEVD unavailable: {e}")
+
         except Exception as e:
             st.warning(f"VAR failed: {e}")
 
