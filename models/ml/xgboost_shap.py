@@ -49,6 +49,8 @@ from typing import Optional
 
 from models.config import MODELING_COMMODITIES, TEST_FRACTION, RANDOM_SEED
 from models.features import build_feature_matrix, build_target
+from models.model_signal import ModelSignal
+from models.broadcaster import SignalBroadcaster
 
 # XGBoost hyperparameters — conservative defaults for financial series
 XGB_PARAMS = dict(
@@ -74,7 +76,7 @@ VALIDATION_FRACTION   = 0.15
 N_CROSS_FEATURES = 15
 
 
-class XGBoostForecaster:
+class XGBoostForecaster(SignalBroadcaster):
     """
     XGBoost regressor with integrated SHAP explainability.
 
@@ -85,12 +87,17 @@ class XGBoostForecaster:
     """
 
     def __init__(self, commodity: str = "WTI Crude Oil"):
-        self.commodity = commodity
+        super().__init__(
+            commodity=commodity,
+            model_type="ml",
+            model_name="XGBoostForecaster",
+        )
         self._model: Optional[xgb.XGBRegressor] = None
         self._explainer: Optional[shap.TreeExplainer] = None
         self._scaler: Optional[StandardScaler] = None
         self._feature_names: Optional[list] = None
         self._base_value: Optional[float] = None
+        self._ic_score: float = 0.0  # populated in fit()
 
     # ── private ────────────────────────────────────────────────────────────────
 
@@ -176,6 +183,9 @@ class XGBoostForecaster:
         X_train_sc = self._scaler.transform(X_train_all.values)
         self._explainer = shap.TreeExplainer(self._model)
         self._base_value = float(self._model.predict(X_train_sc).mean())
+
+        # Cache IC so predict_with_signal() doesn't need target again
+        self._ic_score = self.ic_score(X_df, y)
         return self
 
     def predict(self, feat_df: pd.DataFrame) -> pd.Series:
@@ -205,6 +215,73 @@ class XGBoostForecaster:
         preds = self._model.predict(X_test_sc)
         ic, _ = spearmanr(preds, y.iloc[split:].values)
         return round(float(ic), 4)
+
+    def predict_with_signal(
+        self,
+        features: pd.DataFrame,
+        horizon: int = 1,
+    ) -> ModelSignal:
+        """
+        Predict next-day return and emit a standardized ModelSignal.
+
+        Wraps the existing predict() and waterfall_data() outputs into the
+        shared schema used by the integration ecosystem. SHAP values drive the
+        bullish/bearish drivers; cached IC from fit() drives confidence.
+        """
+        if self._model is None:
+            raise RuntimeError("Call fit() first.")
+
+        # ── Point forecast & SHAP drivers ─────────────────────────────────
+        wf = self.waterfall_data(features, idx=-1)
+        forecast_return = float(wf["forecast"])
+
+        bullish_drivers = [(name, shap_val) for name, shap_val, _ in wf["top_positive"]]
+        bearish_drivers = [(name, shap_val) for name, shap_val, _ in wf["top_negative"]]
+
+        # ── Uncertainty: ±2σ of recent predictions ────────────────────────
+        recent_preds = self.predict(features).dropna().iloc[-60:]
+        pred_std = float(recent_preds.std()) if len(recent_preds) > 1 else 0.02
+        uncertainty_band = (forecast_return - 2 * pred_std, forecast_return + 2 * pred_std)
+
+        # ── Regime: direction of last 5 predictions ───────────────────────
+        trend = float(recent_preds.iloc[-5:].mean()) if len(recent_preds) >= 5 else 0.0
+        if trend > 0.005:
+            regime = "bull"
+        elif trend < -0.005:
+            regime = "bear"
+        else:
+            regime = "neutral"
+
+        # ── Reasoning summary ─────────────────────────────────────────────
+        reasoning = [f"xgb_forecast_{forecast_return:+.2%}"]
+        if bullish_drivers:
+            reasoning.append(f"top_bullish: {bullish_drivers[0][0]}")
+        if bearish_drivers:
+            reasoning.append(f"top_bearish: {bearish_drivers[0][0]}")
+
+        # ── Assemble signal ───────────────────────────────────────────────
+        self.set_reasoning(reasoning)
+        self.set_drivers(bullish_drivers, bearish_drivers)
+        self.set_regime(regime)
+        self.set_dependencies(["price_history", "feature_matrix"])
+        self.set_metadata(
+            n_features=len(self._feature_names),
+            shap_base_value=round(self._base_value, 6),
+            hyperparams={
+                "n_estimators": XGB_PARAMS["n_estimators"],
+                "learning_rate": XGB_PARAMS["learning_rate"],
+                "max_depth": XGB_PARAMS["max_depth"],
+            },
+        )
+
+        signal = self._make_signal(
+            forecast_return=forecast_return,
+            confidence=max(0.0, self._ic_score),  # IC can be negative; clamp to 0
+            horizon=horizon,
+            uncertainty_band=uncertainty_band,
+            regime=regime,
+        )
+        return signal
 
     def shap_values(self, feat_df: pd.DataFrame) -> pd.DataFrame:
         """

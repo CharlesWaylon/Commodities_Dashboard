@@ -211,9 +211,20 @@ UNTRACEABLE_COMMODITIES = {
 @st.cache_data(ttl=300)
 def fetch_current_prices() -> pd.DataFrame:
     """
-    Fetch the latest price, daily change, and % change for all commodities.
+    DB-first: returns current prices from PostgreSQL when data is fresh (≤3 days stale).
+    Falls back to yfinance when the DB is stale or unreachable.
     Returns DataFrame: Name, Sector, Price, Change, Pct_Change, Unit, Ticker, Is_Proxy.
     """
+    try:
+        from services.data_contract import fetch_current_prices_db, data_freshness
+        freshness = data_freshness()
+        if not freshness["recommend_live"]:
+            db_df = fetch_current_prices_db()
+            if not db_df.empty:
+                return db_df
+    except Exception:
+        pass
+
     tickers = list(COMMODITY_TICKERS.values())
 
     try:
