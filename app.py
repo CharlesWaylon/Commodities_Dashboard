@@ -35,81 +35,52 @@ apply_theme()
 
 @st.cache_data(ttl=600)
 def _load_sector_timeline():
-    """30-day sector daily return heatmap from aligned_prices table."""
-    try:
-        from database.db import get_engine
-        engine = get_engine()
-        cutoff = (datetime.now() - timedelta(days=90)).date()
-
-        df = pd.read_sql(
-            f"""
-            SELECT c.name, c.sector, a.date, a.adjusted_close
-            FROM aligned_prices a
-            JOIN commodities c ON c.id = a.commodity_id
-            WHERE a.date >= '{cutoff}' AND a.is_filled = 0
-            ORDER BY c.name, a.date
-            """,
-            engine,
-            parse_dates=["date"],
-        )
-        if df.empty:
-            return None
-
-        df = df.sort_values(["name", "date"])
-        df["ret"] = df.groupby("name")["adjusted_close"].pct_change() * 100
-
-        pivot = (
-            df.groupby(["sector", "date"])["ret"]
-            .mean()
-            .reset_index()
-            .pivot(index="sector", columns="date", values="ret")
-        )
-        return pivot.iloc[:, -30:].round(2)
-    except Exception:
+    """30-day sector daily return heatmap via data_contract (handles name mapping)."""
+    from services.data_contract import fetch_price_history
+    df = fetch_price_history(days=90)
+    if df.empty:
         return None
+    df = df.sort_values(["name", "date"])
+    df["ret"] = df.groupby("name")["adjusted_close"].pct_change() * 100
+    pivot = (
+        df.groupby(["sector", "date"])["ret"]
+        .mean()
+        .reset_index()
+        .pivot(index="sector", columns="date", values="ret")
+    )
+    result = pivot.iloc[:, -30:].round(2)
+    return result if not result.empty else None
 
 
 @st.cache_data(ttl=600)
 def _load_correlations():
     """60-day pairwise return correlations for sector representative instruments."""
+    from services.data_contract import fetch_price_history
     reps = [
-        "WTI Crude Oil", "Natural Gas (Henry Hub)",
-        "Gold (COMEX)", "Copper (COMEX)",
+        "WTI Crude Oil", "Brent Crude Oil", "Natural Gas (Henry Hub)",
+        "Gold (COMEX)", "Silver (COMEX)", "Copper (COMEX)",
         "Corn (CBOT)", "Wheat (CBOT SRW)", "Soybeans (CBOT)",
         "Live Cattle",
     ]
-    name_map = {
-        "WTI Crude Oil": "WTI", "Natural Gas (Henry Hub)": "Nat Gas",
-        "Gold (COMEX)": "Gold", "Copper (COMEX)": "Copper",
-        "Corn (CBOT)": "Corn", "Wheat (CBOT SRW)": "Wheat",
-        "Soybeans (CBOT)": "Soybeans", "Live Cattle": "Cattle",
+    label_map = {
+        "WTI Crude Oil":           "WTI",
+        "Brent Crude Oil":         "Brent",
+        "Natural Gas (Henry Hub)": "Nat Gas",
+        "Gold (COMEX)":            "Gold",
+        "Silver (COMEX)":          "Silver",
+        "Copper (COMEX)":          "Copper",
+        "Corn (CBOT)":             "Corn",
+        "Wheat (CBOT SRW)":        "Wheat",
+        "Soybeans (CBOT)":         "Soybeans",
+        "Live Cattle":             "Cattle",
     }
-    try:
-        from database.db import get_engine
-        engine = get_engine()
-        cutoff = (datetime.now() - timedelta(days=100)).date()
-        rep_sql = ", ".join(f"'{r}'" for r in reps)
-
-        df = pd.read_sql(
-            f"""
-            SELECT c.name, a.date, a.adjusted_close
-            FROM aligned_prices a
-            JOIN commodities c ON c.id = a.commodity_id
-            WHERE a.date >= '{cutoff}' AND c.name IN ({rep_sql})
-            ORDER BY c.name, a.date
-            """,
-            engine,
-            parse_dates=["date"],
-        )
-        if df.empty or df["name"].nunique() < 3:
-            return None
-
-        pivot   = df.pivot(index="date", columns="name", values="adjusted_close")
-        returns = pivot.pct_change().dropna()
-        corr    = returns.corr().round(2)
-        return corr.rename(index=name_map, columns=name_map)
-    except Exception:
+    df = fetch_price_history(names=reps, days=100)
+    if df.empty or df["name"].nunique() < 3:
         return None
+    pivot   = df.pivot_table(index="date", columns="name", values="adjusted_close", aggfunc="last")
+    returns = pivot.pct_change().dropna()
+    corr    = returns.corr().round(2)
+    return corr.rename(index=label_map, columns=label_map)
 
 
 def _build_brief(df: pd.DataFrame) -> str:
@@ -170,17 +141,13 @@ render_topbar(df)
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
-    st.markdown("""
-**Navigation**
-- **Overview** ← you are here
-- **Pricing** — full price table
-- **Charts** — interactive price history
-- **News** — live market news
-- **Models** — analytics pipeline
-- **Database** — data management
-    """)
+    st.page_link("app.py",              label="Home")
+    st.page_link("pages/1_Pricing.py",  label="Pricing")
+    st.page_link("pages/2_Charts.py",   label="Charts")
+    st.page_link("pages/3_News.py",     label="News")
+    st.page_link("pages/4_Models.py",   label="Models")
+    st.page_link("pages/5_Database.py", label="Database")
     st.divider()
     st.caption(f"Last refresh · {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
     if st.button("↻  Refresh", use_container_width=True):
@@ -323,13 +290,13 @@ border-radius:6px;margin-bottom:5px">
             ),
             hovertemplate="%{y}<br>%{x}: %{z:+.2f}%<extra></extra>",
         ))
-        fig_tl.update_layout(
+        fig_tl.update_layout(**{
             **PLOTLY_LAYOUT,
-            height=170,
-            margin=dict(l=80, r=60, t=4, b=36),
-            xaxis=dict(tickangle=-45, tickfont=dict(size=9), showgrid=False),
-            yaxis=dict(tickfont=dict(size=11), showgrid=False),
-        )
+            "height": 170,
+            "margin": dict(l=80, r=60, t=4, b=36),
+            "xaxis": {**PLOTLY_LAYOUT["xaxis"], "tickangle": -45, "tickfont": dict(size=9), "showgrid": False},
+            "yaxis": {**PLOTLY_LAYOUT["yaxis"], "tickfont": dict(size=11), "showgrid": False},
+        })
         st.plotly_chart(fig_tl, use_container_width=True, config={"displayModeBar": False})
         st.caption(
             "Avg daily return by sector · derived from aligned price history  ·  "
@@ -372,13 +339,13 @@ border-radius:6px;margin-bottom:5px">
                 texttemplate="%{text}",
                 textfont=dict(size=9, color=ICE),
             ))
-            fig_corr.update_layout(
+            fig_corr.update_layout(**{
                 **PLOTLY_LAYOUT,
-                height=300,
-                margin=dict(l=60, r=10, t=4, b=60),
-                xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
-                yaxis=dict(tickfont=dict(size=9)),
-            )
+                "height": 300,
+                "margin": dict(l=60, r=10, t=4, b=60),
+                "xaxis": {**PLOTLY_LAYOUT["xaxis"], "tickangle": -45, "tickfont": dict(size=9)},
+                "yaxis": {**PLOTLY_LAYOUT["yaxis"], "tickfont": dict(size=9)},
+            })
             st.plotly_chart(fig_corr, use_container_width=True, config={"displayModeBar": False})
             st.caption("60-day rolling Pearson correlation · sector representative instruments")
         else:

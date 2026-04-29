@@ -31,7 +31,15 @@
       "Bash(python -c \"import shap; print\\(shap.__version__\\)\")",
       "Bash(python test_feature_comparison.py)",
       "Bash(python ml_elastic_net_audit.py)",
-      "Bash(python ml_full_audit.py)"
+      "Bash(python ml_full_audit.py)",
+      "Bash(psql --version)",
+      "Bash(python -c \"import psycopg2; print\\('psycopg2 ok'\\)\")",
+      "Bash(python models/test_signal.py)",
+      "Bash(PYTHONPATH=/Users/charlesmerkel/Desktop/Future_of_Commodities/Commodities_Dashboard python /Users/charlesmerkel/Desktop/Future_of_Commodities/Commodities_Dashboard/models/test_signal.py)",
+      "Bash(PYTHONPATH=. python models/test_router.py)",
+      "Bash(PYTHONPATH=. python models/test_detectors.py)",
+      "Bash(PYTHONPATH=/Users/charlesmerkel/Desktop/Future_of_Commodities/Commodities_Dashboard python -c \"import features; print\\('features:', features.__file__\\); print\\(features.__path__\\)\")",
+      "Bash(PYTHONPATH=. python -m models.test_detectors)"
     ]
   }
 }

@@ -22,16 +22,13 @@ render_topbar(df)
 
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
-    st.markdown("""
-**Navigation**
-- [Overview](/)
-- **Pricing** ← you are here
-- [Charts](/Charts)
-- [News](/News)
-- [Models](/Models)
-    """)
+    st.page_link("app.py",              label="Home")
+    st.page_link("pages/1_Pricing.py",  label="Pricing")
+    st.page_link("pages/2_Charts.py",   label="Charts")
+    st.page_link("pages/3_News.py",     label="News")
+    st.page_link("pages/4_Models.py",   label="Models")
+    st.page_link("pages/5_Database.py", label="Database")
     st.divider()
     if st.button("↻  Refresh", use_container_width=True):
         st.cache_data.clear()

@@ -55,16 +55,13 @@ REGIME_COLORS = {
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.caption("Commodity Intelligence. Ignited.")
     st.divider()
-    st.markdown("""
-**Navigation**
-- [Overview](/)
-- [Pricing](/Pricing)
-- [Charts](/Charts)
-- [News](/News)
-- **Models** ← you are here
-    """)
+    st.page_link("app.py",              label="Home")
+    st.page_link("pages/1_Pricing.py",  label="Pricing")
+    st.page_link("pages/2_Charts.py",   label="Charts")
+    st.page_link("pages/3_News.py",     label="News")
+    st.page_link("pages/4_Models.py",   label="Models")
+    st.page_link("pages/5_Database.py", label="Database")
     st.divider()
 
 st.title("Analytics & Predictive Models")
@@ -87,6 +84,12 @@ CORE_TICKERS = {
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_prices(period="3y"):
+    """DB-first price matrix for CORE_TICKERS; falls back to yfinance if DB unavailable."""
+    from services.data_contract import fetch_price_matrix
+    days = int(period[:-1]) * 365 if period.endswith("y") else 365
+    df = fetch_price_matrix(names=list(CORE_TICKERS.keys()), days=days)
+    if not df.empty:
+        return df
     import yfinance as yf
     raw = yf.download(
         list(CORE_TICKERS.values()), period=period,
@@ -97,23 +100,10 @@ def load_prices(period="3y"):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_prices_db(period="3y"):
-    """Load all 41 commodities from SQLite — used exclusively by the VAR section."""
-    import sqlite3 as _sql
-    _conn = _sql.connect(os.path.join(os.path.dirname(__file__), "..", "data", "commodities.db"))
-    _raw = pd.read_sql(
-        "SELECT c.name, ph.date, COALESCE(ph.adjusted_close, ph.close) AS close "
-        "FROM price_history ph "
-        "JOIN commodities c ON c.id = ph.commodity_id WHERE ph.interval = '1d' ORDER BY ph.date",
-        _conn,
-    )
-    _conn.close()
-    _df = _raw.pivot(index="date", columns="name", values="close")
-    _df.index = pd.to_datetime(_df.index)
-    _df = _df.sort_index().ffill(limit=3)
-    if period.endswith("y"):
-        _cutoff = _df.index.max() - pd.DateOffset(years=int(period[:-1]))
-        _df = _df[_df.index >= _cutoff]
-    return _df
+    """Full 41-commodity price matrix from PostgreSQL — used by VAR and regime models."""
+    from services.data_contract import fetch_price_matrix
+    days = int(period[:-1]) * 365 if period.endswith("y") else 365
+    return fetch_price_matrix(days=days)
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_macro(period="2y", _price_index=None):
@@ -887,15 +877,17 @@ with tab2:
     with st.spinner(f"Training XGBoost on {ml_commodity}…"):
         try:
             from models.ml.xgboost_shap import XGBoostForecaster
-            xgb = XGBoostForecaster(commodity=ml_commodity)
-            xgb.fit(feat_matrix, ml_target)
-            xgb_ic = xgb.ic_score(feat_matrix, ml_target)
-            shap_imp = xgb.global_shap_importance(feat_matrix)
-            waterfall = xgb.waterfall_data(feat_matrix)
+            xgb_model = XGBoostForecaster(commodity=ml_commodity)
+            xgb_model.fit(feat_matrix, ml_target)
 
+            # Emit standardized signal (IC already cached from fit)
+            xgb_signal = xgb_model.predict_with_signal(feat_matrix)
+            shap_imp   = xgb_model.global_shap_importance(feat_matrix)
+            waterfall  = xgb_model.waterfall_data(feat_matrix)
+
+            # ── SHAP charts (kept from prior version) ─────────────────────
             x1, x2 = st.columns(2)
             with x1:
-                # Global SHAP importance bar chart
                 top_shap = shap_imp.head(15)
                 fig_shap = go.Figure(go.Bar(
                     x=top_shap["mean_abs_shap"],
@@ -908,12 +900,10 @@ with tab2:
                 st.plotly_chart(fig_shap, width='stretch')
 
             with x2:
-                # Waterfall for latest observation
-                feats  = waterfall["features"][:12]   # top 12 for readability
+                feats  = waterfall["features"][:12]
                 names  = [f[0] for f in feats]
                 values = [f[1] for f in feats]
                 colors = [GREEN if v > 0 else RED for v in values]
-
                 fig_wf = go.Figure(go.Bar(
                     x=values, y=names, orientation="h",
                     marker_color=colors,
@@ -924,13 +914,46 @@ with tab2:
                 fig_wf.add_vline(x=0, line_color="#888", line_width=1)
                 st.plotly_chart(fig_wf, width='stretch')
 
-            xc1, xc2, xc3 = st.columns(3)
-            xc1.metric("Spearman IC", f"{xgb_ic:.4f}",
-                       delta="Actionable" if xgb_ic > 0.05 else "Marginal")
-            top_pos = waterfall["top_positive"][0][0] if waterfall["top_positive"] else "—"
-            top_neg = waterfall["top_negative"][0][0] if waterfall["top_negative"] else "—"
-            xc2.metric("Top bullish driver", top_pos)
-            xc3.metric("Top bearish driver", top_neg)
+            # ── Signal summary cards ───────────────────────────────────────
+            st.markdown("##### Model Signal")
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric(
+                "Forecast (next-day)",
+                f"{xgb_signal.forecast_return:+.2%}",
+                delta="Bullish" if xgb_signal.forecast_return > 0 else "Bearish",
+            )
+            sc2.metric(
+                "Confidence (IC)",
+                f"{xgb_signal.confidence:.4f}",
+                delta="Actionable" if xgb_signal.confidence > 0.05 else "Marginal",
+            )
+            sc3.metric("Regime", xgb_signal.regime.upper())
+            band_width = xgb_signal.uncertainty_band[1] - xgb_signal.uncertainty_band[0]
+            sc4.metric("Uncertainty band", f"±{band_width / 2:.2%}")
+
+            # ── Structured drivers ─────────────────────────────────────────
+            st.divider()
+            d1, d2 = st.columns(2)
+            with d1:
+                st.markdown("**Bullish drivers**")
+                if xgb_signal.top_bullish_drivers:
+                    for feature, contribution in xgb_signal.top_bullish_drivers:
+                        short_name = feature.split("_")[0] if len(feature) > 30 else feature
+                        st.markdown(f"- `{short_name}` → **{contribution:+.4f}**")
+                else:
+                    st.caption("None detected")
+            with d2:
+                st.markdown("**Bearish drivers**")
+                if xgb_signal.top_bearish_drivers:
+                    for feature, contribution in xgb_signal.top_bearish_drivers:
+                        short_name = feature.split("_")[0] if len(feature) > 30 else feature
+                        st.markdown(f"- `{short_name}` → **{contribution:+.4f}**")
+                else:
+                    st.caption("None detected")
+
+            with st.expander("Full signal (JSON)"):
+                st.json(xgb_signal.to_dict())
+
         except Exception as e:
             st.warning(f"XGBoost/SHAP failed: {e}")
 

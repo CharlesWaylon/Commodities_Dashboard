@@ -41,7 +41,6 @@ PLOTLY_LAYOUT = dict(
         borderwidth=0.5,
         font=dict(color=ICE_MID, size=10),
     ),
-    margin=dict(l=48, r=16, t=36, b=36),
     hoverlabel=dict(
         bgcolor=ABYSS,
         bordercolor="rgba(123,156,255,0.3)",
@@ -81,6 +80,7 @@ _CSS = """
 [data-testid="stHeader"]     { display: none !important; }
 [data-testid="stToolbar"]    { display: none !important; }
 [data-testid="stDecoration"] { display: none !important; }
+[data-testid="stSidebarNav"] { display: none !important; }
 #MainMenu { visibility: hidden; }
 footer    { visibility: hidden; }
 
@@ -133,6 +133,11 @@ h3 {
   font-weight: 400 !important;
   font-size: 0.9rem !important;
 }
+h4, h5, h6 {
+  color: rgba(238,242,255,0.70) !important;
+  font-weight: 400 !important;
+  font-size: 0.85rem !important;
+}
 p, span, label, .stMarkdown p {
   color: rgba(238,242,255,0.75) !important;
 }
@@ -177,17 +182,23 @@ p, span, label, .stMarkdown p {
 [data-baseweb="tab-list"] {
   background: transparent !important;
   border-bottom: 0.5px solid rgba(123,156,255,0.18) !important;
-  gap: 0 !important;
+  gap: 2px !important;
+  overflow-x: auto !important;
 }
 [data-baseweb="tab"] {
   background: transparent !important;
-  color: rgba(238,242,255,0.35) !important;
+  color: rgba(238,242,255,0.62) !important;
   border-bottom: 2px solid transparent !important;
   font-size: 11px !important;
-  letter-spacing: 0.12em !important;
+  letter-spacing: 0.1em !important;
   text-transform: uppercase !important;
-  padding: 8px 20px !important;
+  padding: 8px 16px !important;
   font-weight: 400 !important;
+  white-space: nowrap !important;
+}
+[data-baseweb="tab"]:hover {
+  color: rgba(238,242,255,0.88) !important;
+  background: rgba(123,156,255,0.06) !important;
 }
 [data-baseweb="tab"][aria-selected="true"] {
   color: var(--ac-signal) !important;
@@ -236,6 +247,11 @@ hr { border-color: rgba(123,156,255,0.1) !important; margin: 0.6rem 0 !important
 [data-testid="stAlert"] {
   border-radius: 6px !important;
   font-size: 13px !important;
+}
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] span,
+[data-testid="stAlert"] li {
+  color: rgba(238,242,255,0.85) !important;
 }
 
 /* Spinner */

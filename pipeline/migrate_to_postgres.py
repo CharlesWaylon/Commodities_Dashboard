@@ -24,6 +24,7 @@ import sys
 import logging
 from pathlib import Path
 
+import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
@@ -102,52 +103,48 @@ def run_migration():
         pg_count = postgres_db.query(Commodity).count()
         log.info(f"  Commodities in PostgreSQL: {pg_count}")
 
-        # ── Migrate price_history in batches ───────────────────────────────────
+        # ── Migrate price_history in bulk ──────────────────────────────────────
+        # pandas read_sql + INSERT … ON CONFLICT DO NOTHING avoids per-row ORM
+        # existence checks — orders of magnitude faster for large datasets.
         total_sqlite = sqlite_db.query(PriceHistory).count()
-        log.info(f"Migrating {total_sqlite:,} price rows in batches of {BATCH_SIZE}...")
+        log.info(f"Migrating {total_sqlite:,} price rows via bulk insert (batch={BATCH_SIZE})...")
 
-        offset    = 0
-        inserted  = 0
-        skipped   = 0
+        with postgres_engine.connect() as _c:
+            before = _c.execute(text("SELECT COUNT(*) FROM price_history")).scalar()
 
+        offset = 0
         while True:
-            batch = (
-                sqlite_db.query(PriceHistory)
-                .order_by(PriceHistory.id)
-                .offset(offset)
-                .limit(BATCH_SIZE)
-                .all()
+            chunk = pd.read_sql(
+                f"SELECT commodity_id, date, open, high, low, close, volume, "
+                f"       adjusted_close, interval, ingested_at "
+                f"FROM price_history ORDER BY id "
+                f"LIMIT {BATCH_SIZE} OFFSET {offset}",
+                sqlite_engine,
             )
-            if not batch:
+            if chunk.empty:
                 break
 
-            for row in batch:
-                existing = postgres_db.query(PriceHistory).filter_by(
-                    commodity_id = row.commodity_id,
-                    date         = row.date,
-                    interval     = row.interval,
-                ).first()
-
-                if existing:
-                    skipped += 1
-                    continue
-
-                postgres_db.add(PriceHistory(
-                    commodity_id = row.commodity_id,
-                    date         = row.date,
-                    open         = row.open,
-                    high         = row.high,
-                    low          = row.low,
-                    close        = row.close,
-                    volume       = row.volume,
-                    interval     = row.interval,
-                    ingested_at  = row.ingested_at,
+            # Write to a temp table then INSERT … ON CONFLICT DO NOTHING
+            with postgres_engine.begin() as conn:
+                chunk.to_sql("_ph_tmp", conn, if_exists="replace", index=False,
+                             method="multi")
+                conn.execute(text(
+                    "INSERT INTO price_history "
+                    "(commodity_id, date, open, high, low, close, volume, "
+                    " adjusted_close, interval, ingested_at) "
+                    "SELECT commodity_id, date::date, open, high, low, close, volume, "
+                    "       adjusted_close, interval, ingested_at "
+                    "FROM _ph_tmp ON CONFLICT DO NOTHING"
                 ))
-                inserted += 1
+                conn.execute(text("DROP TABLE IF EXISTS _ph_tmp"))
 
-            postgres_db.commit()
             offset += BATCH_SIZE
-            log.info(f"  Progress: {min(offset, total_sqlite):,} / {total_sqlite:,} rows processed")
+            log.info(f"  Progress: {min(offset, total_sqlite):,} / {total_sqlite:,}")
+
+        with postgres_engine.connect() as _c:
+            after = _c.execute(text("SELECT COUNT(*) FROM price_history")).scalar()
+        inserted = after - before
+        skipped  = total_sqlite - inserted
 
         log.info("=" * 60)
         log.info(f"Migration complete.")
