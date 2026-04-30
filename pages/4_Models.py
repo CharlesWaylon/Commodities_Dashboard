@@ -21,6 +21,12 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import sys, os
 from utils.theme import apply_theme, render_topbar, PLOTLY_LAYOUT
+from features.trigger_detectors import detect_all
+from models.router import SignalRouter
+from models.trigger_log import log_trigger_events
+from models.meta_predictor import (
+    MetaPredictor, collect_meta_features, ModelVote, KNOWN_TIERS
+)
 
 st.set_page_config(page_title="Accendio | Models", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
 apply_theme()
@@ -62,6 +68,7 @@ with st.sidebar:
     st.page_link("pages/3_News.py",     label="News")
     st.page_link("pages/4_Models.py",   label="Models")
     st.page_link("pages/5_Database.py", label="Database")
+    st.page_link("pages/6_Causal.py",   label="Causal Chain")
     st.divider()
 
 st.title("Analytics & Predictive Models")
@@ -159,18 +166,267 @@ def run_en_all_cached(_prices_en):
         for name, r in results.items()
     }
 
+@st.cache_resource
+def load_meta_predictor_from_disk():
+    """
+    Load the persisted MetaPredictor from data/meta_predictor.pkl.
+    Returns an untrained MetaPredictor (equal-weight fallback) if the file
+    doesn't exist yet — the dashboard stays live before the first backtest.
+    Uses cache_resource (not cache_data) so the model object is shared across
+    all sessions without being re-pickled on every render.
+    """
+    from pathlib import Path
+    model_path = Path(__file__).resolve().parent.parent / "data" / "meta_predictor.pkl"
+    mp = MetaPredictor()
+    mp.load(model_path)   # silent no-op when file missing
+    return mp
+
+@st.cache_data(ttl=14400, show_spinner=False)
+def get_meta_votes(_prices, commodity: str) -> list:
+    """
+    Fit XGBoost and ARIMA on live data and return ModelVotes for the
+    MetaPredictor.  Cached for 4 hours — re-fitting every render would be
+    slow and wasteful.
+
+    Returns a list of ModelVote objects (may be empty on failure).
+    """
+    votes = []
+    try:
+        from models.ml.xgboost_shap import XGBoostForecaster
+        from models.features import build_feature_matrix, build_target
+        feat  = build_feature_matrix(_prices)
+        tgt   = build_target(_prices, commodity)
+        xgb   = XGBoostForecaster(commodity=commodity)
+        xgb.fit(feat, tgt)
+        fc    = float(xgb.predict(feat).iloc[-1])
+        ic    = xgb.ic_score(feat, tgt)
+        votes.append(ModelVote(
+            tier="ml", model_name="XGBoostForecaster",
+            commodity=commodity, forecast_return=fc, confidence=ic,
+        ))
+    except Exception:
+        pass
+
+    try:
+        import warnings
+        from models.statistical.arima import ARIMAForecaster
+        import numpy as np
+        ret_series = np.log(_prices[commodity] / _prices[commodity].shift(1)).dropna()
+        ar = ARIMAForecaster(commodity=commodity)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ar.fit(ret_series)
+        ar_fc = ar.forecast(steps=1)["forecast"][0]
+        votes.append(ModelVote(
+            tier="statistical", model_name="ARIMA",
+            commodity=commodity, forecast_return=float(ar_fc), confidence=0.04,
+        ))
+    except Exception:
+        pass
+
+    return votes
+
 with st.spinner("Loading market data…"):
     prices = load_prices()
 
 returns = np.log(prices / prices.shift(1)).dropna()
 
+# ── Live Macro Triggers (Phase 2C) ────────────────────────────────────────────
+# Detect macro events (OPEC window, Fed/DXY stress, etc.) from live data, then
+# expose the events to every tab so model outputs can route through them.
+_macro_for_triggers = load_macro(period="2y", _price_index=prices.index)
+trigger_events = detect_all(_macro_for_triggers) if not _macro_for_triggers.empty else []
+# Persist trigger firings to the SQLite audit log (Phase 5 backtest input).
+# Silent — a logging failure must never break the live dashboard.
+try:
+    if trigger_events:
+        log_trigger_events(trigger_events)
+except Exception:
+    pass
+_signal_router = SignalRouter()
+
+st.markdown("### 🚨 Live Macro Triggers")
+st.caption(
+    "Macro events automatically detected from live market data. When a trigger is "
+    "active, model signals for affected commodities receive a confidence multiplier — "
+    "watch for the **'Trigger boost active'** banner under any model output below."
+)
+
+if trigger_events:
+    cols = st.columns(min(len(trigger_events), 3))
+    for col, ev in zip(cols, trigger_events):
+        with col:
+            with st.container(border=True):
+                family_label = ev.family.replace("_", " ").title()
+                st.markdown(f"**🔥 {family_label}**")
+                pct = int(round(ev.strength * 100))
+                tier = "Strong" if ev.strength >= 0.7 else ("Moderate" if ev.strength >= 0.3 else "Weak")
+                st.progress(min(max(ev.strength, 0.0), 1.0),
+                            text=f"Strength: {pct}% ({tier})")
+                st.caption(f"_{ev.rationale}_")
+                short = [c.split(" (")[0] for c in ev.affected_commodities]
+                chip_str = ", ".join(short[:4])
+                if len(short) > 4:
+                    chip_str += f", +{len(short) - 4} more"
+                st.caption(f"**Affects:** {chip_str}")
+                # ── Phase 4 Part 3: per-trigger chain trace button ────────────
+                if st.button("🔗 Trace Chain", key=f"_chain_btn_{ev.family}",
+                             help="Run the 5-layer causal chain tracer for this trigger"):
+                    st.session_state["_inline_chain_ev"] = ev
+                    # Pre-fill page 6 controls so the full explorer opens ready
+                    from models.triggers import get_trigger_family as _gtf
+                    import datetime as _dt
+                    _fam_obj = _gtf(ev.family)
+                    _first_affected = next(
+                        (c for c in ev.affected_commodities if c in CORE_TICKERS),
+                        list(CORE_TICKERS.keys())[0],
+                    )
+                    st.session_state["causal_commodity"]        = _first_affected
+                    st.session_state["causal_family"]           = _fam_obj.description if _fam_obj else ev.family
+                    st.session_state["causal_strength"]         = ev.strength
+                    st.session_state["causal_date"]             = _dt.date.fromisoformat(ev.detected_at[:10])
+                    st.session_state["causal_trace_requested"]  = True
+                    st.session_state["causal_trace_config"] = {
+                        "commodity": _first_affected,
+                        "family":    ev.family,
+                        "date":      ev.detected_at[:10],
+                        "strength":  ev.strength,
+                    }
+else:
+    st.success("✅ No active macro triggers — all models running at baseline confidence.")
+
+# ── Inline causal chain panel (Phase 4 Part 3) ────────────────────────────────
+# Shown when the user clicks "🔗 Trace Chain" on any trigger card above.
+# Compact view: 5-node pipeline badges + narrative + recommendation.
+# The full Sankey lives on pages/6_Causal.py.
+_inline_ev = st.session_state.get("_inline_chain_ev")
+if _inline_ev is not None:
+    from models.causal_chain import CausalChain as _CC
+
+    # Determine commodity for this trace
+    _ic_commodity = next(
+        (c for c in _inline_ev.affected_commodities if c in CORE_TICKERS),
+        list(CORE_TICKERS.keys())[0],
+    )
+
+    # Cache result per family so scrolling doesn't re-trace
+    _ic_cache_key = f"_inline_chain_result_{_inline_ev.family}"
+    if _ic_cache_key not in st.session_state:
+        with st.spinner(f"Tracing {_inline_ev.family.replace('_', ' ').title()}…"):
+            _ic_tracer = _CC()
+            st.session_state[_ic_cache_key] = _ic_tracer.trace_from_event(
+                _inline_ev, prices, _macro_for_triggers, _ic_commodity,
+            )
+    _ic_result = st.session_state[_ic_cache_key]
+
+    # ── Panel header ──────────────────────────────────────────────────────────
+    st.markdown(
+        f"#### 🔗 Causal chain — "
+        f"{_inline_ev.family.replace('_', ' ').title()} · "
+        f"{_ic_commodity.split('(')[0].strip()}"
+    )
+
+    # ── 5-node pipeline badges ────────────────────────────────────────────────
+    _IC_LAYER_ORDER  = ["trigger", "statistical", "regime", "ensemble", "portfolio"]
+    _IC_LAYER_LABELS = {
+        "trigger":     "① Trigger",
+        "statistical": "② Vol Shift",
+        "regime":      "③ Regime",
+        "ensemble":    "④ Ensemble",
+        "portfolio":   "⑤ Portfolio",
+    }
+    _IC_DIR_EMOJI = {
+        "bullish":       "🟢",
+        "bearish":       "🔴",
+        "neutral":       "🔵",
+        "heightened_vol": "🟣",
+        "reduced_vol":   "🟡",
+    }
+    _ic_layer_map  = {n.layer: n for n in _ic_result.nodes}
+    _ic_pipe_cols  = st.columns(5)
+
+    for _ic_i, _ic_layer in enumerate(_IC_LAYER_ORDER):
+        _ic_node = _ic_layer_map.get(_ic_layer)
+        with _ic_pipe_cols[_ic_i]:
+            with st.container(border=True):
+                _ic_lbl = _IC_LAYER_LABELS.get(_ic_layer, _ic_layer.title())
+                if _ic_node:
+                    _ic_emoji = _IC_DIR_EMOJI.get(_ic_node.direction, "🔵")
+                    st.markdown(f"**{_ic_lbl}**")
+                    st.caption(
+                        f"{_ic_emoji} {_ic_node.direction.replace('_', ' ').title()}"
+                    )
+                    st.caption(f"Conf: {_ic_node.confidence:.0%}")
+                else:
+                    st.markdown(f"**{_ic_lbl}**")
+                    st.caption("— N/A —")
+                    st.caption("no data")
+
+    # ── Narrative + recommendation ─────────────────────────────────────────────
+    _ic_narr_col, _ic_rec_col = st.columns([3, 2])
+
+    with _ic_narr_col:
+        st.markdown(
+            f"""<div style="
+                background:#0C1228; border-left:4px solid #F59E0B;
+                border-radius:6px; padding:12px 16px;
+                color:#C8D4F0; font-size:0.9rem; line-height:1.6;
+                margin-top:8px;
+            ">{_ic_result.narrative}</div>""",
+            unsafe_allow_html=True,
+        )
+
+    with _ic_rec_col:
+        _ic_port = _ic_layer_map.get("portfolio")
+        if _ic_port:
+            _ic_dir_colors = {
+                "bullish": "#66BB6A", "bearish": "#EF5350",
+                "neutral": "#4FC3F7", "heightened_vol": "#AB47BC", "reduced_vol": "#F59E0B",
+            }
+            _ic_dc = _ic_dir_colors.get(_ic_port.direction, "#4FC3F7")
+            st.markdown(
+                f"""<div style="
+                    background:#0C1228; border-left:4px solid {_ic_dc};
+                    border-radius:6px; padding:12px 16px;
+                    color:#C8D4F0; font-size:0.9rem; line-height:1.6;
+                    margin-top:8px;
+                ">
+                <span style="color:{_ic_dc}; font-weight:600;">💼 Recommendation</span><br>
+                {_ic_port.summary}
+                <div style="margin-top:8px; opacity:0.55; font-size:0.8rem;">
+                    Confidence: {_ic_port.confidence:.0%}
+                </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+    # ── Jump to full explorer ─────────────────────────────────────────────────
+    _ic_link_col, _ic_clear_col, _ = st.columns([2, 1, 3])
+    with _ic_link_col:
+        st.page_link(
+            "pages/6_Causal.py",
+            label="🔗 Open full Causal Chain Explorer →",
+            help="Opens the Sankey diagram and layer-by-layer breakdown. "
+                 "Controls are pre-filled for this trigger.",
+        )
+    with _ic_clear_col:
+        if st.button("✕ Clear", key="_ic_clear_btn"):
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("_inline_chain"):
+                    del st.session_state[_k]
+            st.rerun()
+
+st.divider()
+
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📐 Statistical",
     "🌲 ML Models",
     "🌍 Market Signals",
     "🧠 Deep Learning",
     "⚛️ Quantum",
+    "🔮 Consensus",
+    "🩺 Health",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -931,6 +1187,26 @@ with tab2:
             band_width = xgb_signal.uncertainty_band[1] - xgb_signal.uncertainty_band[0]
             sc4.metric("Uncertainty band", f"±{band_width / 2:.2%}")
 
+            # ── Trigger routing (Phase 2C) ─────────────────────────────────
+            # If any active trigger affects this commodity, surface the boost.
+            # The raw IC above is the backtest statistic and stays unchanged;
+            # the routed confidence is the ecosystem-aware view.
+            xgb_routed = _signal_router.route([xgb_signal], trigger_events)[0]
+            if xgb_routed.metadata.get("routed_triggers"):
+                _multiplier = xgb_routed.metadata["confidence_multiplier"]
+                _trail = xgb_routed.metadata["routed_triggers"]
+                _summary = ", ".join(
+                    f"{t['family'].replace('_', ' ').title()} (×{t['boost']:.2f})"
+                    for t in _trail
+                )
+                st.info(
+                    f"🔥 **Trigger boost active:** {_summary}.  \n"
+                    f"Effective confidence: {xgb_signal.confidence:.4f} × "
+                    f"{_multiplier:.2f} = **{xgb_routed.confidence:.4f}**.  \n"
+                    f"_Raw IC remains {xgb_signal.confidence:.4f} — the multiplier "
+                    f"reflects macro context, not model accuracy._"
+                )
+
             # ── Structured drivers ─────────────────────────────────────────
             st.divider()
             d1, d2 = st.columns(2)
@@ -1561,3 +1837,478 @@ with tab5:
                 st.warning(f"QNN error: {e}")
     else:
         st.info("Click **▶ Run QNN Study** to benchmark quantum vs classical neural networks.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — MODEL CONSENSUS (META-PREDICTOR)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab6:
+    st.subheader("🔮 Model Consensus")
+    st.caption(
+        "The meta-predictor arbitrates between model tiers based on the current macro regime. "
+        "It learns — from historical backtests — which tier (Statistical, ML, Deep, Quantum) "
+        "to trust when VIX is elevated, when DXY is stressed, when event windows are active, etc. "
+        "Before training it falls back to equal weights; after training it shows live regime-driven arbitration."
+    )
+
+    # ── Commodity selector ─────────────────────────────────────────────────────
+    consensus_commodity = st.selectbox(
+        "Commodity", list(CORE_TICKERS.keys()), index=0, key="consensus_comm"
+    )
+
+    st.divider()
+
+    # ── Market state snapshot ─────────────────────────────────────────────────
+    st.markdown("#### 📡 Current Market State")
+    st.caption("The macro features the meta-predictor sees right now — fed directly from live data.")
+
+    _meta_features = collect_meta_features(_macro_for_triggers)
+
+    import math as _math
+    def _fmt(val, fmt="+.2f", fallback="—"):
+        try:
+            return format(val, fmt) if not _math.isnan(val) else fallback
+        except Exception:
+            return fallback
+
+    ms1, ms2, ms3, ms4, ms5, ms6 = st.columns(6)
+    ms1.metric("VIX",          _fmt(_meta_features.vix, ".1f"),
+               delta="Crisis" if _meta_features.vix_crisis else (
+                     "Risk-Off" if _meta_features.vix_risk_off else "Risk-On"))
+    ms2.metric("DXY Z-Score",  _fmt(_meta_features.dxy_zscore63),
+               delta="Strong $" if (_meta_features.dxy_zscore63 or 0) > 0.5 else (
+                     "Weak $"   if (_meta_features.dxy_zscore63 or 0) < -0.5 else "Neutral"))
+    ms3.metric("DXY Mom 21d",  _fmt(_meta_features.dxy_mom21, "+.3f"))
+    ms4.metric("TLT Mom 21d",  _fmt(_meta_features.tlt_mom21, "+.3f"),
+               delta="Rates ↑" if (_meta_features.tlt_mom21 or 0) < 0 else "Rates ↓")
+    ms5.metric("OPEC Window",
+               "Active" if _meta_features.is_opec_window else "Inactive",
+               delta=f"{_fmt(_meta_features.days_to_opec, '.0f')}d" if not _math.isnan(
+                   _meta_features.days_to_opec or float("nan")) else None)
+    ms6.metric("WASDE Window",
+               "Active" if _meta_features.is_wasde_window else "Inactive",
+               delta=f"{_fmt(_meta_features.days_to_wasde, '.0f')}d" if not _math.isnan(
+                   _meta_features.days_to_wasde or float("nan")) else None)
+
+    st.divider()
+
+    # ── Load meta-predictor ────────────────────────────────────────────────────
+    _meta_pred = load_meta_predictor_from_disk()
+
+    # ── Collect live votes (button-triggered — slow, fits XGBoost + ARIMA) ─────
+    _collect_votes = st.button(
+        "📊 Collect Live Model Votes",
+        key="collect_votes",
+        help="Fits XGBoost and ARIMA on live data to generate tier forecasts. "
+             "Takes ~30–60 seconds and is cached for 4 hours.",
+    )
+    if _collect_votes:
+        st.session_state["consensus_votes_requested"] = True
+
+    _votes: list = []
+    if st.session_state.get("consensus_votes_requested"):
+        with st.spinner(f"Fitting XGBoost + ARIMA on {consensus_commodity} — ~30–60 seconds…"):
+            _votes = get_meta_votes(prices, consensus_commodity)
+        if _votes:
+            st.success(f"Got {len(_votes)} vote(s): {', '.join(v.model_name for v in _votes)}")
+        else:
+            st.warning("No votes collected — model fits may have failed. Check terminal for errors.")
+
+    # ── Run the arbitration (works with 0 votes — falls back to equal weights) ──
+    _decision = _meta_pred.predict(_meta_features, _votes)
+
+    # ── Tier weight cards ──────────────────────────────────────────────────────
+    st.markdown("#### ⚖️ Tier Weights")
+    if _meta_pred.is_trained and _votes:
+        st.caption("Weights derived from backtested market-regime → tier-accuracy mapping, applied to live votes.")
+    elif _meta_pred.is_trained:
+        st.caption("Meta-predictor trained — click **Collect Live Model Votes** above to apply regime weights to today's forecasts.")
+    else:
+        st.caption(
+            "⚠️ Meta-predictor **not yet trained** — showing equal weights. "
+            "Click **Collect Live Model Votes** to see current-tier forecasts, "
+            "or click **Run Backtest & Train** below to generate regime-aware weights."
+        )
+
+    _tier_icons = {"statistical": "📐", "ml": "🌲", "deep": "🧠", "quantum": "⚛️"}
+    _tier_cols  = st.columns(len(KNOWN_TIERS))
+    for _col, _tier in zip(_tier_cols, KNOWN_TIERS):
+        _w = _decision.weights.get(_tier, 0.0)
+        _is_trusted = (_tier == _decision.trusted_tier and _w > 0)
+        with _col:
+            with st.container(border=True):
+                label = f"{_tier_icons.get(_tier, '')} {_tier.title()}"
+                if _is_trusted:
+                    label += " ✅"
+                st.markdown(f"**{label}**")
+                st.progress(_w, text=f"{_w:.0%}")
+
+    st.divider()
+
+    # ── Ensemble forecast + consensus metrics ──────────────────────────────────
+    st.markdown("#### 🎯 Consensus Output")
+
+    co1, co2, co3, co4 = st.columns(4)
+    _ens_pct = _decision.ensemble_forecast
+    co1.metric(
+        "Ensemble Forecast",
+        f"{_ens_pct:+.2%}",
+        delta="Bullish" if _ens_pct > 0 else "Bearish",
+    )
+    co2.metric(
+        "Consensus Strength",
+        f"{_decision.consensus_strength:.0%}",
+        delta="Strong" if _decision.consensus_strength >= 0.7 else (
+              "Moderate" if _decision.consensus_strength >= 0.3 else "Weak"),
+    )
+    co3.metric(
+        "Meta Confidence",
+        f"{_decision.meta_confidence:.0%}" if _meta_pred.is_trained else "—",
+        delta="Trained" if _meta_pred.is_trained else "Untrained",
+    )
+    co4.metric("Trusted Tier", _decision.trusted_tier.title())
+
+    # Reasoning banner
+    _reasoning_color = (
+        "success" if _decision.consensus_strength >= 0.7
+        else ("warning" if _decision.consensus_strength >= 0.3 else "info")
+    )
+    getattr(st, _reasoning_color)(f"💬 {_decision.reasoning}")
+
+    # Votes used expander
+    if _votes:
+        with st.expander(f"Model votes ({len(_votes)} tiers)"):
+            for _v in _votes:
+                _tier_w = _decision.weights.get(_v.tier, 0.0)
+                st.markdown(
+                    f"**{_tier_icons.get(_v.tier,'')} {_v.tier.title()} — {_v.model_name}**  "
+                    f"forecast: `{_v.forecast_return:+.3%}` · "
+                    f"IC: `{_v.confidence:.4f}` · "
+                    f"weight: `{_tier_w:.0%}`"
+                )
+    else:
+        st.warning("No model votes available — model fits may have failed for this commodity.")
+
+    st.divider()
+
+    # ── Feature importances (trained only) ─────────────────────────────────────
+    if _meta_pred.is_trained:
+        st.markdown("#### 🔬 What Drives the Arbitration?")
+        st.caption(
+            "Feature importances from the meta-predictor's decision tree — "
+            "which macro conditions most determine which tier wins."
+        )
+        _top_feats = _meta_pred.explain(top_n=8)
+        if _top_feats:
+            _feat_names  = [f.replace("_", " ").title() for f, _ in _top_feats]
+            _feat_imps   = [imp for _, imp in _top_feats]
+            fig_fi = go.Figure(go.Bar(
+                x=_feat_imps,
+                y=_feat_names,
+                orientation="h",
+                marker_color=AMBER,
+                hovertemplate="%{y}: %{x:.4f}<extra></extra>",
+            ))
+            dark_layout(fig_fi, height=300, title="Meta-Predictor Feature Importances")
+            fig_fi.update_layout(yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_fi, width="stretch")
+
+    # ── Backtest & Train section ───────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 🏋️ Train Meta-Predictor on Live Data")
+    st.caption(
+        "Runs a train/test backtest across WTI, Gold, and Corn using ARIMA and XGBoost. "
+        "For each test date, labels the tier that had the lowest forecast error. "
+        "Fits the meta-predictor on those labelled records and saves it to "
+        "`data/meta_predictor.pkl`. Typically takes **60–120 seconds**."
+    )
+
+    _bt_comm_options = ["WTI Crude Oil", "Gold (COMEX)", "Corn (CBOT)",
+                        "Brent Crude Oil", "Silver (COMEX)", "Copper (COMEX)"]
+    _bt_comms = st.multiselect(
+        "Commodities to backtest",
+        options=_bt_comm_options,
+        default=["WTI Crude Oil", "Gold (COMEX)", "Corn (CBOT)"],
+        key="bt_comms",
+    )
+
+    _run_bt = st.button(
+        "▶ Run Backtest & Train Meta-Predictor",
+        key="run_backtest_train",
+        type="primary",
+    )
+
+    if _run_bt and _bt_comms:
+        with st.spinner(
+            f"Running backtest on {', '.join(_bt_comms)} — this takes ~60–120 seconds…"
+        ):
+            try:
+                from models.backtest_harness import BacktestHarness, ARIMAAdapter, XGBoostAdapter
+                from pathlib import Path
+
+                # Build a price matrix that includes all selected backtest commodities
+                _bt_tickers = {c: CORE_TICKERS[c] for c in _bt_comms if c in CORE_TICKERS}
+                _bt_prices = load_prices(period="3y")  # already cached
+
+                _harness = BacktestHarness(
+                    adapters=[
+                        ARIMAAdapter(fixed_order=(1, 0, 1)),
+                        XGBoostAdapter(),
+                    ],
+                    test_fraction=0.20,
+                    min_train_rows=120,
+                )
+                _save_path = Path(__file__).resolve().parent.parent / "data" / "meta_predictor.pkl"
+                _trained = _harness.train_meta_predictor(
+                    prices=_bt_prices,
+                    macro_df=_macro_for_triggers,
+                    commodities=_bt_comms,
+                    max_depth=5,
+                    min_samples_leaf=10,
+                    save_path=_save_path,
+                )
+                st.success(
+                    f"✅ Meta-predictor trained on backtest data and saved. "
+                    f"Top arbitration feature: **{_trained._top_feature() or '—'}**. "
+                    f"Refresh the page to see regime-aware weights."
+                )
+                # Clear the cached resource so the new model is loaded on next render
+                load_meta_predictor_from_disk.clear()
+            except Exception as _bt_err:
+                st.error(f"Backtest failed: {_bt_err}")
+    elif _run_bt and not _bt_comms:
+        st.warning("Select at least one commodity to backtest.")
+
+    # Full MetaDecision JSON (debug)
+    with st.expander("Full MetaDecision (JSON)"):
+        st.json(_decision.to_dict())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — MODEL HEALTH
+# Spearman IC trends, training history, on-demand retraining
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab7:
+    st.subheader("🩺 Model Health Dashboard")
+    st.caption(
+        "IC (Information Coefficient) measures how well each model tier forecasts "
+        "direction. IC ≥ 0.05 = actionable signal. Updated automatically after each "
+        "retraining run."
+    )
+
+    # ── Helper imports ─────────────────────────────────────────────────────────
+    from models.ic_tracker import (
+        ic_summary, ic_trend, recent_ic_scores,
+        IC_THRESHOLD_ACTION, IC_THRESHOLD_NEUTRAL,
+    )
+    from models.daily_retrain import recent_training_runs
+
+    # ── Colour helpers ─────────────────────────────────────────────────────────
+    _IC_TIER_COLORS = {
+        "statistical": BLUE,
+        "ml":          GREEN,
+        "deep":        PURPLE,
+        "quantum":     AMBER,
+    }
+    _SIG_BADGE = {
+        "actionable": f"background:{GREEN}22; color:{GREEN}; border:1px solid {GREEN}",
+        "marginal":   f"background:{AMBER}22; color:{AMBER}; border:1px solid {AMBER}",
+        "negative":   f"background:{RED}22; color:{RED}; border:1px solid {RED}",
+    }
+
+    def _ic_badge(ic_val: float) -> str:
+        if ic_val >= IC_THRESHOLD_ACTION:
+            color, label = GREEN, "✔ Actionable"
+        elif ic_val >= IC_THRESHOLD_NEUTRAL:
+            color, label = AMBER, "~ Marginal"
+        else:
+            color, label = RED, "✘ Negative"
+        return (
+            f'<span style="background:{color}22; color:{color}; '
+            f'border:1px solid {color}; border-radius:4px; '
+            f'padding:2px 8px; font-size:0.78rem; font-weight:600;">'
+            f'{label} ({ic_val:+.3f})</span>'
+        )
+
+    # ── Section 1: IC Scorecard ────────────────────────────────────────────────
+    st.markdown("#### 📊 Latest IC by tier")
+    _ic_sum = ic_summary()
+
+    if _ic_sum.empty:
+        st.info(
+            "No IC scores logged yet. Run a retraining cycle to populate this view. "
+            "Use the **Retrain Now** button below, or run "
+            "`python -m models.daily_retrain` from the terminal.",
+            icon="📭",
+        )
+    else:
+        # Pivot: rows = commodity, cols = tier
+        _pivot = _ic_sum.pivot_table(
+            index="commodity", columns="tier",
+            values="ic_value", aggfunc="first",
+        ).reset_index()
+
+        # Render as styled HTML table
+        tier_cols = [c for c in _pivot.columns if c != "commodity"]
+        rows_html = []
+        for _, row in _pivot.iterrows():
+            cells = [f'<td style="color:#C0CDE0; padding:6px 12px;">{row["commodity"]}</td>']
+            for t in tier_cols:
+                val = row.get(t, float("nan"))
+                if val != val:  # NaN
+                    cells.append('<td style="color:#555; padding:6px 12px;">—</td>')
+                else:
+                    cells.append(f'<td style="padding:6px 12px;">{_ic_badge(float(val))}</td>')
+            rows_html.append("<tr>" + "".join(cells) + "</tr>")
+
+        header_cells = '<th style="color:#8899AA; padding:6px 12px; text-align:left;">Commodity</th>'
+        for t in tier_cols:
+            header_cells += (
+                f'<th style="color:{_IC_TIER_COLORS.get(t, BLUE)}; '
+                f'padding:6px 12px; text-align:left;">{t.title()}</th>'
+            )
+
+        st.markdown(
+            f"""
+            <table style="width:100%; border-collapse:collapse;
+                          background:{PLOT_BG}; border-radius:8px;">
+              <thead><tr style="border-bottom:1px solid {GRID};">
+                {header_cells}
+              </tr></thead>
+              <tbody>{"".join(rows_html)}</tbody>
+            </table>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"Last computed: {_ic_sum['computed_at'].max()[:19]} UTC  |  "
+            f"{len(_ic_sum)} (commodity, tier) pairs tracked"
+        )
+
+    st.divider()
+
+    # ── Section 2: IC trend chart ──────────────────────────────────────────────
+    st.markdown("#### 📈 IC trend over time (mean across commodities)")
+    _trend_df = ic_trend(days=180)
+
+    if _trend_df.empty:
+        st.info("No trend data yet — run a retraining cycle first.", icon="📈")
+    else:
+        _trend_fig = go.Figure()
+        for _tier in _trend_df["tier"].unique():
+            _t = _trend_df[_trend_df["tier"] == _tier]
+            _t_color = _IC_TIER_COLORS.get(_tier, BLUE)
+            _trend_fig.add_trace(go.Scatter(
+                x=_t["computed_at"],
+                y=_t["mean_ic"],
+                mode="lines+markers",
+                name=_tier.title(),
+                line=dict(color=_t_color, width=2),
+                marker=dict(size=6, color=_t_color),
+                hovertemplate=(
+                    f"<b>{_tier.title()}</b><br>"
+                    "Date: %{x|%Y-%m-%d}<br>"
+                    "Mean IC: %{y:.4f}<extra></extra>"
+                ),
+            ))
+
+        # Threshold lines
+        _trend_fig.add_hline(
+            y=IC_THRESHOLD_ACTION, line_dash="dot",
+            line_color=GREEN, opacity=0.5,
+            annotation_text="Actionable (0.05)",
+            annotation_position="bottom right",
+        )
+        _trend_fig.add_hline(
+            y=0, line_dash="dash",
+            line_color=RED, opacity=0.4,
+            annotation_text="Zero",
+            annotation_position="bottom right",
+        )
+
+        dark_layout(_trend_fig, height=340, title="")
+        st.plotly_chart(_trend_fig, use_container_width=True,
+                        config={"displayModeBar": False})
+
+    st.divider()
+
+    # ── Section 3: Training history + Retrain Now ─────────────────────────────
+    _h_col, _btn_col = st.columns([3, 1])
+
+    with _h_col:
+        st.markdown("#### 🗂️ Retraining history")
+        _train_hist = recent_training_runs(n=10)
+
+        if _train_hist.empty:
+            st.info(
+                "No retraining runs recorded. Run `python -m models.daily_retrain` "
+                "or click **Retrain Now**.",
+                icon="📭",
+            )
+        else:
+            # Pretty-format for display
+            _disp = _train_hist.copy()
+            if "retrained_at" in _disp.columns:
+                _disp["retrained_at"] = _disp["retrained_at"].str[:19]
+            if "tier_distribution" in _disp.columns:
+                _disp = _disp.drop(columns=["tier_distribution"])
+            st.dataframe(_disp, use_container_width=True, hide_index=True)
+
+    with _btn_col:
+        st.markdown("#### 🔁 On-demand retrain")
+        st.caption(
+            "Trains the MetaPredictor on your current DB data. "
+            "Takes ~30–60s depending on data size."
+        )
+        _retrain_btn = st.button(
+            "🔁 Retrain Now",
+            type="primary",
+            key="health_retrain_btn",
+        )
+        if _retrain_btn:
+            st.session_state["health_retrain_requested"] = True
+
+    # ── Retrain execution (button-triggered, never on page load) ───────────────
+    if st.session_state.get("health_retrain_requested"):
+        st.session_state["health_retrain_requested"] = False
+
+        with st.spinner("Loading data and running backtest…"):
+            from models.daily_retrain import run_daily_retrain, RetrainConfig
+            _rt_cfg = RetrainConfig(max_depth=5, min_samples_leaf=10)
+            _rt_result = run_daily_retrain(config=_rt_cfg)
+
+        if _rt_result.success:
+            load_meta_predictor_from_disk.clear()   # bust cache → fresh weights
+            st.success(
+                f"✅ Retraining complete — "
+                f"{_rt_result.n_training_pairs} pairs, "
+                f"{_rt_result.n_commodities} commodities. "
+                f"Top feature: **{_rt_result.top_feature or '—'}**. "
+                f"Refresh the page to see updated IC scores."
+            )
+            # Show summary metrics inline
+            _m1, _m2, _m3 = st.columns(3)
+            with _m1:
+                st.metric("Training pairs", _rt_result.n_training_pairs)
+            with _m2:
+                st.metric("Tree leaves", _rt_result.tree_n_leaves)
+            with _m3:
+                dom_tier = max(_rt_result.tier_distribution,
+                               key=lambda k: _rt_result.tier_distribution[k],
+                               default="—")
+                st.metric("Dominant tier", dom_tier.title())
+        else:
+            st.error(f"❌ Retraining failed: {_rt_result.error}")
+
+    st.divider()
+
+    # ── Section 4: Raw IC log (last 30 days, collapsible) ─────────────────────
+    with st.expander("🔍 Raw IC log (last 30 days)", expanded=False):
+        _raw_ic = recent_ic_scores(days=30)
+        if _raw_ic.empty:
+            st.info("No IC scores in the last 30 days.")
+        else:
+            if "ic_value" in _raw_ic.columns:
+                _raw_ic["ic_value"] = _raw_ic["ic_value"].round(4)
+            st.dataframe(_raw_ic, use_container_width=True, hide_index=True)

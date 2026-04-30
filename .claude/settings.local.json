@@ -39,7 +39,12 @@
       "Bash(PYTHONPATH=. python models/test_router.py)",
       "Bash(PYTHONPATH=. python models/test_detectors.py)",
       "Bash(PYTHONPATH=/Users/charlesmerkel/Desktop/Future_of_Commodities/Commodities_Dashboard python -c \"import features; print\\('features:', features.__file__\\); print\\(features.__path__\\)\")",
-      "Bash(PYTHONPATH=. python -m models.test_detectors)"
+      "Bash(PYTHONPATH=. python -m models.test_detectors)",
+      "Bash(python3 -m models.test_ic_tracker)",
+      "Bash(python3 -m models.test_daily_retrain)",
+      "Bash(/Users/charlesmerkel/.pyenv/shims/python -m models.test_daily_retrain)",
+      "Read(//opt/miniconda3/bin/**)",
+      "Read(//opt/anaconda3/bin/**)"
     ]
   }
 }

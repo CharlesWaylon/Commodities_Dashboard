@@ -26,6 +26,7 @@ with st.sidebar:
     st.page_link("pages/3_News.py",     label="News")
     st.page_link("pages/4_Models.py",   label="Models")
     st.page_link("pages/5_Database.py", label="Database")
+    st.page_link("pages/6_Causal.py",   label="Causal Chain")
     st.divider()
 
 st.title("Price Charts")
