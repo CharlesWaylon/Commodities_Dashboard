@@ -2269,6 +2269,18 @@ with tab7:
         if _retrain_btn:
             st.session_state["health_retrain_requested"] = True
 
+        st.markdown("#### ⚙️ Threshold tuning")
+        st.caption(
+            "Replays detectors over 180 days to find the minimum strength "
+            "that predicts price moves."
+        )
+        _tune_btn = st.button(
+            "⚙️ Tune Thresholds",
+            key="health_tune_btn",
+        )
+        if _tune_btn:
+            st.session_state["health_tune_requested"] = True
+
     # ── Retrain execution (button-triggered, never on page load) ───────────────
     if st.session_state.get("health_retrain_requested"):
         st.session_state["health_retrain_requested"] = False
@@ -2301,9 +2313,139 @@ with tab7:
         else:
             st.error(f"❌ Retraining failed: {_rt_result.error}")
 
+    # ── Threshold tuning execution ────────────────────────────────────────────
+    if st.session_state.get("health_tune_requested"):
+        st.session_state["health_tune_requested"] = False
+
+        with st.spinner(
+            "Replaying detectors over last 180 days and grid-searching thresholds…"
+        ):
+            from models.threshold_tuner import ThresholdTuner, TunerConfig
+            _tune_cfg = TunerConfig(
+                lookback_days=180, forward_days=5, min_events_above=8
+            )
+            _tune_results = ThresholdTuner(_tune_cfg).tune_all(
+                macro_df=_macro_for_triggers, prices=prices
+            )
+
+        if _tune_results:
+            st.success(
+                f"✅ Threshold tuning complete — "
+                f"{len(_tune_results)} trigger famil{'y' if len(_tune_results)==1 else 'ies'} evaluated."
+            )
+            for _fam, _tr in _tune_results.items():
+                st.markdown(
+                    f"**{_fam.replace('_', ' ').title()}**: "
+                    f"threshold → `{_tr.optimal_threshold:.2f}` "
+                    f"(IC {_tr.best_ic:+.4f} at threshold)  {_tr.signal_label()}"
+                )
+        else:
+            st.warning(
+                "⚠️ No trigger events detected in the last 180 days. "
+                "Thresholds could not be tuned — try again after more market data "
+                "is loaded.",
+                icon="⚠️",
+            )
+
     st.divider()
 
-    # ── Section 4: Raw IC log (last 30 days, collapsible) ─────────────────────
+    # ── Section 4: Trigger threshold scorecard ────────────────────────────────
+    st.markdown("#### ⚙️ Trigger strength thresholds")
+    st.caption(
+        "Current optimal thresholds from the last tuning run. "
+        "Click **Tune Thresholds** to refresh."
+    )
+
+    from models.threshold_tuner import (
+        load_optimal_thresholds, recent_tune_history, FALLBACK_THRESHOLD
+    )
+    _opt_thresholds = load_optimal_thresholds()
+    _tune_hist      = recent_tune_history(n=20)
+
+    if _tune_hist.empty:
+        st.info(
+            "No threshold tuning history yet. "
+            "Click **⚙️ Tune Thresholds** above to calibrate the detectors.",
+            icon="⚙️",
+        )
+    else:
+        # Latest result per family
+        _latest_tune = (
+            _tune_hist
+            .sort_values("evaluated_at", ascending=False)
+            .drop_duplicates(subset="family")
+        )
+        _tc1, _tc2, _tc3 = st.columns(3)
+        _cols_cycle = [_tc1, _tc2, _tc3]
+        for _idx, (_, _tr_row) in enumerate(_latest_tune.iterrows()):
+            _fam    = _tr_row["family"]
+            _thr    = float(_tr_row["optimal_threshold"])
+            _ic_val = float(_tr_row["best_ic"]) if _tr_row["best_ic"] is not None else float("nan")
+            _n_ev   = int(_tr_row["n_events_at_threshold"])
+
+            if _ic_val >= 0.05:
+                _thr_color = GREEN
+            elif _ic_val >= 0.0:
+                _thr_color = AMBER
+            else:
+                _thr_color = RED
+
+            with _cols_cycle[_idx % 3]:
+                st.markdown(
+                    f"""
+                    <div style="background:{PLOT_BG}; border-left:4px solid {_thr_color};
+                                border-radius:6px; padding:12px 16px; margin-bottom:8px;">
+                    <div style="color:#8899AA; font-size:0.78rem; margin-bottom:4px;">
+                        {_fam.replace('_', ' ').title()}
+                    </div>
+                    <div style="color:{_thr_color}; font-size:1.4rem; font-weight:700;">
+                        ≥ {_thr:.2f}
+                    </div>
+                    <div style="color:#8899AA; font-size:0.78rem;">
+                        IC {_ic_val:+.4f} · {_n_ev} events above threshold
+                    </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+        # IC curve expander
+        with st.expander("📈 IC-vs-threshold curves", expanded=False):
+            import json as _json
+            for _, _tr_row in _latest_tune.iterrows():
+                _fam = _tr_row["family"]
+                try:
+                    _grid = _json.loads(_tr_row.get("grid_results") or "{}")
+                    if not _grid:
+                        continue
+                    _t_vals  = [float(k) for k in _grid.keys()]
+                    _ic_vals = [float(v) for v in _grid.values()]
+                    _opt_t   = float(_tr_row["optimal_threshold"])
+                    _curve = go.Figure()
+                    _curve.add_trace(go.Scatter(
+                        x=_t_vals, y=_ic_vals,
+                        mode="lines+markers",
+                        name=_fam.replace("_", " ").title(),
+                        line=dict(color=BLUE, width=2),
+                        marker=dict(size=7),
+                    ))
+                    _curve.add_vline(
+                        x=_opt_t, line_dash="dot", line_color=GREEN,
+                        annotation_text=f"optimal ({_opt_t:.2f})",
+                        annotation_position="top right",
+                    )
+                    _curve.add_hline(y=0.05, line_dash="dash", line_color=AMBER,
+                                     opacity=0.5)
+                    dark_layout(_curve, height=260,
+                                title=f"{_fam.replace('_', ' ').title()} — IC vs threshold")
+                    st.plotly_chart(_curve, use_container_width=True,
+                                    config={"displayModeBar": False})
+                except Exception:
+                    pass
+
+    st.divider()
+
+    # ── Section 5: Raw IC log (last 30 days, collapsible) ─────────────────────
     with st.expander("🔍 Raw IC log (last 30 days)", expanded=False):
         _raw_ic = recent_ic_scores(days=30)
         if _raw_ic.empty:
