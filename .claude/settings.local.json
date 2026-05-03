@@ -44,7 +44,8 @@
       "Bash(python3 -m models.test_daily_retrain)",
       "Bash(/Users/charlesmerkel/.pyenv/shims/python -m models.test_daily_retrain)",
       "Read(//opt/miniconda3/bin/**)",
-      "Read(//opt/anaconda3/bin/**)"
+      "Read(//opt/anaconda3/bin/**)",
+      "Bash(/opt/anaconda3/bin/python -m models.threshold_tuner --lookback 365 --dry-run)"
     ]
   }
 }

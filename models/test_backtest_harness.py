@@ -18,6 +18,7 @@ from models.backtest_harness import (
     _align_macro,
     _meta_features_for_date,
     _tier_counts,
+    DEFAULT_ADAPTERS,
 )
 from models.meta_predictor import MetaFeatures, MetaPredictor, KNOWN_TIERS
 
@@ -372,12 +373,156 @@ def test_tier_counts():
         _fail("_tier_counts", e)
 
 
+# ── Walk-forward CV tests ──────────────────────────────────────────────────────
+
+def test_split_indices_structure():
+    print("15. _split_indices — test windows are monotonically increasing and non-overlapping")
+    try:
+        harness = BacktestHarness(
+            adapters=[_StubAdapter("ml", 0.0)],
+            min_train_rows=60,
+            n_splits=4,
+        )
+        splits = harness._split_indices(300)
+        assert len(splits) == 4, f"expected 4 folds, got {len(splits)}"
+
+        prev_end = -1
+        for i, (ts, te) in enumerate(splits):
+            assert ts < te, f"fold {i}: test_start ({ts}) >= test_end ({te})"
+            assert ts >= harness.min_train_rows, (
+                f"fold {i}: test_start {ts} < min_train_rows {harness.min_train_rows}"
+            )
+            assert ts >= prev_end, (
+                f"fold {i}: test windows overlap — start {ts} < prev end {prev_end}"
+            )
+            prev_end = te
+
+        _ok(f"4 non-overlapping folds: {splits}")
+    except Exception as e:
+        _fail("_split_indices structure", e)
+
+
+def test_split_indices_min_train_respected():
+    print("16. _split_indices — every fold has at least min_train_rows training rows")
+    try:
+        harness = BacktestHarness(
+            adapters=[_StubAdapter("ml", 0.0)],
+            min_train_rows=100,
+            n_splits=5,
+        )
+        splits = harness._split_indices(400)
+        for i, (ts, te) in enumerate(splits):
+            n_train = ts  # training is prices.iloc[:test_start]
+            assert n_train >= 100, (
+                f"fold {i}: only {n_train} training rows, need ≥ 100"
+            )
+        _ok(f"all {len(splits)} folds have ≥ 100 training rows")
+    except Exception as e:
+        _fail("_split_indices min_train", e)
+
+
+def test_split_indices_single_split_fallback():
+    print("17. _split_indices — n_splits=1 falls back to test_fraction single split")
+    try:
+        harness = BacktestHarness(
+            adapters=[_StubAdapter("ml", 0.0)],
+            test_fraction=0.20,
+            min_train_rows=50,
+            n_splits=1,
+        )
+        n = 300
+        splits = harness._split_indices(n)
+        assert len(splits) == 1, f"expected 1 fold, got {len(splits)}"
+        ts, te = splits[0]
+        expected_split = int(n * (1 - 0.20))   # = 240
+        assert ts == expected_split, f"test_start={ts}, expected {expected_split}"
+        assert te == n - 1, f"test_end={te}, expected {n-1}"
+        _ok(f"single split: train [0:{ts}], test [{ts}:{te}]")
+    except Exception as e:
+        _fail("_split_indices single-split fallback", e)
+
+
+def test_walk_forward_produces_more_records():
+    print("18. Walk-forward (n_splits=5) produces more records than single split (n_splits=1)")
+    try:
+        prices = _make_prices(300)
+        macro  = _make_macro(prices.index)
+        adapters = [_StubAdapter("statistical", 0.0), _StubAdapter("ml", 0.001)]
+
+        h_wf  = BacktestHarness(adapters=adapters, min_train_rows=60, n_splits=5)
+        h_one = BacktestHarness(adapters=adapters, min_train_rows=60, n_splits=1,
+                                test_fraction=0.20)
+
+        r_wf  = h_wf.run(prices, macro,  ["WTI Crude Oil"])
+        r_one = h_one.run(prices, macro, ["WTI Crude Oil"])
+
+        assert len(r_wf) > len(r_one), (
+            f"walk-forward ({len(r_wf)}) should exceed single-split ({len(r_one)})"
+        )
+        _ok(f"walk-forward={len(r_wf)} records  vs  single-split={len(r_one)} records")
+    except Exception as e:
+        _fail("walk-forward vs single split record count", e)
+
+
+def test_walk_forward_no_data_leakage():
+    print("19. Walk-forward — each fold's test dates are strictly after its train dates")
+    try:
+        prices  = _make_prices(300)
+        macro   = _make_macro(prices.index)
+        harness = BacktestHarness(
+            adapters=[_StubAdapter("ml", 0.0)],
+            min_train_rows=60,
+            n_splits=4,
+        )
+        splits = harness._split_indices(len(prices))
+        for fold, (ts, te) in enumerate(splits):
+            train_last_date = prices.index[ts - 1]
+            test_first_date = prices.index[ts]
+            assert test_first_date > train_last_date, (
+                f"fold {fold}: test starts on {test_first_date} "
+                f"but train ends on {train_last_date}"
+            )
+        _ok(f"no leakage across all {len(splits)} folds")
+    except Exception as e:
+        _fail("walk-forward no leakage", e)
+
+
+def test_walk_forward_covers_most_of_history():
+    print("20. Walk-forward — union of test windows covers the post-min_train portion of history")
+    try:
+        n = 400
+        harness = BacktestHarness(
+            adapters=[_StubAdapter("ml", 0.0)],
+            min_train_rows=100,
+            n_splits=5,
+        )
+        splits = harness._split_indices(n)
+
+        # Total test dates across all folds
+        total_test_dates = sum(te - ts for ts, te in splits)
+        # Available dates after min_train_rows (minus last row)
+        available = (n - 1) - harness.min_train_rows
+
+        # Folds cover at least 80% of available history
+        coverage = total_test_dates / available
+        assert coverage >= 0.80, (
+            f"folds cover only {coverage:.0%} of available history "
+            f"({total_test_dates}/{available} dates)"
+        )
+        _ok(
+            f"{total_test_dates}/{available} available dates covered "
+            f"({coverage:.0%}) across {len(splits)} folds"
+        )
+    except Exception as e:
+        _fail("walk-forward coverage", e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print()
     print("=" * 60)
-    print("BACKTEST HARNESS — TEST SUITE  (Phase 3 Part 2)")
+    print("BACKTEST HARNESS — TEST SUITE  (Phase 3 Part 2 + Phase 5 CV)")
     print("=" * 60)
     print()
 
@@ -396,6 +541,13 @@ if __name__ == "__main__":
         test_harness_collect_training_pairs,
         test_harness_train_meta_predictor,
         test_tier_counts,
+        # ── Walk-forward CV (Phase 5) ──────────────────────────────────────────
+        test_split_indices_structure,
+        test_split_indices_min_train_respected,
+        test_split_indices_single_split_fallback,
+        test_walk_forward_produces_more_records,
+        test_walk_forward_no_data_leakage,
+        test_walk_forward_covers_most_of_history,
     ]:
         fn()
         print()
@@ -404,10 +556,8 @@ if __name__ == "__main__":
     if FAIL == 0:
         print(f"ALL {PASS} ASSERTIONS PASSED")
         print(
-            "Phase 3 Part 2 complete: backtest harness → labelled records → MetaPredictor.fit()."
-        )
-        print(
-            "Next: wire into the dashboard (Part 3) so MetaPredictor weights are live."
+            "Phase 5 CV upgrade complete: BacktestHarness now uses expanding-window "
+            "walk-forward cross-validation (n_splits=5 default)."
         )
     else:
         print(f"{PASS} passed  |  {FAIL} FAILED")

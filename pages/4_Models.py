@@ -235,6 +235,28 @@ returns = np.log(prices / prices.shift(1)).dropna()
 # Detect macro events (OPEC window, Fed/DXY stress, etc.) from live data, then
 # expose the events to every tab so model outputs can route through them.
 _macro_for_triggers = load_macro(period="2y", _price_index=prices.index)
+# Enrich with ENSO + energy-transition features so detect_weather_shock and
+# detect_energy_transition receive the columns they require.  Both loaders are
+# @st.cache_data, so this is effectively free on repeat refreshes.
+if not _macro_for_triggers.empty:
+    try:
+        _enso_cols = load_enso()
+        if not _enso_cols.empty:
+            _macro_for_triggers = _macro_for_triggers.join(
+                _enso_cols.reindex(_macro_for_triggers.index).ffill(limit=5),
+                how="left",
+            )
+    except Exception:
+        pass
+    try:
+        _et_cols = load_energy_transition(period="2y")
+        if not _et_cols.empty:
+            _macro_for_triggers = _macro_for_triggers.join(
+                _et_cols.reindex(_macro_for_triggers.index).ffill(limit=5),
+                how="left",
+            )
+    except Exception:
+        pass
 trigger_events = detect_all(_macro_for_triggers) if not _macro_for_triggers.empty else []
 # Persist trigger firings to the SQLite audit log (Phase 5 backtest input).
 # Silent — a logging failure must never break the live dashboard.

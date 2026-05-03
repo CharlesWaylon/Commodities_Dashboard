@@ -35,10 +35,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models.ic_tracker import (
     IC_THRESHOLD_ACTION,
+    COMMODITY_SECTORS,
+    KNOWN_SECTORS,
     ICResult,
     compute_ic,
     compute_ic_from_records,
+    compute_sector_ic_from_records,
     ic_summary,
+    ic_sector_summary,
+    ic_commodity_summary,
     ic_trend,
     log_ic_scores,
     recent_ic_scores,
@@ -304,10 +309,84 @@ def run_tests():
                abs(float(row_ts1["mean_ic"]) - expected_mean) < 1e-9,
                f"mean={row_ts1['mean_ic']} expected={expected_mean}")
 
+    # ── 19. compute_sector_ic_from_records — energy records pool correctly ───────
+    # 10 WTI records + 10 Brent records → Energy sector should have 20 obs
+    energy_records = (
+        [_fake_record("WTI Crude Oil",  "ml", fc=float(i), actual=float(i),
+                      date_offset=i) for i in range(10)]
+        + [_fake_record("Brent Crude Oil", "ml", fc=float(i), actual=float(i),
+                        date_offset=i + 10) for i in range(10)]
+    )
+    r19 = compute_sector_ic_from_records(energy_records)
+    _check("compute_sector_ic_from_records — Energy sector present",
+           ("Energy", "ml") in r19, f"keys={list(r19.keys())}")
+    _check("compute_sector_ic_from_records — n_obs pools both commodities",
+           r19[("Energy", "ml")].n_obs == 20,
+           f"n_obs={r19[('Energy', 'ml')].n_obs}")
+    _check("compute_sector_ic_from_records — commodity field = sector name",
+           r19[("Energy", "ml")].commodity == "Energy",
+           r19[("Energy", "ml")].commodity)
+
+    # ── 20. Unknown commodity is skipped at sector level ─────────────────────
+    unknown_records = [
+        _fake_record("UnknownCommodityXYZ", "ml", float(i), float(i), i)
+        for i in range(10)
+    ]
+    r20 = compute_sector_ic_from_records(unknown_records)
+    _check("compute_sector_ic_from_records — unknown commodity skipped",
+           r20 == {}, f"got={r20}")
+
+    # ── 21. Sector IC pools multiple sectors independently ────────────────────
+    mixed_records = (
+        [_fake_record("WTI Crude Oil",  "statistical", float(i), float(i), i)
+         for i in range(8)]
+        + [_fake_record("Gold (COMEX)", "statistical", float(i), float(i), i)
+           for i in range(8)]
+    )
+    r21 = compute_sector_ic_from_records(mixed_records)
+    _check("compute_sector_ic_from_records — Energy and Metals separate",
+           ("Energy", "statistical") in r21 and ("Metals", "statistical") in r21,
+           f"keys={list(r21.keys())}")
+    # Energy and Metals should NOT be mixed together
+    _check("compute_sector_ic_from_records — Energy n_obs = 8 (not 16)",
+           r21[("Energy", "statistical")].n_obs == 8,
+           f"Energy n_obs={r21[('Energy', 'statistical')].n_obs}")
+
+    # ── 22. ic_sector_summary / ic_commodity_summary split correctly ──────────
+    with tempfile.TemporaryDirectory() as td:
+        db22 = Path(td) / "test.db"
+        ts22 = datetime.now(timezone.utc).isoformat()
+
+        # Log one commodity-level row and one sector-level row
+        commodity_res = {
+            ("WTI Crude Oil", "ml"): ICResult(
+                "WTI Crude Oil", "ml", 0.07, 20,
+                "2025-01-01", "2025-03-31", ts22)
+        }
+        sector_res = {
+            ("Energy", "ml"): ICResult(
+                "Energy", "ml", 0.09, 40,
+                "2025-01-01", "2025-03-31", ts22)
+        }
+        log_ic_scores({**commodity_res, **sector_res}, db_path=db22)
+
+        sec_df  = ic_sector_summary(db_path=db22)
+        comm_df = ic_commodity_summary(db_path=db22)
+
+        _check("ic_sector_summary — returns only sector rows",
+               len(sec_df) == 1 and sec_df.iloc[0]["commodity"] == "Energy",
+               f"rows={len(sec_df)} commodities={list(sec_df['commodity']) if not sec_df.empty else []}")
+        _check("ic_commodity_summary — returns only commodity rows",
+               len(comm_df) == 1 and comm_df.iloc[0]["commodity"] == "WTI Crude Oil",
+               f"rows={len(comm_df)} commodities={list(comm_df['commodity']) if not comm_df.empty else []}")
+        _check("KNOWN_SECTORS contains all expected sectors",
+               {"Energy", "Metals", "Agriculture", "Livestock", "Digital Assets"}.issubset(KNOWN_SECTORS),
+               f"KNOWN_SECTORS={KNOWN_SECTORS}")
+
     print()
     print("=" * 60)
-    print("ALL 18 ASSERTIONS PASSED")
-    print("Phase 5 Part 2 — IC Tracker ready.")
+    print("ALL 22 ASSERTIONS PASSED")
+    print("Phase 5 Part 2 — IC Tracker + sector-level IC ready.")
     print("=" * 60)
 
 
