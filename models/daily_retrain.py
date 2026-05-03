@@ -399,15 +399,28 @@ def run_daily_retrain(
             len(records), n_commodities, tier_dist,
         )
 
-        # ── 4b. Compute and log IC scores ─────────────────────────────────────
+        # ── 4b. Compute and log IC scores (per-commodity + sector-level) ─────────
         if not cfg.dry_run:
             try:
-                from models.ic_tracker import compute_ic_from_records, log_ic_scores
+                from models.ic_tracker import (
+                    compute_ic_from_records,
+                    compute_sector_ic_from_records,
+                    log_ic_scores,
+                )
                 ic_results = compute_ic_from_records(
                     records, computed_at=summary.retrained_at
                 )
-                n_ic = log_ic_scores(ic_results, db_path=cfg.db_path)
-                log.info("Logged %d IC score(s) to ic_log.", n_ic)
+                sector_ic = compute_sector_ic_from_records(
+                    records, computed_at=summary.retrained_at
+                )
+                # Merge both dicts; sector rows use sector name as commodity field
+                combined = {**ic_results, **sector_ic}
+                n_ic = log_ic_scores(combined, db_path=cfg.db_path)
+                log.info(
+                    "Logged %d IC score(s) to ic_log "
+                    "(%d commodity-level, %d sector-level).",
+                    n_ic, len(ic_results), len(sector_ic),
+                )
             except Exception as exc:
                 log.warning("IC logging skipped: %s", exc)
 

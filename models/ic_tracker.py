@@ -75,6 +75,65 @@ log = logging.getLogger(__name__)
 IC_THRESHOLD_ACTION  = 0.05   # ≥ this → actionable (green)
 IC_THRESHOLD_NEUTRAL = 0.00   # 0 to threshold → marginal (amber), < 0 → red
 
+# ── Commodity → Sector mapping ─────────────────────────────────────────────────
+# Used by compute_sector_ic_from_records() to pool per-commodity records into
+# sector buckets.  Any commodity not listed here is silently skipped at the
+# sector-aggregation step (it still appears in per-commodity IC).
+
+COMMODITY_SECTORS: Dict[str, str] = {
+    # Energy — futures
+    "WTI Crude Oil":            "Energy",
+    "Brent Crude Oil":          "Energy",
+    "Natural Gas":              "Energy",
+    "Gasoline (RBOB)":          "Energy",
+    "Heating Oil":              "Energy",
+    # Energy — ETFs / equities
+    "Carbon Credits*":          "Energy",
+    "LNG / Intl Gas*":          "Energy",
+    "Metallurgical Coal*":      "Energy",
+    "Thermal Coal*":            "Energy",
+    "Uranium*":                 "Energy",
+    # Metals — futures
+    "Gold (COMEX)":             "Metals",
+    "Silver (COMEX)":           "Metals",
+    "Copper (COMEX)":           "Metals",
+    "Platinum":                 "Metals",
+    "Palladium":                "Metals",
+    "Aluminum (COMEX)":         "Metals",
+    "HRC Steel":                "Metals",
+    # Metals — ETFs / equities
+    "Gold (Physical/London)*":  "Metals",
+    "Silver (Physical)*":       "Metals",
+    "Iron Ore / Steel*":        "Metals",
+    "Lithium*":                 "Metals",
+    "Rare Earths*":             "Metals",
+    "Zinc & Cobalt*":           "Metals",
+    # Agriculture — futures
+    "Corn (CBOT)":              "Agriculture",
+    "Wheat (CBOT SRW)":         "Agriculture",
+    "Wheat (KC HRW)":           "Agriculture",
+    "Soybeans (CBOT)":          "Agriculture",
+    "Soybean Meal":             "Agriculture",
+    "Soybean Oil":              "Agriculture",
+    "Coffee":                   "Agriculture",
+    "Cocoa":                    "Agriculture",
+    "Sugar":                    "Agriculture",
+    "Cotton":                   "Agriculture",
+    "Orange Juice (FCOJ-A)":    "Agriculture",
+    "Oats (CBOT)":              "Agriculture",
+    "Rough Rice (CBOT)":        "Agriculture",
+    "Lumber*":                  "Agriculture",
+    # Livestock
+    "Live Cattle":              "Livestock",
+    "Feeder Cattle":            "Livestock",
+    "Lean Hogs":                "Livestock",
+    # Digital Assets
+    "Bitcoin":                  "Digital Assets",
+}
+
+# Convenience set of all known sector names — used for filtering in query helpers
+KNOWN_SECTORS: frozenset = frozenset(COMMODITY_SECTORS.values())
+
 _ROOT       = Path(__file__).resolve().parent.parent
 DEFAULT_DB  = _ROOT / "data" / "commodities.db"
 
@@ -253,6 +312,78 @@ def compute_ic_from_records(
     return results
 
 
+def compute_sector_ic_from_records(
+    records: list,   # List[BacktestRecord]
+    computed_at: Optional[str] = None,
+) -> Dict[Tuple[str, str], ICResult]:
+    """
+    Compute sector-level Spearman IC by pooling all commodity records that
+    belong to the same sector (as defined by COMMODITY_SECTORS).
+
+    Pooling gives more (forecast, actual) pairs per (sector, tier) bucket than
+    any single commodity can, producing more stable IC estimates for rare tiers
+    or shorter histories.
+
+    Typical sectors: "Energy", "Metals", "Agriculture", "Livestock",
+    "Digital Assets".
+
+    Parameters
+    ----------
+    records    : list of BacktestRecord (from BacktestHarness.run())
+    computed_at: ISO timestamp to stamp all results with (defaults to now UTC).
+
+    Returns
+    -------
+    Dict[(sector_name, tier), ICResult]
+    The ICResult.commodity field holds the sector name (e.g. "Energy") so
+    results can be stored in the same ic_log table and queried via
+    ic_sector_summary().  Commodities not in COMMODITY_SECTORS are skipped.
+    """
+    if not records:
+        return {}
+
+    ts = computed_at or datetime.now(timezone.utc).isoformat()
+
+    # Pool (forecast, actual, date) by (sector, tier)
+    buckets: Dict[Tuple[str, str], Tuple[List[float], List[float], List]] = {}
+    for rec in records:
+        sector = COMMODITY_SECTORS.get(rec.commodity)
+        if sector is None:
+            continue
+        for tier, fc in rec.tier_forecasts.items():
+            key = (sector, tier)
+            if key not in buckets:
+                buckets[key] = ([], [], [])
+            buckets[key][0].append(fc)
+            buckets[key][1].append(rec.actual_return)
+            buckets[key][2].append(rec.date)
+
+    results: Dict[Tuple[str, str], ICResult] = {}
+    for (sector, tier), (fc_list, ac_list, dates) in buckets.items():
+        ic_val = compute_ic(fc_list, ac_list)
+        if np.isnan(ic_val):
+            continue
+
+        sorted_dates = sorted(dates)
+        result = ICResult(
+            commodity=sector,      # sector name stored as commodity field
+            tier=tier,
+            ic_value=round(ic_val, 6),
+            n_obs=len(fc_list),
+            window_start=pd.Timestamp(sorted_dates[0]).strftime("%Y-%m-%d"),
+            window_end=pd.Timestamp(sorted_dates[-1]).strftime("%Y-%m-%d"),
+            computed_at=ts,
+        )
+        results[(sector, tier)] = result
+        log.info(
+            "Sector IC[%s, %s] = %.4f  (n=%d, %s → %s)",
+            sector, tier, ic_val, len(fc_list),
+            result.window_start, result.window_end,
+        )
+
+    return results
+
+
 # ── SQLite persistence ─────────────────────────────────────────────────────────
 
 def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
@@ -404,6 +535,47 @@ def ic_summary(
     except Exception as exc:
         log.warning("ic_summary failed: %s", exc)
         return pd.DataFrame()
+
+
+def ic_sector_summary(
+    db_path: Optional[Union[str, Path]] = None,
+) -> pd.DataFrame:
+    """
+    Latest IC score per (sector, tier) — one row per pair.
+
+    Filters ic_summary() to rows whose commodity field is a known sector name
+    (i.e. rows written by compute_sector_ic_from_records()).
+
+    Useful for a sector-level scorecard in the Model Health tab, showing
+    whether the ml tier outperforms statistical on Energy vs Metals vs
+    Agriculture independently.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        commodity (= sector name), tier, ic_value, n_obs, window_end,
+        computed_at, signal_strength
+    Sorted by tier, then sector.  Empty DataFrame if no sector IC logged yet.
+    """
+    summary = ic_summary(db_path=db_path)
+    if summary.empty:
+        return summary
+    return summary[summary["commodity"].isin(KNOWN_SECTORS)].copy()
+
+
+def ic_commodity_summary(
+    db_path: Optional[Union[str, Path]] = None,
+) -> pd.DataFrame:
+    """
+    Latest IC per individual commodity (excludes sector-level rows).
+
+    Complement to ic_sector_summary() — returns only rows whose commodity
+    field is NOT a known sector name, i.e. the per-commodity IC scores.
+    """
+    summary = ic_summary(db_path=db_path)
+    if summary.empty:
+        return summary
+    return summary[~summary["commodity"].isin(KNOWN_SECTORS)].copy()
 
 
 def ic_trend(

@@ -611,6 +611,30 @@ def main() -> None:
         log.error("Could not load macro overlays.")
         sys.exit(1)
 
+    # Enrich with ENSO + ET features so weather_shock / energy_transition
+    # detectors can fire during simulation.
+    try:
+        from features.climate_weather import fetch_mei
+        enso_df = fetch_mei(lag_months=[3, 6])
+        if not enso_df.empty:
+            macro = macro.join(
+                enso_df.reindex(macro.index).ffill(limit=5), how="left"
+            )
+            log.info("ENSO columns merged into macro (%d cols).", len(enso_df.columns))
+    except Exception as exc:
+        log.warning("ENSO merge skipped: %s", exc)
+
+    try:
+        from features.energy_transition import build_energy_transition_features
+        et_df = build_energy_transition_features(period="2y")
+        if not et_df.empty:
+            macro = macro.join(
+                et_df.reindex(macro.index).ffill(limit=5), how="left"
+            )
+            log.info("Energy-transition columns merged into macro (%d cols).", len(et_df.columns))
+    except Exception as exc:
+        log.warning("Energy-transition merge skipped: %s", exc)
+
     cfg = TunerConfig(
         lookback_days=args.lookback,
         forward_days=args.forward,
