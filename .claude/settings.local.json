@@ -45,7 +45,13 @@
       "Bash(/Users/charlesmerkel/.pyenv/shims/python -m models.test_daily_retrain)",
       "Read(//opt/miniconda3/bin/**)",
       "Read(//opt/anaconda3/bin/**)",
-      "Bash(/opt/anaconda3/bin/python -m models.threshold_tuner --lookback 365 --dry-run)"
+      "Bash(/opt/anaconda3/bin/python -m models.threshold_tuner --lookback 365 --dry-run)",
+      "Bash(xargs ls *)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//opt/homebrew/Cellar/**)",
+      "Bash(pip3 show *)",
+      "Bash(mdfind -name \"python3\")",
+      "Bash(grep -E \"bin/python3$\")"
     ]
   }
 }

@@ -47,12 +47,18 @@ from sklearn.preprocessing import StandardScaler
 from scipy.stats import spearmanr
 from typing import Optional
 
-from models.config import MODELING_COMMODITIES, TEST_FRACTION, RANDOM_SEED
+from models.config import (
+    COMMODITY_SECTORS,
+    MODELING_COMMODITIES,
+    RANDOM_SEED,
+    SECTOR_XGB_DEFAULTS,
+    TEST_FRACTION,
+)
 from models.features import build_feature_matrix, build_target
 from models.model_signal import ModelSignal
 from models.broadcaster import SignalBroadcaster
 
-# XGBoost hyperparameters — conservative defaults for financial series
+# Global fallback params (used only when sector lookup fails entirely)
 XGB_PARAMS = dict(
     n_estimators=500,
     learning_rate=0.03,
@@ -66,14 +72,56 @@ XGB_PARAMS = dict(
     n_jobs=-1,
 )
 
-# Early stopping rounds on a validation slice
 EARLY_STOPPING_ROUNDS = 30
 VALIDATION_FRACTION   = 0.15
+N_CROSS_FEATURES      = 15
 
-# Feature selection: always keep ALL own-commodity features, then add the top
-# N cross-commodity features ranked by absolute Spearman correlation with the
-# training target.  Keeps the feature matrix small relative to sample count.
-N_CROSS_FEATURES = 15
+# ── Sector-aware param resolution ──────────────────────────────────────────────
+
+_tuned_xgb_cache: dict | None = None   # loaded once from data/sector_params.json
+
+
+def _load_tuned_xgb() -> dict:
+    global _tuned_xgb_cache
+    if _tuned_xgb_cache is None:
+        from pathlib import Path
+        import json
+        path = Path(__file__).resolve().parents[2] / "data" / "sector_params.json"
+        if path.exists():
+            try:
+                with path.open() as fh:
+                    data = json.load(fh)
+                _tuned_xgb_cache = data.get("xgb", {})
+            except Exception:
+                _tuned_xgb_cache = {}
+        else:
+            _tuned_xgb_cache = {}
+    return _tuned_xgb_cache
+
+
+def get_xgb_params(commodity: str) -> dict:
+    """
+    Return XGBoost hyperparameters for `commodity`, resolved in priority order:
+      1. Optuna-tuned params from data/sector_params.json  (if present)
+      2. Domain-default seed from SECTOR_XGB_DEFAULTS      (always present)
+      3. Module-level XGB_PARAMS global fallback
+
+    Always injects random_state and n_jobs so callers don't need to.
+    """
+    sector = COMMODITY_SECTORS.get(commodity)
+    tuned  = _load_tuned_xgb()
+
+    if sector and sector in tuned:
+        base = dict(tuned[sector])
+    elif sector and sector in SECTOR_XGB_DEFAULTS:
+        base = dict(SECTOR_XGB_DEFAULTS[sector])
+    else:
+        base = {k: v for k, v in XGB_PARAMS.items()
+                if k not in ("random_state", "n_jobs")}
+
+    base["random_state"] = RANDOM_SEED
+    base["n_jobs"]       = -1
+    return base
 
 
 class XGBoostForecaster(SignalBroadcaster):
@@ -92,12 +140,13 @@ class XGBoostForecaster(SignalBroadcaster):
             model_type="ml",
             model_name="XGBoostForecaster",
         )
+        self._xgb_params: dict = get_xgb_params(commodity)
         self._model: Optional[xgb.XGBRegressor] = None
         self._explainer: Optional[shap.TreeExplainer] = None
         self._scaler: Optional[StandardScaler] = None
         self._feature_names: Optional[list] = None
         self._base_value: Optional[float] = None
-        self._ic_score: float = 0.0  # populated in fit()
+        self._ic_score: float = 0.0
 
     # ── private ────────────────────────────────────────────────────────────────
 
@@ -169,7 +218,7 @@ class XGBoostForecaster(SignalBroadcaster):
         X_fit_sc = self._scaler.fit_transform(X_fit)
         X_val_sc = self._scaler.transform(X_val)
 
-        self._model = xgb.XGBRegressor(**XGB_PARAMS)
+        self._model = xgb.XGBRegressor(**self._xgb_params)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self._model.set_params(early_stopping_rounds=EARLY_STOPPING_ROUNDS)
@@ -267,10 +316,11 @@ class XGBoostForecaster(SignalBroadcaster):
         self.set_metadata(
             n_features=len(self._feature_names),
             shap_base_value=round(self._base_value, 6),
+            sector=COMMODITY_SECTORS.get(self.commodity, "unknown"),
             hyperparams={
-                "n_estimators": XGB_PARAMS["n_estimators"],
-                "learning_rate": XGB_PARAMS["learning_rate"],
-                "max_depth": XGB_PARAMS["max_depth"],
+                "n_estimators": self._xgb_params["n_estimators"],
+                "learning_rate": self._xgb_params["learning_rate"],
+                "max_depth": self._xgb_params["max_depth"],
             },
         )
 

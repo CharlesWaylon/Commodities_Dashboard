@@ -202,6 +202,94 @@ class AlignedPrice(Base):
     )
 
 
+class CorrelationSnapshot(Base):
+    """
+    Daily rolling pairwise Pearson correlations between commodity pairs.
+
+    Populated by models/cross_asset.py::store_correlation_snapshot().
+    One row per (commodity_a, commodity_b, date).  The values come from
+    a 21-day rolling window over aligned_prices so every instrument is on
+    the same calendar before the correlation is computed.
+
+    Used by:
+      - Cross-asset meta-predictor: cluster-level prior propagation
+      - Forecast consistency checker: flag divergent correlated pairs
+      - Portfolio optimizer: covariance matrix construction
+    """
+    __tablename__ = "correlation_snapshots"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    date        = Column(Date,    nullable=False)
+    commodity_a = Column(String(100), nullable=False)
+    commodity_b = Column(String(100), nullable=False)
+    correlation = Column(Float,   nullable=False)   # Pearson ∈ [−1, +1]
+    window_days = Column(Integer, nullable=False, default=21)
+
+    __table_args__ = (
+        UniqueConstraint("date", "commodity_a", "commodity_b",
+                         name="uq_corr_date_pair"),
+        Index("ix_corr_date", "date"),
+        Index("ix_corr_pair", "commodity_a", "commodity_b"),
+    )
+
+    def __repr__(self):
+        return (
+            f"<CorrelationSnapshot {self.date} "
+            f"{self.commodity_a}↔{self.commodity_b} r={self.correlation:.3f}>"
+        )
+
+
+class ForecastLog(Base):
+    """
+    Immutable record of every forecast produced by each model.
+
+    Written once per (forecast_date, commodity, model_name).  When the
+    actual return is realised the following day, actual_return and error
+    are back-filled via a separate UPDATE pass (see cross_asset.realize_forecasts).
+
+    Why this table?
+      ic_log aggregates IC across a backtest window; it cannot answer
+      "what was Brent's XGBoost forecast on 2026-04-15, and how wrong was it
+      in a Bull regime?"  ForecastLog stores every individual prediction so
+      you can compute regime-conditional IC, rolling accuracy leaderboards,
+      and relative-IC comparisons between correlated commodities.
+
+    Used by:
+      - Regime-conditional IC: segment accuracy by VIX regime
+      - Relative IC: "Brent XGBoost IC 26% higher than WTI in Bull regime"
+      - Meta-predictor training labels
+      - Live accuracy leaderboard in dashboard
+    """
+    __tablename__ = "forecast_log"
+
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    forecast_date   = Column(Date,    nullable=False)
+    commodity       = Column(String(100), nullable=False)
+    model_name      = Column(String(50),  nullable=False)   # "xgboost", "arima", "lstm" …
+    tier            = Column(String(30),  nullable=False)   # "ml", "statistical", "deep", "quantum"
+    regime          = Column(String(30),  nullable=True)    # "bull", "bear", "high_vol", "crisis"
+    forecast_return = Column(Float, nullable=False)         # predicted next-day log-return
+    actual_return   = Column(Float, nullable=True)          # realised return (filled next day)
+    error           = Column(Float, nullable=True)          # abs(forecast − actual)
+    confidence      = Column(Float, nullable=True)          # model confidence ∈ [0, 1]
+    inserted_at     = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("forecast_date", "commodity", "model_name",
+                         name="uq_forecast_date_commodity_model"),
+        Index("ix_forecast_date",      "forecast_date"),
+        Index("ix_forecast_commodity", "commodity", "forecast_date"),
+        Index("ix_forecast_model",     "model_name", "forecast_date"),
+        Index("ix_forecast_regime",    "regime",     "forecast_date"),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ForecastLog {self.forecast_date} {self.commodity} "
+            f"{self.model_name} fc={self.forecast_return:.4f}>"
+        )
+
+
 class IngestionLog(Base):
     """
     One row per commodity per ingestion run.

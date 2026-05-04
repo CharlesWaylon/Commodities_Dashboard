@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS ic_log (
     n_obs         INTEGER NOT NULL,
     window_start  TEXT,
     window_end    TEXT,
+    regime        TEXT,
     inserted_at   TEXT NOT NULL,
     UNIQUE(computed_at, commodity, tier)
 );
@@ -155,6 +156,13 @@ CREATE INDEX IF NOT EXISTS idx_ic_log_tier_date
 CREATE INDEX IF NOT EXISTS idx_ic_log_commodity
     ON ic_log(commodity, computed_at);
 """
+
+# Migration: add regime column + its index to existing tables that pre-date this field.
+# Each statement is run individually so we can swallow OperationalError on repeat runs.
+_MIGRATIONS = [
+    "ALTER TABLE ic_log ADD COLUMN regime TEXT;",
+    "CREATE INDEX IF NOT EXISTS idx_ic_log_regime ON ic_log(regime, computed_at);",
+]
 
 
 # ── ICResult dataclass ─────────────────────────────────────────────────────────
@@ -172,6 +180,8 @@ class ICResult:
     n_obs        : number of (forecast, actual) pairs used
     window_start : first date in the window (YYYY-MM-DD)
     window_end   : last date in the window  (YYYY-MM-DD)
+    regime       : market regime label when IC was computed, e.g. "bull",
+                   "bear", "high_vol", "crisis".  Empty string = regime-agnostic.
     computed_at  : UTC ISO timestamp of computation
     """
     commodity:    str
@@ -180,6 +190,7 @@ class ICResult:
     n_obs:        int
     window_start: str
     window_end:   str
+    regime:       str = ""
     computed_at:  str = ""
 
     def __post_init__(self):
@@ -391,6 +402,12 @@ def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p))
     conn.executescript(_SCHEMA_SQL)
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # already applied — normal on all runs after the first
     return conn
 
 
@@ -422,6 +439,7 @@ def log_ic_scores(
             result.n_obs,
             result.window_start,
             result.window_end,
+            result.regime or None,
             now_iso,
         ))
 
@@ -430,8 +448,8 @@ def log_ic_scores(
         """
         INSERT OR REPLACE INTO ic_log
             (computed_at, commodity, tier, ic_value, n_obs,
-             window_start, window_end, inserted_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             window_start, window_end, regime, inserted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -480,7 +498,7 @@ def recent_ic_scores(
         df = pd.read_sql_query(
             f"""
             SELECT computed_at, commodity, tier, ic_value, n_obs,
-                   window_start, window_end
+                   window_start, window_end, regime
             FROM   ic_log
             WHERE  {where}
             ORDER  BY computed_at DESC
