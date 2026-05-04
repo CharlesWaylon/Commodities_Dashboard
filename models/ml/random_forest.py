@@ -39,14 +39,19 @@ from sklearn.preprocessing import StandardScaler
 from scipy.stats import spearmanr
 from typing import Optional
 
-from models.config import MODELING_COMMODITIES, TEST_FRACTION, RANDOM_SEED
+from models.config import (
+    COMMODITY_SECTORS,
+    MODELING_COMMODITIES,
+    RANDOM_SEED,
+    SECTOR_RF_DEFAULTS,
+    TEST_FRACTION,
+)
 from models.features import build_feature_matrix, build_target
 
-# Rolling window: re-fit on the past N trading days
-ROLLING_FIT_WINDOW = 252      # ~1 year
-ROLLING_STEP       = 21       # re-fit monthly
+ROLLING_FIT_WINDOW = 252
+ROLLING_STEP       = 21
 
-# RF hyperparameters — tuned for financial time series
+# Global fallback (used only when sector lookup fails)
 RF_PARAMS = dict(
     n_estimators=300,
     max_depth=6,
@@ -55,6 +60,53 @@ RF_PARAMS = dict(
     n_jobs=-1,
     random_state=RANDOM_SEED,
 )
+
+# ── Sector-aware param resolution ──────────────────────────────────────────────
+
+_tuned_rf_cache: dict | None = None
+
+
+def _load_tuned_rf() -> dict:
+    global _tuned_rf_cache
+    if _tuned_rf_cache is None:
+        from pathlib import Path
+        import json
+        path = Path(__file__).resolve().parents[2] / "data" / "sector_params.json"
+        if path.exists():
+            try:
+                with path.open() as fh:
+                    data = json.load(fh)
+                _tuned_rf_cache = data.get("rf", {})
+            except Exception:
+                _tuned_rf_cache = {}
+        else:
+            _tuned_rf_cache = {}
+    return _tuned_rf_cache
+
+
+def get_rf_params(commodity: str) -> dict:
+    """
+    Return RF hyperparameters for `commodity`, resolved in priority order:
+      1. Optuna-tuned params from data/sector_params.json  (if present)
+      2. Domain-default seed from SECTOR_RF_DEFAULTS        (always present)
+      3. Module-level RF_PARAMS global fallback
+
+    Always injects random_state and n_jobs.
+    """
+    sector = COMMODITY_SECTORS.get(commodity)
+    tuned  = _load_tuned_rf()
+
+    if sector and sector in tuned:
+        base = dict(tuned[sector])
+    elif sector and sector in SECTOR_RF_DEFAULTS:
+        base = dict(SECTOR_RF_DEFAULTS[sector])
+    else:
+        base = {k: v for k, v in RF_PARAMS.items()
+                if k not in ("random_state", "n_jobs")}
+
+    base["random_state"] = RANDOM_SEED
+    base["n_jobs"]       = -1
+    return base
 
 
 class CommodityRF:
@@ -68,7 +120,8 @@ class CommodityRF:
     """
 
     def __init__(self, commodity: str = "WTI Crude Oil"):
-        self.commodity = commodity
+        self.commodity  = commodity
+        self._rf_params = get_rf_params(commodity)
         self._rf: Optional[RandomForestRegressor] = None
         self._feature_names: Optional[list] = None
         self._scaler: Optional[StandardScaler] = None
@@ -110,7 +163,7 @@ class CommodityRF:
         self._scaler = StandardScaler()
         X_train_sc = self._scaler.fit_transform(X_train)
 
-        self._rf = RandomForestRegressor(**RF_PARAMS)
+        self._rf = RandomForestRegressor(**self._rf_params)
         self._rf.fit(X_train_sc, y_train)
         self._feature_names = names
         return self
@@ -199,7 +252,7 @@ class CommodityRF:
             scaler = StandardScaler()
             X_sc = scaler.fit_transform(X_win)
 
-            rf = RandomForestRegressor(**RF_PARAMS)
+            rf = RandomForestRegressor(**self._rf_params)
             rf.fit(X_sc, y_win)
 
             imp = rf.feature_importances_
