@@ -150,31 +150,42 @@ class RetrainSummary:
 
     Attributes
     ──────────
-    retrained_at       : UTC ISO timestamp when the run started.
-    n_commodities      : number of commodities that contributed training records.
-    n_training_pairs   : total (MetaFeatures, winning_tier) pairs generated.
-    tier_distribution  : {tier: count} across all training pairs.
-    tree_n_leaves      : number of leaves in the fitted decision tree (-1 if untrained).
-    top_feature        : most important feature by Gini importance (or "" if untrained).
-    save_path          : where the pkl was written (empty string if dry_run or failed).
-    error              : non-empty if the run aborted with an exception.
-    config             : the RetrainConfig used (for audit).
-    success            : True if predictor was trained and saved (or dry_run succeeded).
+    retrained_at        : UTC ISO timestamp when the run started.
+    n_commodities       : number of commodities that contributed training records.
+    n_training_pairs    : total (MetaFeatures, winning_tier) pairs generated.
+    tier_distribution   : {tier: count} across all training pairs.
+    tree_n_leaves       : number of leaves in the fitted decision tree (-1 if untrained).
+    top_feature         : most important feature by Gini importance (or "" if untrained).
+    save_path           : where the pkl was written (empty string if dry_run or failed).
+    error               : non-empty if the run aborted with an exception.
+    config              : the RetrainConfig used (for audit).
+    success             : True if predictor was trained and saved (or dry_run succeeded).
+    n_corr_pairs        : number of correlation pairs stored in correlation_snapshots.
+    n_forecasts_logged  : number of forecast rows written to forecast_log.
+    consistency_flags   : list of human-readable inconsistency messages from
+                          check_forecast_consistency().
+    n_cascade_forecasts : number of commodity forecasts written by the cascade.
+    cascade_regime      : market regime detected by the cascade orchestrator.
     """
-    retrained_at:     str               = ""
-    n_commodities:    int               = 0
-    n_training_pairs: int               = 0
-    tier_distribution: Dict[str, int]   = field(default_factory=dict)
-    tree_n_leaves:    int               = -1
-    top_feature:      str               = ""
-    save_path:        str               = ""
-    error:            str               = ""
-    config:           Optional[RetrainConfig] = None
-    success:          bool              = False
+    retrained_at:       str               = ""
+    n_commodities:      int               = 0
+    n_training_pairs:   int               = 0
+    tier_distribution:  Dict[str, int]    = field(default_factory=dict)
+    tree_n_leaves:      int               = -1
+    top_feature:        str               = ""
+    save_path:          str               = ""
+    error:              str               = ""
+    config:             Optional[RetrainConfig] = None
+    success:            bool              = False
+    n_corr_pairs:       int               = 0
+    n_forecasts_logged: int               = 0
+    consistency_flags:  List[str]         = field(default_factory=list)
+    n_cascade_forecasts: int              = 0
+    cascade_regime:     str               = ""
 
     def pretty(self) -> str:
         """Multi-line human-readable summary for CLI output."""
-        status = "✅ SUCCESS" if self.success else f"❌ FAILED — {self.error}"
+        status = "SUCCESS" if self.success else f"FAILED — {self.error}"
         lines = [
             "=" * 60,
             "  MetaPredictor Daily Retraining Summary",
@@ -195,6 +206,16 @@ class RetrainSummary:
             lines.append(f"  Top feature     : {self.top_feature}")
         if self.save_path:
             lines.append(f"  Saved to        : {self.save_path}")
+        if self.n_corr_pairs:
+            lines.append(f"  Corr pairs      : {self.n_corr_pairs}")
+        if self.n_forecasts_logged:
+            lines.append(f"  Forecasts logged: {self.n_forecasts_logged}")
+        if self.n_cascade_forecasts:
+            lines.append(f"  Cascade forecasts: {self.n_cascade_forecasts}  (regime={self.cascade_regime})")
+        if self.consistency_flags:
+            lines.append(f"  Consistency flags ({len(self.consistency_flags)}):")
+            for msg in self.consistency_flags[:5]:   # cap at 5 lines in CLI
+                lines.append(f"    ⚠  {msg}")
         lines.append("=" * 60)
         return "\n".join(lines)
 
@@ -242,6 +263,34 @@ def _load_macro(period: str, price_index: Optional[pd.DatetimeIndex]) -> pd.Data
         return df
     except Exception as exc:
         log.warning("Macro overlay load failed (%s); proceeding without macro.", exc)
+        return pd.DataFrame()
+
+
+def _load_climate(price_index: Optional[pd.DatetimeIndex] = None) -> pd.DataFrame:
+    """
+    Fetch climate features (MEI/ENSO + PDSI if NOAA token present).
+
+    MEI requires no key and is always attempted. PDSI/HDD require NOAA_CDO_TOKEN.
+    Returns an empty DataFrame on failure so the retrain can continue without
+    climate features — models degrade gracefully to price-only features.
+    """
+    import os
+    try:
+        from features.climate_weather import build_climate_features
+        start = "2020-01-01"
+        if price_index is not None and len(price_index) > 0:
+            start = price_index.min().strftime("%Y-%m-%d")
+        df = build_climate_features(
+            noaa_token=os.environ.get("NOAA_CDO_TOKEN"),
+            start_date=start,
+        )
+        if not df.empty:
+            log.info("Climate features loaded: %d rows × %d cols", len(df), df.shape[1])
+        else:
+            log.info("Climate features: empty (NOAA token absent or fetch failed)")
+        return df
+    except Exception as exc:
+        log.warning("Climate feature load failed (%s); proceeding without climate.", exc)
         return pd.DataFrame()
 
 
@@ -362,6 +411,27 @@ def run_daily_retrain(
             cfg.macro_period, prices.index
         )
 
+        log.info("Loading climate features (MEI + PDSI)…")
+        climate = _load_climate(price_index=prices.index)
+
+        # ── 1b. Store daily correlation snapshot ──────────────────────────────
+        # Reads all 41 commodities from aligned_prices in the DB (not just the
+        # 11 CORE_TICKERS used for the backtest) so the correlation matrix is
+        # as wide as possible for the consistency checker and prior propagation.
+        if not cfg.dry_run:
+            try:
+                from models.cross_asset import (
+                    store_correlation_snapshot,
+                    store_covariance_snapshot,
+                )
+                n_corr = store_correlation_snapshot(db_path=cfg.db_path)
+                summary.n_corr_pairs = n_corr
+                log.info("Stored %d correlation pairs in correlation_snapshots.", n_corr)
+                n_cov = store_covariance_snapshot(db_path=cfg.db_path)
+                log.info("Stored %d covariance entries in covariance_snapshots.", n_cov)
+            except Exception as exc:
+                log.warning("Correlation/covariance snapshot skipped: %s", exc)
+
         # ── 2. Determine commodity list ────────────────────────────────────────
         commodities = cfg.commodities or [
             c for c in CORE_TICKERS if c in prices.columns
@@ -374,7 +444,10 @@ def run_daily_retrain(
 
         # ── 3. Run backtest harness ────────────────────────────────────────────
         from models.backtest_harness import BacktestHarness, DEFAULT_ADAPTERS
-        harness = BacktestHarness(adapters=list(DEFAULT_ADAPTERS))
+        harness = BacktestHarness(
+            adapters=list(DEFAULT_ADAPTERS),
+            climate_df=climate if not climate.empty else None,
+        )
         records = harness.run(prices, macro, commodities)
 
         if not records:
@@ -424,6 +497,93 @@ def run_daily_retrain(
             except Exception as exc:
                 log.warning("IC logging skipped: %s", exc)
 
+        # ── 4c. Log forecasts, realize yesterday's actuals, consistency check ──
+        if not cfg.dry_run and records:
+            try:
+                from models.cross_asset import (
+                    log_forecasts,
+                    realize_forecasts,
+                    check_forecast_consistency,
+                    load_correlation_matrix,
+                )
+
+                # Extract the most recent date's forecasts from the backtest
+                latest_date = max(r.date for r in records)
+                latest_records = [r for r in records if r.date == latest_date]
+
+                def _regime(mf) -> str:
+                    if getattr(mf, "vix_crisis", 0):
+                        return "crisis"
+                    if getattr(mf, "vix_risk_off", 0):
+                        return "high_vol"
+                    return "bull"
+
+                forecasts_to_log: Dict[str, Dict] = {}
+                for rec in latest_records:
+                    regime_label = _regime(rec.meta_features)
+                    for tier, fc_return in rec.tier_forecasts.items():
+                        key = f"{rec.commodity}|{tier}"
+                        forecasts_to_log[key] = {
+                            "model_name":      tier,
+                            "tier":            tier,
+                            "forecast_return": fc_return,
+                            "regime":          regime_label,
+                            "confidence":      None,
+                        }
+                        # Use commodity as the unique key for log_forecasts;
+                        # store one row per (commodity, tier) by encoding tier in model_name
+                        forecasts_to_log[key]["_commodity"] = rec.commodity
+
+                # Rekey by commodity+tier for log_forecasts format
+                fc_dict = {
+                    f"{v['_commodity']}|{v['tier']}": {
+                        k: vv for k, vv in v.items() if k != "_commodity"
+                    }
+                    for v in forecasts_to_log.values()
+                }
+                n_fc = log_forecasts(
+                    {k: v for k, v in fc_dict.items()},
+                    forecast_date=latest_date.date(),
+                    db_path=cfg.db_path,
+                )
+                summary.n_forecasts_logged = n_fc
+                log.info("Logged %d forecast rows for %s", n_fc, latest_date.date())
+
+                # Back-fill actual returns for the day before latest_date
+                log_returns = np.log(prices / prices.shift(1)).dropna()
+                if latest_date in log_returns.index:
+                    actuals = {
+                        col: float(log_returns.loc[latest_date, col])
+                        for col in log_returns.columns
+                        if not np.isnan(log_returns.loc[latest_date, col])
+                    }
+                    realize_forecasts(
+                        actuals,
+                        forecast_date=latest_date.date(),
+                        db_path=cfg.db_path,
+                    )
+
+                # Consistency check on the latest ensemble forecast
+                ensemble_fc = {
+                    rec.commodity: float(np.mean(list(rec.tier_forecasts.values())))
+                    for rec in latest_records
+                    if rec.tier_forecasts
+                }
+                corr_mat = load_correlation_matrix(db_path=cfg.db_path)
+                flags = check_forecast_consistency(
+                    ensemble_fc, corr_matrix=corr_mat
+                )
+                summary.consistency_flags = [f.message for f in flags]
+                if flags:
+                    log.warning(
+                        "%d cross-commodity consistency flag(s): %s",
+                        len(flags),
+                        "; ".join(f.message for f in flags[:3]),
+                    )
+
+            except Exception as exc:
+                log.warning("Forecast logging / consistency check skipped: %s", exc)
+
         # ── 5. Guard: too few pairs → don't overwrite existing pkl ────────────
         if len(records) < MIN_PAIRS:
             raise RuntimeError(
@@ -466,7 +626,56 @@ def run_daily_retrain(
         summary.error = str(exc)
         log.error("Retraining failed: %s", exc, exc_info=True)
 
-    # ── 8. Persist audit log (always, even on failure) ─────────────────────────
+    # ── 8. Weekly macro route refresh (non-fatal, staleness-gated) ────────────
+    # Runs at most once every 7 days.  summary.success=True guarantees that
+    # `prices` and `macro` were assigned in the try block above, so we can
+    # pass them directly to avoid redundant network calls.
+    if not cfg.dry_run and summary.success:
+        try:
+            from models.macro_router import _is_stale, build_macro_routes
+            if _is_stale(max_age_days=7):
+                log.info("macro_routes.pkl is stale (>7 days) — rebuilding…")
+                build_macro_routes(
+                    prices   = prices,   # already loaded in step 1
+                    macro_df = macro,    # already loaded in step 1
+                    save     = True,
+                )
+                log.info("macro_routes.pkl refreshed.")
+            else:
+                log.info("macro_routes.pkl is fresh — skipping macro route rebuild.")
+        except Exception as exc:
+            log.warning("Macro route refresh skipped (non-fatal): %s", exc)
+
+    # ── 9. Cascade sector forecasts (non-fatal, post-macro) ───────────────────
+    # Runs only after a successful retrain so prices/macro are guaranteed loaded.
+    # Fits SectorSpecificModel for every available commodity, runs Energy →
+    # Metals → Agriculture → Livestock → Digital in causal order, and stores
+    # per-commodity forecasts with breakdowns in cascade_forecasts table.
+    if not cfg.dry_run and summary.success:
+        try:
+            from models.cascade_orchestrator import run_cascade
+            cascade_result = run_cascade(
+                prices   = prices,
+                macro_df = macro,
+                db_path  = cfg.db_path,
+                dry_run  = False,
+            )
+            summary.n_cascade_forecasts = len(cascade_result.commodities)
+            summary.cascade_regime      = cascade_result.regime
+            if cascade_result.success:
+                log.info(
+                    "Cascade complete: %d forecasts, regime=%s, %d rows written.",
+                    len(cascade_result.commodities),
+                    cascade_result.regime,
+                    cascade_result.n_written,
+                )
+            else:
+                errs = cascade_result.errors
+                log.warning("Cascade ran with errors: %s", list(errs.values())[:2])
+        except Exception as exc:
+            log.warning("Cascade orchestrator skipped (non-fatal): %s", exc)
+
+    # ── 10. Persist audit log (always, even on failure) ────────────────────────
     if not cfg.dry_run:
         _persist_training_log(summary, cfg.db_path)
 
