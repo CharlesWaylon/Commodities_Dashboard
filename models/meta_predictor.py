@@ -111,12 +111,12 @@ FEATURE_COLUMNS: Tuple[str, ...] = (
     "is_wasde_window",
     "days_to_wasde",
     "wasde_post5",
+    "enso_phase",              # −1 = La Niña, 0 = neutral, +1 = El Niño
     # ── Extension slots ───────────────────────────────────────────────────────
     # Uncomment as features become available:
     # "hmm_regime_bull",         # 1.0 if HMM state == "bull", else 0.0
     # "hmm_regime_bear",         # 1.0 if HMM state == "bear", else 0.0
     # "days_since_regime_flip",  # integer; cap at 30 for tree stability
-    # "enso_phase",              # −1 = La Niña, 0 = neutral, +1 = El Niño
 )
 
 # Default equal weights when the meta-predictor hasn't been trained yet.
@@ -159,6 +159,9 @@ class MetaFeatures:
     days_to_wasde: float = float("nan")  # signed; negative = before release
     wasde_post5: float = 0.0             # 1.0 for 5d after WASDE release
 
+    # ── Climate / ENSO ────────────────────────────────────────────────────
+    enso_phase: float = 0.0                      # −1 = La Niña, 0 = neutral, +1 = El Niño
+
     # ── Extension slots (None until underlying features land) ─────────────
     hmm_regime: Optional[str] = None            # "bull" | "neutral" | "bear"
     days_since_regime_flip: Optional[int] = None
@@ -193,6 +196,7 @@ class MetaFeatures:
             "is_wasde_window": self.is_wasde_window,
             "days_to_wasde": self.days_to_wasde,
             "wasde_post5": self.wasde_post5,
+            "enso_phase": self.enso_phase,
             "hmm_regime": self.hmm_regime,
             "days_since_regime_flip": self.days_since_regime_flip,
         }
@@ -324,6 +328,7 @@ def collect_meta_features(macro_df: pd.DataFrame) -> MetaFeatures:
         is_wasde_window=float(_get("is_wasde_window", 0.0)),
         days_to_wasde=_get("days_to_wasde"),
         wasde_post5=float(_get("wasde_post5", 0.0)),
+        enso_phase=float(_get("enso_phase", 0.0)),
         # HMM regime not yet available — extension point
         hmm_regime=None,
         days_since_regime_flip=None,
@@ -625,6 +630,12 @@ def _build_reasoning(
             parts.append(f"WASDE window ({loc})")
     elif f.wasde_post5:
         parts.append("WASDE digestion window (post-5d)")
+
+    # ENSO phase
+    if f.enso_phase >= 1.0:
+        parts.append("ENSO: El Niño (stress SE Asia, softer Brazil soy supply)")
+    elif f.enso_phase <= -1.0:
+        parts.append("ENSO: La Niña (wetter SE Asia, drier S. America)")
 
     # HMM regime — when available
     if f.hmm_regime:

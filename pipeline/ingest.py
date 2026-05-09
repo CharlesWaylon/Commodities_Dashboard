@@ -212,6 +212,16 @@ def run_ingestion(backfill: bool = False):
         from pipeline.roll_adjust import run_roll_adjust
         run_roll_adjust()
         log.info("Roll adjustment complete.")
+
+        # Recompute 21-day rolling correlations and persist to correlation_snapshots.
+        # Must run after roll_adjust so aligned_prices is current.
+        log.info("Storing correlation snapshot...")
+        try:
+            from models.cross_asset import store_correlation_snapshot
+            n_pairs = store_correlation_snapshot()
+            log.info("Correlation snapshot stored (%d pairs).", n_pairs)
+        except Exception as exc:
+            log.warning("Correlation snapshot failed (non-fatal): %s", exc)
     else:
         log.info("No new rows inserted — skipping roll adjustment.")
 

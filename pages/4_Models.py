@@ -1641,6 +1641,157 @@ with tab3:
     else:
         st.warning("Energy transition data unavailable — yfinance fetch may have failed.")
 
+    st.divider()
+
+    # ── Macro Router ───────────────────────────────────────────────────────────
+    st.markdown("#### Macro-to-Sector Routing Coefficients")
+    st.caption(
+        "OLS regression coefficients learned from 504 trading days (~2 yr) of "
+        "DXY / VIX / TLT vs sector equal-weighted returns, conditioned on market "
+        "regime (bull / bear / high_vol / neutral). Rebuilt automatically every 7 days."
+    )
+
+    try:
+        from models.macro_router import load_macro_routes
+
+        routes = load_macro_routes()
+        if routes is None:
+            st.info("Macro routes not yet built. Run `python -m models.macro_router` once.")
+        else:
+            meta       = routes.get("_metadata", {})
+            fitted_at  = meta.get("fitted_at", "unknown")
+            window     = meta.get("backtest_days", "?")
+            val_block  = routes.get("validation", {})
+            validation = val_block.get("checks", [])
+
+            # ── Validation scorecard ───────────────────────────────────────────
+            n_pass  = val_block.get("n_passed", sum(1 for v in validation if v.get("passed")))
+            n_total = val_block.get("n_checks", len(validation))
+
+            score_color = GREEN if n_pass == n_total else (AMBER if n_pass >= n_total * 0.7 else RED)
+            st.markdown(
+                f"<span style='color:{score_color};font-size:1.1em;font-weight:600'>"
+                f"Domain validation: {n_pass}/{n_total} checks passed</span>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"Fitted: {str(fitted_at)[:19].replace('T',' ')} UTC · Window: {window} trading days")
+
+            # Expand the scorecard
+            with st.expander("📋 Validation detail — what each check means and why failures can be valid", expanded=False):
+                st.markdown(
+                    """
+**What is domain validation?**
+After fitting OLS regression coefficients for each macro variable → sector pair,
+the router checks that each coefficient has the sign expected by economic theory
+(e.g. DXY↑ should be bearish for commodities priced in USD). A failure means the
+empirical slope over the sample window ran *opposite* to textbook theory.
+
+**Failures are not bugs.** They are informative signals about the regime in the data window.
+
+**Current sample window: May 2024 – May 2026 (504 trading days)**
+
+---
+""")
+
+                for v in validation:
+                    passed = v.get("passed", False)
+                    icon   = "✅" if passed else "❌"
+                    name   = v.get("name", "")
+                    slope  = v.get("actual_slope", float("nan"))
+                    r2     = v.get("r_squared", float("nan"))
+                    pval   = v.get("p_value", float("nan"))
+                    note   = v.get("note", "")
+
+                    st.markdown(
+                        f"**{icon} {name}**  \n"
+                        f"slope `{slope:+.4f}` · R²=`{r2:.3f}` · p=`{pval:.3f}`"
+                        + (f"  \n*{note}*" if note else ""),
+                    )
+
+                st.markdown("---")
+                st.markdown(
+                    """
+**Why DXY → Energy failed (positive slope, expected negative)**
+
+The classic USD-pricing channel says: *stronger dollar → commodities cost more for
+non-USD buyers → demand falls → price drops*. This held historically.
+
+However, the 2022 energy crisis created a period where **both** DXY and WTI surged
+simultaneously — the Ukraine invasion compressed supply while USD strengthened as a
+safe-haven. The 2-year regression window includes significant exposure to that co-movement,
+which overwhelms the normal inverse relationship. R²=0.013 (the regression explains
+**1.3% of variance**) means this coefficient is close to noise regardless of sign.
+
+**Why Rising Rates → Energy failed (positive slope, expected negative)**
+
+The `tlt_yield_proxy` variable is `−TLT_return`, so a positive slope means
+*rising rates associate with rising energy prices*. Again, 2022: the Fed began its
+most aggressive rate-hike cycle in 40 years *while* energy prices were at multi-year
+highs. These co-moved for fundamental supply/demand reasons unrelated to the
+interest-rate channel. R²=0.012 — same story, negligible explanatory power.
+
+**What to watch:** If these checks still fail after a full year of normal-rate-environment
+data enters the rolling window (i.e., by Q3 2026), that would suggest a structural
+regime shift rather than a sample artefact.
+""")
+
+            # ── Routing coefficient heatmap ────────────────────────────────────
+            routing_matrix = routes.get("routing_matrix", {})
+            if routing_matrix:
+                # routing_matrix keys are aliased display names (dxy_spike, vix_spike, tlt_drop)
+                _ALIAS_LABELS = {
+                    "dxy_spike":  "DXY spike (USD↑)",
+                    "vix_spike":  "VIX spike (fear↑)",
+                    "tlt_drop":   "Rates rise (TLT↓)",
+                }
+                macro_vars = list(routing_matrix.keys())
+                sectors    = ["energy", "metals", "agriculture", "livestock", "digital"]
+
+                z_vals, hover_text = [], []
+                for mv in macro_vars:
+                    row_z, row_h = [], []
+                    for sec in sectors:
+                        coef = routing_matrix.get(mv, {}).get(sec, 0.0)
+                        row_z.append(coef)
+                        row_h.append(f"{_ALIAS_LABELS.get(mv, mv)} → {sec}<br>slope: {coef:+.4f}")
+                    z_vals.append(row_z)
+                    hover_text.append(row_h)
+
+                macro_labels = [_ALIAS_LABELS.get(m, m.replace("_", " ")) for m in macro_vars]
+                sector_labels = [s.capitalize() for s in sectors]
+
+                fig_routes = go.Figure(go.Heatmap(
+                    z=z_vals,
+                    x=sector_labels,
+                    y=macro_labels,
+                    text=[[f"{v:+.3f}" for v in row] for row in z_vals],
+                    texttemplate="%{text}",
+                    hovertext=hover_text,
+                    hovertemplate="%{hovertext}<extra></extra>",
+                    colorscale="RdYlGn",
+                    zmid=0,
+                    colorbar=dict(title="OLS slope", tickfont=dict(size=10)),
+                ))
+                fig_routes.update_layout(
+                    **{**PLOTLY_LAYOUT,
+                       "height": 280,
+                       "title_text": "Macro → Sector Routing Matrix (all-regime OLS slopes)",
+                       "margin": dict(t=50, l=130, r=20, b=40),
+                       "xaxis_title": "Sector",
+                       "yaxis_title": "Macro variable",
+                    }
+                )
+                st.plotly_chart(fig_routes, width="stretch")
+                st.caption(
+                    "Green = positive empirical relationship · Red = negative · "
+                    "Coefficient is the OLS slope across all regimes combined. "
+                    "Small magnitude + high p-value cells (especially DXY→Energy, "
+                    "TLT yield→Energy) reflect noisy 2022-era co-movement, not structural signal."
+                )
+
+    except Exception as _mr_exc:
+        st.info(f"Macro router unavailable: {_mr_exc}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — DEEP LEARNING

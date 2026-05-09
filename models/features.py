@@ -17,11 +17,14 @@ The quantum circuits expect exactly N_QUBITS features per sample, so
 build_quantum_features() performs a final selection + normalisation step.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from models.config import (
+    COMMODITY_SECTORS,
     DEFAULT_TARGET,
     RETURN_LAGS,
     ROLLING_VOL_WINDOW,
@@ -29,6 +32,77 @@ from models.config import (
     ZSCORE_WINDOW,
     N_QUBITS,
 )
+
+# Commodities that receive PDSI (Corn Belt drought) features during training.
+PDSI_COMMODITIES: frozenset = frozenset([
+    "Corn (CBOT)",
+    "Soybeans (CBOT)",
+    "Wheat (CBOT SRW)",
+])
+
+# Commodities that receive ENSO (MEI / phase) features during training.
+# Corn Belt grains benefit from both PDSI and ENSO; soft commodities get ENSO only.
+ENSO_COMMODITIES: frozenset = frozenset([
+    "Corn (CBOT)",
+    "Soybeans (CBOT)",
+    "Wheat (CBOT SRW)",
+    "Coffee (Arabica)",
+    "Cocoa (ICE)",
+    "Sugar (Raw #11)",
+])
+
+# ── Sector helpers ─────────────────────────────────────────────────────────────
+
+# Inverted sector map: sector_name → frozenset of display-name commodity strings
+_SECTOR_MEMBERS: dict[str, frozenset] = {}
+for _c, _s in COMMODITY_SECTORS.items():
+    _SECTOR_MEMBERS.setdefault(_s, set()).add(_c)
+_SECTOR_MEMBERS = {k: frozenset(v) for k, v in _SECTOR_MEMBERS.items()}
+
+# Keyword patterns for external signal columns (columns in prices that are NOT
+# commodity prices). Matching is case-insensitive substring.
+_ALWAYS_KEEP_SIGNALS = ("dxy", "vix", "tlt")          # macro — all sectors
+_AGRICULTURE_SIGNALS = ("pdsi", "mei", "enso")         # climate — agriculture only
+_ENERGY_SIGNALS      = ("slope", "spread", "curve")    # futures curve — energy only
+
+
+def _filter_prices_to_sector(prices: pd.DataFrame, sector: str) -> pd.DataFrame:
+    """
+    Split prices columns into commodity columns and external-signal columns,
+    then return only the sector's commodity columns plus permitted signal columns.
+
+    Commodity columns are those present in COMMODITY_SECTORS (known display names).
+    Unknown columns are treated as external signals and filtered by sector rules.
+    """
+    known_commodities = set(COMMODITY_SECTORS.keys())
+    sector_members    = _SECTOR_MEMBERS.get(sector, frozenset())
+
+    commodity_cols = [c for c in prices.columns if c in known_commodities]
+    external_cols  = [c for c in prices.columns if c not in known_commodities]
+
+    # Sector commodity columns that actually exist in prices
+    keep_commodity = [c for c in commodity_cols if c in sector_members]
+
+    # External signal filtering
+    keep_external: list[str] = []
+    for col in external_cols:
+        col_lower = col.lower()
+        if any(kw in col_lower for kw in _ALWAYS_KEEP_SIGNALS):
+            keep_external.append(col)
+        elif sector == "agriculture" and any(kw in col_lower for kw in _AGRICULTURE_SIGNALS):
+            keep_external.append(col)
+        elif sector == "energy" and any(kw in col_lower for kw in _ENERGY_SIGNALS):
+            keep_external.append(col)
+        # Unknown external signals not matching any rule are silently dropped
+        # when a sector is active — avoids adding spurious features.
+
+    keep = keep_commodity + keep_external
+    if not keep:
+        raise ValueError(
+            f"build_feature_matrix: sector '{sector}' matched no columns in prices. "
+            f"Available columns: {list(prices.columns[:10])}…"
+        )
+    return prices[keep]
 
 
 # ── Core feature builders ──────────────────────────────────────────────────────
@@ -60,28 +134,62 @@ def rolling_zscore(prices: pd.DataFrame, window: int = ZSCORE_WINDOW) -> pd.Data
 
 # ── Full feature matrix ────────────────────────────────────────────────────────
 
-def build_feature_matrix(prices: pd.DataFrame) -> pd.DataFrame:
+def build_feature_matrix(
+    prices: pd.DataFrame,
+    sector: str | None = None,
+) -> pd.DataFrame:
     """
     Construct a wide feature DataFrame from a price matrix.
 
-    Input
-    -----
+    Parameters
+    ----------
     prices : pd.DataFrame
-        Shape (n_days, n_commodities). Columns are display names.
+        Shape (n_days, n_commodities[+external_signals]). Columns are display
+        names drawn from COMMODITY_SECTORS, plus any macro/climate columns the
+        caller has merged in (e.g. dxy_ret, vix_ret5d, pdsi_cornbelt).
+
+    sector : str or None, optional
+        When supplied, restricts features to the commodities in that sector
+        (one of 'energy', 'metals', 'agriculture', 'livestock', 'digital').
+        External-signal columns are also filtered by sector rules:
+          • All sectors  : any column whose name contains 'dxy', 'vix', or 'tlt'
+          • agriculture  : additionally keeps 'pdsi', 'mei', 'enso' columns
+          • energy       : additionally keeps 'slope', 'spread', 'curve' columns
+        When None (default), all columns are used — identical to the original
+        behaviour, so all existing call sites remain unaffected.
 
     Output
     ------
     pd.DataFrame
         One row per trading day. Columns:
-          {commodity}_ret_{lag}d    — lagged log-return
+          {commodity}_ret_{lag}d    — lagged log-return (lags from RETURN_LAGS)
           {commodity}_vol21         — rolling 21-day realised volatility
           {commodity}_mom10         — rolling 10-day cumulative return
           {commodity}_zscore        — rolling 63-day z-score
+        External-signal columns that survive filtering are left unchanged
+        (no renaming) and appended at the end.
+
+    Raises
+    ------
+    ValueError
+        If *sector* is specified but matches no columns in *prices*.
     """
-    ret = log_returns(prices)
+    if sector is not None:
+        prices = _filter_prices_to_sector(prices, sector)
+
+    # Separate commodity columns from any external signals that survived filtering.
+    # External signals get passed through as-is; commodity columns get the full
+    # lag/vol/mom/zscore treatment.
+    known_commodities = set(COMMODITY_SECTORS.keys())
+    commodity_cols = [c for c in prices.columns if c in known_commodities]
+    external_cols  = [c for c in prices.columns if c not in known_commodities]
+
+    price_data = prices[commodity_cols] if commodity_cols else prices
+
+    ret = log_returns(price_data)
     vol = rolling_volatility(ret)
     mom = rolling_momentum(ret)
-    zsc = rolling_zscore(prices)
+    zsc = rolling_zscore(price_data)
 
     parts = []
 
@@ -97,8 +205,51 @@ def build_feature_matrix(prices: pd.DataFrame) -> pd.DataFrame:
 
     parts += [vol, mom, zsc]
 
+    # Append any external signal columns (DXY, VIX, TLT, PDSI, etc.) unchanged.
+    # They were already filtered to sector-appropriate signals above.
+    if external_cols:
+        parts.append(prices[external_cols])
+
     feature_df = pd.concat(parts, axis=1)
     return feature_df
+
+
+def augment_with_climate(
+    feat_df: pd.DataFrame,
+    climate_df: pd.DataFrame,
+    commodity: str,
+) -> pd.DataFrame:
+    """
+    Join PDSI and/or ENSO columns into feat_df for climate-sensitive commodities.
+
+    PDSI columns (pdsi_cornbelt, pdsi_zscore) are added for PDSI_COMMODITIES.
+    ENSO columns (mei, mei_lag3m, mei_lag6m, enso_phase) are added for ENSO_COMMODITIES.
+    Non-climate commodities pass through unchanged, so this is safe to call unconditionally.
+
+    Parameters
+    ----------
+    feat_df     : output of build_feature_matrix() — rows = trading days
+    climate_df  : output of build_climate_features() — same or wider date range
+    commodity   : display name used to select the correct feature subset
+
+    Returns
+    -------
+    pd.DataFrame with climate columns appended (left-joined on feat_df.index).
+    """
+    if climate_df is None or climate_df.empty:
+        return feat_df
+
+    cols: list[str] = []
+    if commodity in PDSI_COMMODITIES:
+        cols += [c for c in ("pdsi_cornbelt", "pdsi_zscore") if c in climate_df.columns]
+    if commodity in ENSO_COMMODITIES:
+        cols += [c for c in ("mei", "mei_lag3m", "mei_lag6m", "enso_phase") if c in climate_df.columns]
+
+    if not cols:
+        return feat_df
+
+    climate_aligned = climate_df[cols].reindex(feat_df.index).ffill(limit=5)
+    return feat_df.join(climate_aligned, how="left")
 
 
 def build_target(prices: pd.DataFrame, target_name: str = DEFAULT_TARGET) -> pd.Series:

@@ -256,11 +256,15 @@ class XGBoostAdapter(TierAdapter):
     Builds the feature matrix from the full price history (train + test
     combined) so rolling window features at the test boundary are correct,
     then trains on the train-window slice and predicts the test slice.
+
+    If `_climate_df` is set by the harness before fit(), PDSI and ENSO
+    features are appended for climate-sensitive commodities.
     """
 
     def __init__(self):
         self._model = None
         self._commodity = None
+        self._climate_df: Optional[pd.DataFrame] = None
 
     @property
     def tier(self) -> str:
@@ -268,8 +272,9 @@ class XGBoostAdapter(TierAdapter):
 
     def fit(self, prices_train: pd.DataFrame, commodity: str) -> None:
         from models.ml.xgboost_shap import XGBoostForecaster
-        from models.features import build_feature_matrix, build_target
+        from models.features import build_feature_matrix, build_target, augment_with_climate
         feat_train = build_feature_matrix(prices_train)
+        feat_train = augment_with_climate(feat_train, self._climate_df, commodity)
         target_train = build_target(prices_train, commodity)
         aligned = feat_train.join(target_train).dropna()
         X_tr = aligned.drop(columns=["target"])
@@ -289,8 +294,9 @@ class XGBoostAdapter(TierAdapter):
     ) -> pd.Series:
         if self._model is None:
             return pd.Series(np.nan, index=test_idx)
-        from models.features import build_feature_matrix
+        from models.features import build_feature_matrix, augment_with_climate
         feat_full = build_feature_matrix(prices_full)
+        feat_full = augment_with_climate(feat_full, self._climate_df, commodity)
         test_feats = feat_full.loc[feat_full.index.isin(test_idx)].dropna()
         if test_feats.empty:
             return pd.Series(np.nan, index=test_idx)
@@ -309,11 +315,12 @@ class XGBoostAdapter(TierAdapter):
 class ElasticNetAdapter(TierAdapter):
     """
     Wraps `models.ml.elastic_net.ElasticNetFactorModel` for backtesting.
-    Same feature-matrix approach as XGBoostAdapter.
+    Same feature-matrix approach as XGBoostAdapter, including climate augmentation.
     """
 
     def __init__(self):
         self._model = None
+        self._climate_df: Optional[pd.DataFrame] = None
 
     @property
     def tier(self) -> str:
@@ -321,8 +328,9 @@ class ElasticNetAdapter(TierAdapter):
 
     def fit(self, prices_train: pd.DataFrame, commodity: str) -> None:
         from models.ml.elastic_net import ElasticNetFactorModel
-        from models.features import build_feature_matrix, build_target
+        from models.features import build_feature_matrix, build_target, augment_with_climate
         feat = build_feature_matrix(prices_train)
+        feat = augment_with_climate(feat, self._climate_df, commodity)
         target = build_target(prices_train, commodity)
         aligned = feat.join(target).dropna()
         X_tr = aligned.drop(columns=["target"])
@@ -341,8 +349,9 @@ class ElasticNetAdapter(TierAdapter):
     ) -> pd.Series:
         if self._model is None:
             return pd.Series(np.nan, index=test_idx)
-        from models.features import build_feature_matrix
+        from models.features import build_feature_matrix, augment_with_climate
         feat_full = build_feature_matrix(prices_full)
+        feat_full = augment_with_climate(feat_full, self._climate_df, commodity)
         test_feats = feat_full.loc[feat_full.index.isin(test_idx)].dropna()
         if test_feats.empty:
             return pd.Series(np.nan, index=test_idx)
@@ -395,11 +404,13 @@ class BacktestHarness:
         test_fraction: float = TEST_FRACTION,
         min_train_rows: int = 120,
         n_splits: int = 5,
+        climate_df: Optional[pd.DataFrame] = None,
     ):
         self.adapters = adapters if adapters is not None else list(DEFAULT_ADAPTERS)
         self.test_fraction = test_fraction
         self.min_train_rows = min_train_rows
         self.n_splits = max(1, int(n_splits))
+        self.climate_df = climate_df
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -435,7 +446,7 @@ class BacktestHarness:
                 log.warning("Skipping %r — not in price matrix.", commodity)
                 continue
             try:
-                records = self._run_commodity(prices, macro_df, commodity)
+                records = self._run_commodity(prices, macro_df, commodity, self.climate_df)
                 all_records.extend(records)
                 log.info(
                     "%s: %d backtest records (winning tiers: %s)",
@@ -571,6 +582,7 @@ class BacktestHarness:
         prices: pd.DataFrame,
         macro_df: pd.DataFrame,
         commodity: str,
+        climate_df: Optional[pd.DataFrame] = None,
     ) -> List[BacktestRecord]:
         """
         Run the walk-forward backtest for a single commodity.
@@ -598,6 +610,11 @@ class BacktestHarness:
         # ── 3. Align macro once for the full price index ───────────────────────
         macro_aligned = _align_macro(macro_df, prices.index)
 
+        # Merge enso_phase into macro_aligned so collect_meta_features() picks it up
+        if climate_df is not None and not climate_df.empty and "enso_phase" in climate_df.columns:
+            climate_phase = climate_df[["enso_phase"]].reindex(prices.index).ffill(limit=5)
+            macro_aligned = macro_aligned.join(climate_phase, how="left")
+
         all_records: List[BacktestRecord] = []
 
         # ── 4. Loop over walk-forward folds ────────────────────────────────────
@@ -609,6 +626,11 @@ class BacktestHarness:
                 continue
 
             # ── 4a. Fit each adapter on this fold's expanding train window ─────
+            # Propagate climate data to adapters that support it (XGBoost, ElasticNet)
+            for adapter in self.adapters:
+                if hasattr(adapter, "_climate_df"):
+                    adapter._climate_df = climate_df
+
             tier_forecasts: Dict[str, pd.Series] = {}
             for adapter in self.adapters:
                 try:

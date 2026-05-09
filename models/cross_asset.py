@@ -98,6 +98,22 @@ CREATE INDEX IF NOT EXISTS idx_corr_pair      ON correlation_snapshots(commodity
 CREATE INDEX IF NOT EXISTS idx_corr_date_pair ON correlation_snapshots(date, commodity_a);
 """
 
+_COV_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS covariance_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT NOT NULL,
+    commodity_a TEXT NOT NULL,
+    commodity_b TEXT NOT NULL,
+    covariance  REAL NOT NULL,
+    window_days INTEGER NOT NULL DEFAULT 21,
+    annualized  INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(date, commodity_a, commodity_b)
+);
+CREATE INDEX IF NOT EXISTS idx_cov_date      ON covariance_snapshots(date);
+CREATE INDEX IF NOT EXISTS idx_cov_pair      ON covariance_snapshots(commodity_a, commodity_b);
+CREATE INDEX IF NOT EXISTS idx_cov_date_pair ON covariance_snapshots(date, commodity_a);
+"""
+
 _FORECAST_LOG_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS forecast_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +143,7 @@ def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p))
     conn.executescript(_CORR_SCHEMA_SQL)
+    conn.executescript(_COV_SCHEMA_SQL)
     conn.executescript(_FORECAST_LOG_SCHEMA_SQL)
     return conn
 
@@ -306,6 +323,225 @@ def load_correlation_matrix(
         mat.loc[r["commodity_a"], r["commodity_b"]] = r["correlation"]
         mat.loc[r["commodity_b"], r["commodity_a"]] = r["correlation"]
     return mat
+
+
+# ── Covariance matrix ─────────────────────────────────────────────────────────
+
+def compute_rolling_covariance(
+    prices_df: pd.DataFrame,
+    window: int = CORRELATION_WINDOW,
+    annualize: bool = True,
+) -> pd.DataFrame:
+    """
+    Compute the rolling covariance matrix of log returns for all commodity pairs.
+
+    Covariance preserves magnitude information that correlation discards:
+      Cov(r_a, r_b) = σ_a · σ_b · ρ_{ab}
+    The diagonal entries are per-commodity variances (σ²), which are used by
+    portfolio optimisers and risk sizing routines.
+
+    Parameters
+    ----------
+    prices_df : wide DataFrame (index=date, columns=commodity names) of
+                adjusted close prices.
+    window    : rolling window in trading days (default 21, matching correlation).
+    annualize : if True, multiply by 252 so units are ann. return² (default True).
+
+    Returns
+    -------
+    pd.DataFrame with columns [date, commodity_a, commodity_b, covariance,
+    window_days, annualized].  Only the last date's values are returned.
+    Use store_covariance_snapshot() to persist them.
+    """
+    if prices_df.empty or len(prices_df) < window:
+        return pd.DataFrame()
+
+    log_returns = np.log(prices_df / prices_df.shift(1)).dropna(how="all")
+    if len(log_returns) < window:
+        return pd.DataFrame()
+
+    tail = log_returns.tail(window)
+    cov_matrix = tail.cov()
+    if annualize:
+        cov_matrix = cov_matrix * 252
+
+    snapshot_date = log_returns.index[-1].date()
+    records: List[dict] = []
+    commodities = cov_matrix.columns.tolist()
+    for i, a in enumerate(commodities):
+        for b in commodities[i:]:           # include diagonal (variance terms)
+            val = cov_matrix.loc[a, b]
+            if np.isnan(val):
+                continue
+            records.append({
+                "date":        snapshot_date,
+                "commodity_a": a,
+                "commodity_b": b,
+                "covariance":  round(float(val), 8),
+                "window_days": window,
+                "annualized":  int(annualize),
+            })
+
+    return pd.DataFrame(records)
+
+
+def store_covariance_snapshot(
+    db_path: Optional[Union[str, Path]] = None,
+    prices_df: Optional[pd.DataFrame] = None,
+    snapshot_date: Optional[date] = None,
+    window: int = CORRELATION_WINDOW,
+    annualize: bool = True,
+) -> int:
+    """
+    Compute today's rolling covariance matrix and persist to covariance_snapshots.
+
+    If prices_df is None, loads aligned_prices from the DB automatically.
+
+    Returns the number of rows inserted.
+    """
+    if prices_df is None:
+        prices_df = _load_aligned_prices(db_path)
+
+    cov_df = compute_rolling_covariance(prices_df, window=window, annualize=annualize)
+    if cov_df.empty:
+        log.warning("store_covariance_snapshot: no covariance computed")
+        return 0
+
+    if snapshot_date is not None:
+        cov_df = cov_df[cov_df["date"] == snapshot_date]
+
+    rows = [
+        (
+            str(r["date"]),
+            r["commodity_a"],
+            r["commodity_b"],
+            r["covariance"],
+            r["window_days"],
+            r["annualized"],
+        )
+        for _, r in cov_df.iterrows()
+    ]
+
+    conn = _connect(db_path)
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO covariance_snapshots
+            (date, commodity_a, commodity_b, covariance, window_days, annualized)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    log.info(
+        "Stored %d covariance entries for %s (annualized=%s)",
+        len(rows),
+        cov_df["date"].iloc[0] if not cov_df.empty else "unknown",
+        bool(annualize),
+    )
+    return len(rows)
+
+
+def load_covariance_matrix(
+    db_path: Optional[Union[str, Path]] = None,
+    as_of: Optional[date] = None,
+    annualized: bool = True,
+) -> pd.DataFrame:
+    """
+    Load the most recent covariance snapshot as a symmetric wide matrix.
+
+    Diagonal entries are per-commodity annualised variances; off-diagonal
+    entries are annualised covariances between pairs.
+
+    Parameters
+    ----------
+    as_of      : specific date to load; defaults to latest available.
+    annualized : filter to annualized=1 rows (default True).
+
+    Returns
+    -------
+    pd.DataFrame (commodity × commodity), symmetric.
+    Empty DataFrame if no snapshots exist yet.
+    """
+    conn = _connect(db_path)
+    ann_flag = int(annualized)
+
+    if as_of is not None:
+        rows = pd.read_sql_query(
+            """
+            SELECT commodity_a, commodity_b, covariance
+            FROM   covariance_snapshots
+            WHERE  date = ? AND annualized = ?
+            """,
+            conn, params=[str(as_of), ann_flag],
+        )
+    else:
+        rows = pd.read_sql_query(
+            """
+            SELECT commodity_a, commodity_b, covariance
+            FROM   covariance_snapshots
+            WHERE  date      = (SELECT MAX(date) FROM covariance_snapshots
+                                WHERE annualized = ?)
+              AND  annualized = ?
+            """,
+            conn, params=[ann_flag, ann_flag],
+        )
+    conn.close()
+
+    if rows.empty:
+        return pd.DataFrame()
+
+    # Build symmetric matrix; diagonal stored as a=b pairs
+    commodities = sorted(set(rows["commodity_a"]) | set(rows["commodity_b"]))
+    mat = pd.DataFrame(np.nan, index=commodities, columns=commodities)
+    for _, r in rows.iterrows():
+        mat.loc[r["commodity_a"], r["commodity_b"]] = r["covariance"]
+        mat.loc[r["commodity_b"], r["commodity_a"]] = r["covariance"]
+    return mat
+
+
+def covariance_to_correlation(cov_matrix: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert a covariance matrix to a correlation matrix.
+
+    Useful for validating that stored covariances are consistent with the
+    separately-stored correlation snapshots.
+
+    Corr(a, b) = Cov(a, b) / sqrt(Var(a) * Var(b))
+
+    Parameters
+    ----------
+    cov_matrix : symmetric DataFrame with variances on the diagonal.
+
+    Returns
+    -------
+    pd.DataFrame — same shape, values in [−1, 1].
+    """
+    std = np.sqrt(np.diag(cov_matrix.values))
+    std_outer = np.outer(std, std)
+    # Guard against zero variance (degenerate columns)
+    std_outer = np.where(std_outer < 1e-12, np.nan, std_outer)
+    corr_values = cov_matrix.values / std_outer
+    return pd.DataFrame(corr_values, index=cov_matrix.index, columns=cov_matrix.columns)
+
+
+def volatility_from_covariance(
+    cov_matrix: pd.DataFrame,
+) -> pd.Series:
+    """
+    Extract per-commodity annualised volatility (σ) from the diagonal of the
+    covariance matrix.
+
+    Returns
+    -------
+    pd.Series indexed by commodity name, values = annualised σ (e.g. 0.25 = 25%).
+    """
+    if cov_matrix.empty:
+        return pd.Series(dtype=float)
+    variances = pd.Series(
+        np.diag(cov_matrix.values), index=cov_matrix.index
+    )
+    return np.sqrt(variances.clip(lower=0)).rename("annualised_vol")
 
 
 # ── Goal 2: Relative IC comparison ────────────────────────────────────────────
