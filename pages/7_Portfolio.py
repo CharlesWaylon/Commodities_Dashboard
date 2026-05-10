@@ -75,6 +75,18 @@ with st.sidebar:
         "**Runtime:** QAOA at p=2, n=12 takes ~2–4 min on a laptop simulator. "
         "Results are cached for this session."
     )
+    st.divider()
+    st.subheader("🌊 Cascade Mode")
+    cascade_k = st.slider(
+        "Cascade assets to hold", 3, 8, k_assets, 1,
+        key="casc_k_slider",
+        help="Top-k assets selected by cascade signal for the optimized portfolio",
+    )
+    backtest_rebal = st.slider(
+        "Backtest rebalance (days)", 10, 63, 21, 1,
+        key="backtest_rebal_slider",
+        help="How often to rebalance in the walk-forward backtest",
+    )
 
 
 # ── Page header ────────────────────────────────────────────────────────────────
@@ -99,6 +111,26 @@ def _load_corr_matrix():
 def _load_prices():
     from models.data_loader import load_price_matrix_from_db
     return load_price_matrix_from_db()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_macro() -> pd.DataFrame:
+    """Load macro signals (dxy_zscore63, vix, tlt_mom21) from the DB trigger log."""
+    import sqlite3
+    import os
+    db_path = os.path.join(os.path.dirname(__file__), "..", "data", "commodities.db")
+    db_path = os.path.normpath(db_path)
+    try:
+        with sqlite3.connect(db_path) as con:
+            # Try trigger_log table first (has macro columns populated by detector)
+            df = pd.read_sql_query(
+                "SELECT date, dxy_zscore, vix, tlt_mom21 FROM trigger_log ORDER BY date",
+                con, parse_dates=["date"]
+            )
+            df = df.set_index("date").rename(columns={"dxy_zscore": "dxy_zscore63"})
+            return df
+    except Exception:
+        return pd.DataFrame()
 
 
 def _recent_returns(prices: pd.DataFrame, window: int = 5) -> dict:
@@ -393,4 +425,386 @@ else:
         "Click **⚛️ Run QAOA Optimizer** above to compute an allocation. "
         "The simulator runs ~2–4 minutes at p=2 with 12 assets.",
         icon="⚛️",
+    )
+
+st.divider()
+
+
+# ── Section 4: Cascade-Informed QAOA ─────────────────────────────────────────
+st.subheader("🌊 Cascade-Informed QAOA Allocation")
+st.caption(
+    "Replaces the historical expected-return vector (μ) with macro-adjusted cascade "
+    "forecasts, blended by per-commodity confidence. Covariance structure is unchanged. "
+    "QAOA then finds the cardinality-constrained allocation that maximises "
+    "cascade-informed Sharpe."
+)
+
+casc_run_col, casc_info_col = st.columns([2, 3])
+with casc_run_col:
+    casc_run_btn = st.button(
+        "🌊 Run Cascade QAOA",
+        type="primary",
+        key="casc_run_btn",
+        help=(
+            f"Computes cascade forecasts for all commodities using today's macro state, "
+            f"then runs QAOA (p={p_layers}) with cascade μ. ~2–4 min."
+        ),
+    )
+
+macro_df = _load_macro()
+latest_macro: dict = {}
+if not macro_df.empty:
+    latest_macro = macro_df.iloc[-1].to_dict()
+    dxy_z_disp = latest_macro.get("dxy_zscore63", 0.0) or 0.0
+    vix_disp   = latest_macro.get("vix", 18.0) or 18.0
+    tlt_disp   = latest_macro.get("tlt_mom21", 0.0) or 0.0
+    with casc_info_col:
+        st.info(
+            f"Macro state: DXY z={dxy_z_disp:+.2f} · VIX {vix_disp:.1f} · "
+            f"TLT mom {tlt_disp:+.1f}% · "
+            f"Hold **{cascade_k}** assets · p=**{p_layers}** layers",
+            icon="🌊",
+        )
+else:
+    with casc_info_col:
+        st.warning(
+            "No macro data found — cascade will use momentum-only signals.",
+            icon="⚠️",
+        )
+
+if casc_run_btn:
+    st.session_state["casc_params"] = dict(
+        k=cascade_k, p=p_layers, n_assets=n_assets,
+        lam=lam, penalty=penalty,
+    )
+    st.session_state.pop("casc_result", None)
+
+if st.session_state.get("casc_params") and "casc_result" not in st.session_state:
+    cp = st.session_state["casc_params"]
+    with st.spinner(
+        f"Computing cascade forecasts + running QAOA "
+        f"(n={cp['n_assets']}, k={cp['k']}, p={cp['p']})… ☕"
+    ):
+        try:
+            from models.portfolio_optimizer import (
+                run_cascade_portfolio,
+                compute_cascade_forecast,
+                COMM_EFFECTS,
+            )
+            _pf = prices_df if not prices_df.empty else None
+            if _pf is None or _pf.empty:
+                st.error("No price data available for cascade computation.", icon="❌")
+                st.session_state.pop("casc_params", None)
+            else:
+                # Compute cascade forecast for each commodity in the universe
+                _cascade_fcast: dict = {}
+                _confidences:   dict = {}
+                _channels:      dict = {}
+
+                for _comm in COMM_EFFECTS:
+                    try:
+                        _, _, _fp, _, _conf, _ch = compute_cascade_forecast(
+                            _comm, latest_macro, _pf
+                        )
+                        _cascade_fcast[_comm] = _fp
+                        _confidences[_comm]   = _conf
+                        _channels[_comm]      = _ch
+                    except Exception:
+                        pass
+
+                _casc_res = run_cascade_portfolio(
+                    cascade_forecasts = _cascade_fcast,
+                    confidences       = _confidences,
+                    prices            = _pf,
+                    macro_row         = latest_macro,
+                    channel_contribs  = _channels,
+                    n_assets          = cp["n_assets"],
+                    k                 = cp["k"],
+                    p                 = cp["p"],
+                    lam               = cp["lam"],
+                    penalty           = cp["penalty"],
+                    run_baseline      = False,
+                    n_shots           = 512,
+                )
+                st.session_state["casc_result"] = _casc_res
+        except Exception as _exc:
+            st.error(f"Cascade QAOA failed: {_exc}", icon="❌")
+            st.session_state.pop("casc_params", None)
+
+if "casc_result" in st.session_state:
+    _cr = st.session_state["casc_result"]
+
+    # ── Narrative ─────────────────────────────────────────────────────────────
+    if _cr.causal_narrative:
+        st.info(_cr.causal_narrative, icon="🌊")
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    _cm1, _cm2, _cm3, _cm4 = st.columns(4)
+    _cm1.metric("Selected assets",  len(_cr.selected_assets))
+    _cm2.metric("Expected return",  f"{_cr.expected_return:.1%}",
+                help="Cascade-informed annualised expected return")
+    _cm3.metric("Portfolio vol",    f"{_cr.portfolio_vol:.1%}")
+    _cm4.metric("Sharpe (rf = 0)", f"{_cr.sharpe:.2f}")
+
+    st.divider()
+
+    _cl, _cr_col = st.columns([2, 1])
+
+    with _cl:
+        st.markdown("#### Cascade Allocation")
+        _casc_alloc = (
+            pd.DataFrame.from_dict(_cr.weights, orient="index", columns=["weight"])
+            .reset_index()
+            .rename(columns={"index": "asset"})
+            .sort_values("weight", ascending=False)
+        )
+        _casc_alloc["label"] = _casc_alloc["asset"].apply(lambda n: n.split("(")[0].strip())
+        _casc_alloc["cascade_pct"] = _casc_alloc["asset"].apply(
+            lambda a: _cr.cascade_forecasts.get(a, 0.0)
+        )
+        _casc_alloc["conf"] = _casc_alloc["asset"].apply(
+            lambda a: _cr.confidences.get(a, 0.5)
+        )
+
+        _bar_colors = [GREEN if w >= 0 else RED for w in _casc_alloc["cascade_pct"]]
+        _fig_casc = go.Figure(go.Bar(
+            x=_casc_alloc["label"],
+            y=_casc_alloc["weight"],
+            marker_color=_bar_colors,
+            marker_line_color=GRID,
+            marker_line_width=1,
+            text=[
+                f"{w:.0%}<br>{p:+.1f}%"
+                for w, p in zip(_casc_alloc["weight"], _casc_alloc["cascade_pct"])
+            ],
+            textposition="outside",
+            textfont=dict(color="#E0E0E0", size=10),
+        ))
+        _fig_casc.update_layout(
+            **PLOTLY_LAYOUT,
+            height=340,
+            margin=dict(t=20, l=10, r=10, b=70),
+            xaxis=dict(tickangle=-30, tickfont=dict(size=11, color="#C0CDE0")),
+            yaxis=dict(
+                tickformat=".0%",
+                tickfont=dict(color="#C0CDE0"),
+                gridcolor=GRID,
+                range=[0, max(_casc_alloc["weight"]) * 1.4],
+            ),
+            showlegend=False,
+        )
+        st.plotly_chart(_fig_casc, use_container_width=True, config={"displayModeBar": False})
+
+    with _cr_col:
+        st.markdown("#### Cascade Forecasts")
+        _fc_rows = []
+        for _a in _cr.selected_assets:
+            _fc_rows.append({
+                "Asset":      _a.split("(")[0].strip(),
+                "Weight":     f"{_cr.weights.get(_a, 0):.0%}",
+                "Cascade %":  f"{_cr.cascade_forecasts.get(_a, 0):+.2f}%",
+                "Confidence": f"{_cr.confidences.get(_a, 0):.0%}",
+            })
+        st.dataframe(pd.DataFrame(_fc_rows), use_container_width=True, hide_index=True)
+
+    # ── Channel breakdown ─────────────────────────────────────────────────────
+    with st.expander("📡 Channel contributions per selected asset"):
+        _ch_rows = []
+        for _a in _cr.selected_assets:
+            _ch = _cr.channel_contributions.get(_a, {})
+            _ch_rows.append({
+                "Asset":       _a.split("(")[0].strip(),
+                "Real Yields": f"{_ch.get('Real Yields', 0):+.2f}pp",
+                "USD":         f"{_ch.get('USD', 0):+.2f}pp",
+                "Risk-Off":    f"{_ch.get('Risk-Off', 0):+.2f}pp",
+                "Total Macro": f"{sum(_ch.values()):+.2f}pp",
+            })
+        st.dataframe(pd.DataFrame(_ch_rows), use_container_width=True, hide_index=True)
+
+    # ── QAOA convergence ──────────────────────────────────────────────────────
+    if _cr.qaoa_result.cost_history:
+        with st.expander("📉 QAOA convergence (cascade run)", expanded=False):
+            _hist = _cr.qaoa_result.cost_history
+            _fig_cc = go.Figure(go.Scatter(
+                x=list(range(len(_hist))), y=_hist,
+                mode="lines", line=dict(color=TEAL, width=2),
+                fill="tozeroy", fillcolor="rgba(38,198,218,0.08)",
+            ))
+            _fig_cc.update_layout(
+                **PLOTLY_LAYOUT, height=220,
+                margin=dict(t=10, l=10, r=10, b=40),
+                xaxis=dict(title="COBYLA iteration", tickfont=dict(color="#C0CDE0")),
+                yaxis=dict(title="⟨H_C⟩", tickfont=dict(color="#C0CDE0"), gridcolor=GRID),
+                showlegend=False,
+            )
+            st.plotly_chart(_fig_cc, use_container_width=True, config={"displayModeBar": False})
+
+else:
+    st.info(
+        "Click **🌊 Run Cascade QAOA** to compute a macro-adjusted portfolio allocation.",
+        icon="🌊",
+    )
+
+st.divider()
+
+
+# ── Section 5: Backtest — Cascade vs Baseline ─────────────────────────────────
+st.subheader("📊 Backtest: Cascade vs Momentum vs Equal-Weight")
+st.caption(
+    "Walk-forward simulation: every rebalance period, each strategy selects the "
+    f"top-{cascade_k} commodities by its signal (cascade / momentum / none), holds "
+    "equal-weight, and earns the actual forward return. No QAOA in the backtest "
+    "— this tests signal quality independently of the solver."
+)
+
+_bt_col1, _bt_col2 = st.columns([2, 3])
+with _bt_col1:
+    _bt_btn = st.button(
+        "📊 Run Backtest",
+        key="backtest_btn",
+        help=f"Walk-forward over the full price history, rebalancing every {backtest_rebal} days.",
+    )
+with _bt_col2:
+    st.info(
+        f"Rebalance every **{backtest_rebal}** days · "
+        f"Hold top-**{cascade_k}** · "
+        f"Lookback **252** days · "
+        f"Benchmark: equal-weight all",
+        icon="📊",
+    )
+
+if _bt_btn:
+    st.session_state.pop("bt_result", None)
+    st.session_state["bt_params"] = dict(k=cascade_k, rebal=backtest_rebal)
+
+if st.session_state.get("bt_params") and "bt_result" not in st.session_state:
+    _btp = st.session_state["bt_params"]
+    with st.spinner("Running walk-forward backtest (greedy selection, no QAOA)…"):
+        try:
+            from models.portfolio_optimizer import backtest_cascade_vs_baseline
+            _bt_macro = macro_df if not macro_df.empty else pd.DataFrame()
+            _bt_prices = prices_df if not prices_df.empty else pd.DataFrame()
+            if _bt_prices.empty:
+                st.error("No price data for backtest.", icon="❌")
+                st.session_state.pop("bt_params", None)
+            else:
+                _bt_res = backtest_cascade_vs_baseline(
+                    prices         = _bt_prices,
+                    macro_df       = _bt_macro,
+                    k              = _btp["k"],
+                    rebalance_days = _btp["rebal"],
+                )
+                st.session_state["bt_result"] = _bt_res
+        except Exception as _exc:
+            st.error(f"Backtest failed: {_exc}", icon="❌")
+            st.session_state.pop("bt_params", None)
+
+if "bt_result" in st.session_state:
+    _bt = st.session_state["bt_result"]
+
+    if _bt.n_periods == 0:
+        st.warning(
+            "Not enough data to run the backtest — need at least 126 days of history "
+            "across the commodity universe.",
+            icon="⚠️",
+        )
+    else:
+        # ── Summary metrics table ─────────────────────────────────────────────
+        st.markdown(f"**{_bt.n_periods} rebalance periods** · "
+                    f"rebalance every {_bt.rebalance_days}d · "
+                    f"hold {_bt.k} assets")
+        _summ_df = _bt.summary_df()
+        st.dataframe(_summ_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── Cumulative return chart ───────────────────────────────────────────
+        _colors_bt = {
+            "Equal Weight":   AMBER,
+            "Momentum Top-k": BLUE,
+            "Cascade Top-k":  GREEN,
+        }
+        _fig_bt = go.Figure()
+        for _s, _cum in _bt.cumulative_returns.items():
+            _fig_bt.add_trace(go.Scatter(
+                x=_cum.index, y=_cum.values,
+                mode="lines",
+                name=_s,
+                line=dict(color=_colors_bt.get(_s, "#A0AEC0"), width=2),
+                fill="none",
+            ))
+        _fig_bt.add_hline(y=1.0, line_dash="dot", line_color="#718096",
+                          annotation_text="Starting value", annotation_position="right")
+        _fig_bt.update_layout(
+            **PLOTLY_LAYOUT,
+            height=380,
+            margin=dict(t=20, l=10, r=20, b=40),
+            xaxis=dict(title="Date", tickfont=dict(color="#C0CDE0")),
+            yaxis=dict(
+                title="Cumulative return (log-scale)",
+                type="log",
+                tickfont=dict(color="#C0CDE0"),
+                gridcolor=GRID,
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom", y=1.01,
+                xanchor="left", x=0,
+                font=dict(color="#E0E0E0"),
+            ),
+        )
+        st.plotly_chart(_fig_bt, use_container_width=True, config={"displayModeBar": False})
+
+        # ── Lift vs equal-weight ──────────────────────────────────────────────
+        ew_ann = _bt.annual_returns.get("Equal Weight", 0.0)
+        casc_ann = _bt.annual_returns.get("Cascade Top-k", 0.0)
+        mom_ann  = _bt.annual_returns.get("Momentum Top-k", 0.0)
+        lift_vs_ew   = casc_ann - ew_ann
+        lift_vs_mom  = casc_ann - mom_ann
+
+        _lc1, _lc2, _lc3 = st.columns(3)
+        _lc1.metric(
+            "Cascade lift vs Equal-Weight",
+            f"{lift_vs_ew:+.1%}",
+            help="Annualised return difference",
+        )
+        _lc2.metric(
+            "Cascade lift vs Momentum",
+            f"{lift_vs_mom:+.1%}",
+            help="Annualised return difference",
+        )
+        _lc3.metric(
+            "Cascade Sharpe",
+            f"{_bt.sharpe_ratios.get('Cascade Top-k', 0):.2f}",
+            delta=f"vs {_bt.sharpe_ratios.get('Momentum Top-k', 0):.2f} momentum",
+        )
+
+        # ── Period-return distribution ────────────────────────────────────────
+        with st.expander("📦 Period return distribution"):
+            _fig_dist = go.Figure()
+            for _s, _ser in _bt.strategy_returns.items():
+                _fig_dist.add_trace(go.Histogram(
+                    x=_ser.values * 100,
+                    name=_s,
+                    opacity=0.65,
+                    nbinsx=30,
+                    marker_color=_colors_bt.get(_s, "#A0AEC0"),
+                ))
+            _fig_dist.update_layout(
+                **PLOTLY_LAYOUT,
+                barmode="overlay",
+                height=280,
+                margin=dict(t=20, l=10, r=10, b=40),
+                xaxis=dict(title="Period log-return (%)", tickfont=dict(color="#C0CDE0")),
+                yaxis=dict(title="Count", tickfont=dict(color="#C0CDE0"), gridcolor=GRID),
+                legend=dict(font=dict(color="#E0E0E0")),
+            )
+            st.plotly_chart(_fig_dist, use_container_width=True,
+                            config={"displayModeBar": False})
+
+else:
+    st.info(
+        "Click **📊 Run Backtest** to compare cascade-informed allocation against "
+        "momentum and equal-weight strategies over the full price history.",
+        icon="📊",
     )

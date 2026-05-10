@@ -440,6 +440,96 @@ if _inline_ev is not None:
 
 st.divider()
 
+# ── Cascade constants & helper ─────────────────────────────────────────────────
+_CASCADE_SECTOR_MAP = {
+    "WTI Crude Oil":           "Energy",
+    "Brent Crude Oil":         "Energy",
+    "Natural Gas (Henry Hub)": "Energy",
+    "Gasoline (RBOB)":         "Energy",
+    "Heating Oil":             "Energy",
+    "Gold (COMEX)":            "Metals",
+    "Silver (COMEX)":          "Metals",
+    "Copper (COMEX)":          "Metals",
+    "Corn (CBOT)":             "Grains",
+    "Wheat (CBOT SRW)":        "Grains",
+    "Soybeans (CBOT)":         "Grains",
+    "Feeder Cattle":           "Livestock",
+    "Lean Hogs":               "Livestock",
+}
+_CASCADE_COMM_EFFECTS = {
+    "WTI Crude Oil":           {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
+    "Brent Crude Oil":         {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
+    "Natural Gas (Henry Hub)": {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
+    "Gasoline (RBOB)":         {"real_yields": -0.15, "usd": -0.45, "risk_off": -0.35},
+    "Heating Oil":             {"real_yields": -0.15, "usd": -0.45, "risk_off": -0.35},
+    "Gold (COMEX)":            {"real_yields": -0.60, "usd":  0.30, "risk_off":  0.50},
+    "Silver (COMEX)":          {"real_yields": -0.40, "usd": -0.10, "risk_off":  0.25},
+    "Copper (COMEX)":          {"real_yields":  0.10, "usd": -0.30, "risk_off": -0.50},
+    "Corn (CBOT)":             {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Wheat (CBOT SRW)":        {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
+    "Soybeans (CBOT)":         {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Feeder Cattle":           {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
+    "Lean Hogs":               {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
+}
+
+def _compute_cascade_for(commodity, macro_row, prices_df):
+    """Return (base_pct, macro_adj, final_pct, band_90, confidence, channel_breakdown).
+
+    base_pct        — 21-day momentum of the commodity (%)
+    macro_adj       — sum of macro channel contributions (pp)
+    final_pct       — base + macro_adj
+    band_90         — ±90% uncertainty band (pp)
+    confidence      — 0–1 scalar; penalised when channels conflict
+    channel_breakdown — dict {channel: contribution_pp}
+    """
+    import numpy as _np
+
+    effects = _CASCADE_COMM_EFFECTS.get(commodity, {})
+
+    # ── macro signals ──────────────────────────────────────────────────────────
+    try:
+        dxy_z  = float(macro_row.get("dxy_zscore63", macro_row.get("dxy_zscore", 0)) or 0)
+        vix    = float(macro_row.get("vix", 18) or 18)
+        tlt_m  = float(macro_row.get("tlt_mom21", 0) or 0)
+    except Exception:
+        dxy_z, vix, tlt_m = 0.0, 18.0, 0.0
+
+    real_yields_sig = -tlt_m / 0.05          # negative TLT momentum → rising yields
+    usd_sig         = dxy_z / 2.0
+    risk_off_sig    = (vix - 15.0) / 20.0
+
+    # ── base momentum ──────────────────────────────────────────────────────────
+    base_pct = 0.0
+    try:
+        col = next((c for c in prices_df.columns if commodity.lower() in c.lower()), None)
+        if col is not None:
+            s = prices_df[col].dropna()
+            if len(s) >= 22:
+                base_pct = float((s.iloc[-1] / s.iloc[-22] - 1) * 100)
+    except Exception:
+        base_pct = 0.0
+
+    # ── channel contributions ─────────────────────────────────────────────────
+    ch = {
+        "Real Yields": real_yields_sig * effects.get("real_yields", 0),
+        "USD":         usd_sig         * effects.get("usd",         0),
+        "Risk-Off":    risk_off_sig    * effects.get("risk_off",    0),
+    }
+    macro_adj = sum(ch.values())
+    final_pct = base_pct + macro_adj
+
+    # ── uncertainty band (wider when signals conflict) ─────────────────────────
+    signs = [_np.sign(v) for v in ch.values() if v != 0]
+    conflicting = len(set(signs)) > 1 if signs else False
+    band_90 = abs(macro_adj) * (1.5 if conflicting else 0.8) + abs(base_pct) * 0.3 + 0.5
+
+    # ── confidence (0–1) ──────────────────────────────────────────────────────
+    signal_strength = min(abs(macro_adj) / 2.0, 1.0)
+    conflict_penalty = 0.2 if conflicting else 0.0
+    confidence = max(0.05, min(0.95, signal_strength - conflict_penalty + 0.35))
+
+    return base_pct, macro_adj, final_pct, band_90, confidence, ch
+
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📐 Statistical",
@@ -1480,6 +1570,125 @@ with tab2:
             except Exception as _e:
                 st.warning(f"Full leaderboard failed: {_e}")
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTOR CASCADE — macro-adjusted forward forecast
+    # ══════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("🌊 Sector Cascade Forecast")
+    st.caption(
+        "Adjusts the commodity's 21-day momentum baseline with macro channel signals "
+        "(Real Yields, USD, Risk-Off) derived from TLT momentum, DXY z-score, and VIX."
+    )
+
+    _casc_comm = st.selectbox(
+        "Commodity",
+        options=list(_CASCADE_COMM_EFFECTS.keys()),
+        key="casc_comm_select",
+    )
+    _casc_sector = _CASCADE_SECTOR_MAP.get(_casc_comm, "Unknown")
+
+    # pull latest macro row
+    _casc_macro_row = {}
+    try:
+        if not _macro_for_triggers.empty:
+            _casc_macro_row = _macro_for_triggers.iloc[-1].to_dict()
+    except Exception:
+        pass
+
+    _c_base, _c_adj, _c_final, _c_band, _c_conf, _c_ch = _compute_cascade_for(
+        _casc_comm, _casc_macro_row, prices
+    )
+
+    # ── Forecast card ─────────────────────────────────────────────────────────
+    _casc_color  = "#3DB87A" if _c_final >= 0 else "#D94F4F"
+    _casc_arrow  = "▲" if _c_final >= 0 else "▼"
+    _casc_dir    = "Bullish" if _c_final >= 0 else "Bearish"
+
+    st.markdown(
+        f"""
+        <div style="background:#0C1228;border-radius:10px;padding:18px 24px;margin-bottom:12px;
+                    border-left:4px solid {_casc_color};">
+          <div style="color:#A0AEC0;font-size:0.75rem;text-transform:uppercase;letter-spacing:.08em;">
+            {_casc_sector} · {_casc_comm}
+          </div>
+          <div style="color:{_casc_color};font-size:2.2rem;font-weight:700;margin:4px 0;">
+            {_casc_arrow} {_c_final:+.2f}%
+          </div>
+          <div style="color:#718096;font-size:0.8rem;">
+            Cascade 5-day forecast &nbsp;|&nbsp; 90% band: ±{_c_band:.2f}pp &nbsp;|&nbsp;
+            Direction: <span style="color:{_casc_color};">{_casc_dir}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Decomposition row ─────────────────────────────────────────────────────
+    _dc1, _dc2, _dc3, _dc4 = st.columns(4)
+    _dc1.metric("Baseline (Momentum)", f"{_c_base:+.2f}%")
+    _dc2.metric("Macro Overlay",       f"{_c_adj:+.2f}pp",
+                delta=f"{'adds' if _c_adj >= 0 else 'subtracts'} {abs(_c_adj):.2f}pp")
+    _dc3.metric("Cascade Final",       f"{_c_final:+.2f}%")
+    _dc4.metric("Confidence",          f"{_c_conf:.0%}")
+
+    # ── Channel breakdown bar chart ───────────────────────────────────────────
+    import plotly.graph_objects as _go_casc
+    _ch_names = list(_c_ch.keys())
+    _ch_vals  = list(_c_ch.values())
+    _ch_colors = ["#3DB87A" if v >= 0 else "#D94F4F" for v in _ch_vals]
+
+    _casc_fig = _go_casc.Figure(_go_casc.Bar(
+        x=_ch_names,
+        y=_ch_vals,
+        marker_color=_ch_colors,
+        text=[f"{v:+.2f}pp" for v in _ch_vals],
+        textposition="outside",
+    ))
+    _casc_fig.update_layout(
+        title="Macro Channel Contributions",
+        yaxis_title="Contribution (pp)",
+        paper_bgcolor="#060912",
+        plot_bgcolor="#0C1228",
+        font_color="#E2E8F0",
+        height=300,
+        margin=dict(l=40, r=20, t=40, b=30),
+        showlegend=False,
+    )
+    _casc_fig.update_xaxes(gridcolor="#1A2340")
+    _casc_fig.update_yaxes(gridcolor="#1A2340", zeroline=True, zerolinecolor="#718096")
+    st.plotly_chart(_casc_fig, use_container_width=True)
+
+    # ── vs Independent baseline comparison ───────────────────────────────────
+    with st.expander("What changed by accounting for upstream macro shocks?"):
+        _delta_abs = abs(_c_adj)
+        _same_dir  = (_c_base >= 0) == (_c_final >= 0)
+        if _delta_abs < 0.10:
+            _narrative = (
+                "Macro channels are near-neutral. The cascade forecast is essentially "
+                "the same as the independent momentum baseline — no material upstream shock."
+            )
+        elif _same_dir:
+            _narrative = (
+                f"Macro channels **reinforce** the momentum signal, adding {_c_adj:+.2f}pp. "
+                f"The cascade strengthens the {_casc_dir.lower()} baseline view."
+            )
+        else:
+            _narrative = (
+                f"Macro channels **oppose** the momentum signal ({_c_adj:+.2f}pp). "
+                f"The cascade flips or mutes the baseline — upstream macro shocks are "
+                f"the dominant driver."
+            )
+        st.markdown(_narrative)
+
+        _cmp_c1, _cmp_c2 = st.columns(2)
+        with _cmp_c1:
+            st.markdown("**Without macro cascade (momentum only)**")
+            st.metric("Baseline forecast", f"{_c_base:+.2f}%")
+        with _cmp_c2:
+            st.markdown("**With macro cascade**")
+            st.metric("Cascade forecast", f"{_c_final:+.2f}%",
+                      delta=f"{_c_adj:+.2f}pp from macro")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — MARKET SIGNALS
@@ -2086,6 +2295,43 @@ with tab6:
             st.success(f"Got {len(_votes)} vote(s): {', '.join(v.model_name for v in _votes)}")
         else:
             st.warning("No votes collected — model fits may have failed. Check terminal for errors.")
+
+    # ── Cascade toggle ────────────────────────────────────────────────────────
+    _use_cascade = st.checkbox(
+        "🌊 Include Cascade Forecast in Ensemble",
+        key="consensus_use_cascade",
+        help=(
+            "Computes a macro-adjusted forecast from the Sector Cascade model and adds it "
+            "as an additional vote (tier='ml', model='CascadeForecast') before the "
+            "meta-predictor arbitrates tier weights."
+        ),
+    )
+    if _use_cascade:
+        _casc_macro_row_c = {}
+        try:
+            if not _macro_for_triggers.empty:
+                _casc_macro_row_c = _macro_for_triggers.iloc[-1].to_dict()
+        except Exception:
+            pass
+
+        _cc_base, _cc_adj, _cc_final, _cc_band, _cc_conf, _cc_ch = _compute_cascade_for(
+            consensus_commodity, _casc_macro_row_c, prices
+        )
+
+        _cascade_vote = ModelVote(
+            tier="ml",
+            model_name="CascadeForecast",
+            commodity=consensus_commodity,
+            forecast_return=_cc_final / 100.0,
+            confidence=_cc_conf,
+        )
+        _votes = list(_votes) + [_cascade_vote]
+
+        st.info(
+            f"🌊 Cascade vote added — forecast: **{_cc_final:+.2f}%** "
+            f"(base {_cc_base:+.2f}% + macro {_cc_adj:+.2f}pp), "
+            f"confidence: {_cc_conf:.0%}"
+        )
 
     # ── Run the arbitration (works with 0 votes — falls back to equal weights) ──
     _decision = _meta_pred.predict(_meta_features, _votes)
