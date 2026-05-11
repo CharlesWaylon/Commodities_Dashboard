@@ -40,6 +40,9 @@ def _load_sector_timeline():
     df = fetch_price_history(days=90)
     if df.empty:
         return None
+    _bad = {"", "undefined", "none", "null", "nan"}
+    df = df.dropna(subset=["sector"])
+    df = df[~df["sector"].str.strip().str.lower().isin(_bad)]
     df = df.sort_values(["name", "date"])
     df["ret"] = df.groupby("name")["adjusted_close"].pct_change() * 100
     pivot = (
@@ -49,6 +52,11 @@ def _load_sector_timeline():
         .pivot(index="sector", columns="date", values="ret")
     )
     result = pivot.iloc[:, -30:].round(2)
+    # Sort rows into a logical sector order; put anything unexpected at the end
+    _order = ["Energy", "Metals", "Agriculture", "Livestock", "Digital Assets"]
+    present = [s for s in _order if s in result.index]
+    others  = [s for s in result.index if s not in _order]
+    result  = result.loc[present + others]
     return result if not result.empty else None
 
 
@@ -239,14 +247,25 @@ with tab_live:
         )
         df_tm["color_val"] = df_tm["Pct_Change"].clip(-5, 5)
 
+        # Treemap requires parent nodes to appear in ids with parent=""
+        _sectors = df_tm["Sector"].unique().tolist()
+        _n = len(_sectors)
+        _all_ids     = _sectors + df_tm["Name"].tolist()
+        _all_labels  = _sectors + df_tm["label"].tolist()
+        _all_parents = [""] * _n + df_tm["Sector"].tolist()
+        _all_values  = [1] * _n + [1] * len(df_tm)
+        _all_colors  = [0.0] * _n + df_tm["color_val"].tolist()
+        _all_cd      = [[s, "", 0.0, ""] for s in _sectors] + \
+                       df_tm[["Name", "Price", "Pct_Change", "Unit"]].values.tolist()
+
         fig_heat = go.Figure(go.Treemap(
-            ids        = df_tm["Name"],
-            labels     = df_tm["label"],
-            parents    = df_tm["Sector"],
-            values     = [1] * len(df_tm),
-            customdata = df_tm[["Name", "Price", "Pct_Change", "Unit"]].values,
+            ids        = _all_ids,
+            labels     = _all_labels,
+            parents    = _all_parents,
+            values     = _all_values,
+            customdata = _all_cd,
             marker=dict(
-                colors=df_tm["color_val"],
+                colors=_all_colors,
                 colorscale=[
                     [0.0,  DESCEND],
                     [0.38, "#2C1F1F"],
@@ -315,9 +334,16 @@ border-radius:6px;margin-bottom:5px">
 
     timeline = _load_sector_timeline()
     if timeline is not None and not timeline.empty:
+        _bad_idx = {"undefined", "none", "null", "nan", ""}
+        timeline = timeline[
+            timeline.index.notna() &
+            ~timeline.index.astype(str).str.strip().str.lower().isin(_bad_idx)
+        ]
+    if timeline is not None and not timeline.empty:
+        _x_labels = [pd.Timestamp(d).strftime("%b %d") for d in timeline.columns]
         fig_tl = go.Figure(go.Heatmap(
             z          = timeline.values,
-            x          = [str(d)[-5:] for d in timeline.columns],
+            x          = _x_labels,
             y          = timeline.index.tolist(),
             colorscale = [
                 [0.0, DESCEND], [0.38, "#2C1F1F"],
@@ -336,10 +362,10 @@ border-radius:6px;margin-bottom:5px">
         ))
         fig_tl.update_layout(**{
             **PLOTLY_LAYOUT,
-            "height": 170,
-            "margin": dict(l=80, r=60, t=4, b=36),
+            "height": 210,
+            "margin": dict(l=110, r=60, t=4, b=55),
             "xaxis": {**PLOTLY_LAYOUT["xaxis"], "tickangle": -45, "tickfont": dict(size=9), "showgrid": False},
-            "yaxis": {**PLOTLY_LAYOUT["yaxis"], "tickfont": dict(size=11), "showgrid": False},
+            "yaxis": {**PLOTLY_LAYOUT["yaxis"], "tickfont": dict(size=11), "showgrid": False, "automargin": True},
         })
         st.plotly_chart(fig_tl, use_container_width=True, config={"displayModeBar": False})
         st.caption(

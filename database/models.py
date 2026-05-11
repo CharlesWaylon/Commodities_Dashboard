@@ -290,6 +290,55 @@ class ForecastLog(Base):
         )
 
 
+class PriceValidationLog(Base):
+    """
+    Audit trail for every price anomaly detected during ingestion.
+
+    One row per anomalous price point. Written by pipeline/price_validator.py
+    before any data enters price_history, so the raw incorrect value is always
+    preserved here even after the corrected value is stored in price_history.
+
+    reason_code values (from pipeline/price_validator.py):
+      'scaling_error'              — systematic unit mismatch (e.g., cents vs dollars)
+      'absolute_sanity_violation'  — price outside the hard floor/ceiling for this ticker
+      'outlier_spike'              — extreme single-period return or rolling z-score breach
+      'rollover_artifact'          — likely contract-roll discontinuity; kept for roll_adjust
+      'missing_contract_continuity'— gap preventing proper back-adjustment
+
+    action values:
+      'rescaled'     — scale factor applied; row inserted with corrected_close
+      'interpolated' — replaced with linear interpolation from neighbours
+      'excluded'     — row dropped; NOT inserted into price_history
+      'quarantined'  — logged but inserted as-is; roll_adjust.py may fix it
+    """
+    __tablename__ = "price_validation_log"
+
+    id              = Column(Integer,    primary_key=True, autoincrement=True)
+    run_id          = Column(String(36), nullable=False)
+    logged_at       = Column(DateTime,   default=lambda: datetime.now(timezone.utc))
+    ticker          = Column(String(20),  nullable=False)
+    name            = Column(String(100), nullable=False)
+    date            = Column(Date,        nullable=False)
+    raw_close       = Column(Float,       nullable=False)
+    corrected_close = Column(Float,       nullable=True)   # None if quarantined/excluded
+    reason_code     = Column(String(50),  nullable=False)
+    action          = Column(String(20),  nullable=False)
+    details         = Column(String(500), nullable=True)
+
+    __table_args__ = (
+        Index("ix_pvlog_ticker_date",  "ticker", "date"),
+        Index("ix_pvlog_run_id",       "run_id"),
+        Index("ix_pvlog_reason_code",  "reason_code"),
+        Index("ix_pvlog_logged_at",    "logged_at"),
+    )
+
+    def __repr__(self):
+        return (
+            f"<PriceValidationLog {self.ticker} {self.date} "
+            f"reason={self.reason_code} action={self.action}>"
+        )
+
+
 class IngestionLog(Base):
     """
     One row per commodity per ingestion run.

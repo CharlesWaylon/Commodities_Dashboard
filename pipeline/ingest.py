@@ -33,7 +33,8 @@ import yfinance as yf
 from sqlalchemy.exc import IntegrityError
 
 from database.db import init_db, get_db
-from database.models import Commodity, PriceHistory, IngestionLog
+from database.models import Commodity, PriceHistory, IngestionLog, PriceValidationLog
+from pipeline.price_validator import validate_price_series, AnomalyRecord
 from services.price_data import COMMODITY_TICKERS, COMMODITY_SECTORS, COMMODITY_UNITS
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
@@ -79,15 +80,16 @@ def seed_commodities(db) -> dict[str, int]:
     return ticker_to_id
 
 
-# ── Step 2 & 3: Fetch + Upsert ─────────────────────────────────────────────────
+# ── Step 2 & 3: Fetch + Validate + Upsert ──────────────────────────────────────
 def ingest_commodity(
-    db, commodity_id: int, ticker: str, name: str, backfill: bool
-) -> tuple[int, int, str, str | None]:
+    db, commodity_id: int, ticker: str, name: str, backfill: bool, run_id: str
+) -> tuple[int, int, str, str | None, list[AnomalyRecord]]:
     """
-    Download OHLCV data for one commodity and write new rows to the DB.
-    Returns (inserted_count, skipped_count, status, error_msg).
-      status: 'ok' | 'empty' | 'error'
-      error_msg: exception text if status == 'error', else None
+    Download OHLCV data for one commodity, validate it, then write to the DB.
+    Returns (inserted_count, skipped_count, status, error_msg, anomalies).
+      status: 'ok' | 'empty' | 'error' | 'circuit_breaker'
+      error_msg: description if status is not 'ok', else None
+      anomalies: list of AnomalyRecord from price_validator (may be empty)
     """
     period   = FULL_BACKFILL_PERIOD if backfill else INCREMENTAL_PERIOD
     interval = "1d"
@@ -98,19 +100,39 @@ def ingest_commodity(
                           progress=False, auto_adjust=True)
     except Exception as e:
         log.warning(f"  yfinance error for {ticker}: {e}")
-        return 0, 0, "error", str(e)[:500]
+        return 0, 0, "error", str(e)[:500], []
 
     if raw.empty:
         log.warning(f"  No data returned for {ticker}")
-        return 0, 0, "empty", None
+        return 0, 0, "empty", None, []
 
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
 
+    # ── Validate before touching the DB ────────────────────────────────────────
+    validation = validate_price_series(ticker, name, raw)
+
+    if validation.circuit_breaker_triggered:
+        log.error(
+            "  CIRCUIT BREAKER: %s — skipping all %d fetched rows. Reason: %s",
+            ticker, len(raw), validation.circuit_breaker_reason,
+        )
+        return (
+            0, 0,
+            "circuit_breaker",
+            validation.circuit_breaker_reason[:500],
+            validation.anomalies,
+        )
+
+    # Use the cleaned DataFrame (corrections applied, excluded rows dropped)
+    clean = validation.clean_df
+    if clean.empty:
+        return 0, 0, "empty", None, validation.anomalies
+
     inserted = 0
     skipped  = 0
 
-    for row_date, row in raw.iterrows():
+    for row_date, row in clean.iterrows():
         price_date = row_date.date() if hasattr(row_date, "date") else row_date
 
         close_val = row.get("Close")
@@ -137,7 +159,7 @@ def ingest_commodity(
         except IntegrityError:
             skipped += 1
 
-    return inserted, skipped, "ok", None
+    return inserted, skipped, "ok", None, validation.anomalies
 
 
 # ── Main entry point ───────────────────────────────────────────────────────────
@@ -164,23 +186,29 @@ def run_ingestion(backfill: bool = False):
         ticker_to_id = seed_commodities(db)
 
         log.info(f"\nIngesting price history for {len(ticker_to_id)} commodities...")
+        validation_log_rows: list = []
+
         for name, ticker in COMMODITY_TICKERS.items():
             commodity_id = ticker_to_id.get(ticker)
             if commodity_id is None:
                 continue
 
             t0 = time.monotonic()
-            ins, skip, status, error_msg = ingest_commodity(
-                db, commodity_id, ticker, name, backfill
+            ins, skip, status, error_msg, anomalies = ingest_commodity(
+                db, commodity_id, ticker, name, backfill, run_id
             )
             duration_ms = int((time.monotonic() - t0) * 1000)
 
             total_inserted += ins
             total_skipped  += skip
+
+            anomaly_summary = (
+                f"  anomalies={len(anomalies)}" if anomalies else ""
+            )
             log.info(
-                f"  {name:25s}  status={status:<5}  "
-                f"inserted={ins:4d}  skipped={skip:4d}"
-                + (f"  ERROR: {error_msg}" if error_msg else "")
+                f"  {name:25s}  status={status:<16}  "
+                f"inserted={ins:4d}  skipped={skip:4d}{anomaly_summary}"
+                + (f"  MSG: {error_msg}" if error_msg else "")
             )
 
             log_rows.append(IngestionLog(
@@ -195,13 +223,41 @@ def run_ingestion(backfill: bool = False):
                 duration_ms   = duration_ms,
             ))
 
+            # Persist each anomaly to the audit table
+            for a in anomalies:
+                validation_log_rows.append(PriceValidationLog(
+                    run_id          = run_id,
+                    ticker          = a.ticker,
+                    name            = a.name,
+                    date            = a.date,
+                    raw_close       = a.raw_close,
+                    corrected_close = a.corrected_close,
+                    reason_code     = a.reason_code,
+                    action          = a.action,
+                    details         = a.details[:500] if a.details else None,
+                ))
+
         # Write all log rows in the same session so they commit atomically
         # with the price data.
         db.add_all(log_rows)
+        if validation_log_rows:
+            db.add_all(validation_log_rows)
+            log.info(
+                "Persisted %d validation anomaly records to price_validation_log.",
+                len(validation_log_rows),
+            )
 
     log.info("=" * 60)
     log.info(f"Ingestion complete.  Inserted={total_inserted}  Skipped={total_skipped}")
     log.info("=" * 60)
+
+    # ── Alert report ───────────────────────────────────────────────────────────
+    try:
+        from pipeline.alert_reporter import generate_alert_report
+        report_path = generate_alert_report(run_id)
+        log.info("Alert report: %s", report_path)
+    except Exception as exc:
+        log.warning("Alert report failed (non-fatal): %s", exc)
 
     # ── Roll adjustment ────────────────────────────────────────────────────────
     # Always run after ingestion so adjusted_close stays current.
