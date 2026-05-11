@@ -16,6 +16,37 @@ import yfinance as yf
 import pandas as pd
 import streamlit as st
 
+
+def _scale_correct_series(ticker: str, series: pd.Series) -> pd.Series:
+    """
+    Apply per-row scale correction to a Close price series for tickers with
+    known unit-mismatch issues (e.g. ZR=F mixing cents/cwt and USD/cwt rows).
+
+    Only rows whose value exceeds the sanity band ceiling are rescaled;
+    rows already at the correct scale are left untouched. This handles the
+    common Yahoo Finance pattern where recent data switches to the correct
+    unit while historical rows remain at the old scale.
+    """
+    try:
+        from pipeline.price_validator import SANITY_BANDS, _detect_scale_factor
+        band = SANITY_BANDS.get(ticker)
+        if band is None:
+            return series
+        lo, hi = band
+        out_of_band = series[series > hi]
+        if out_of_band.empty:
+            return series
+        factor = _detect_scale_factor(ticker, out_of_band)
+        if factor is None:
+            factor = _detect_scale_factor(ticker, series)
+        if factor is not None:
+            corrected = series.copy()
+            corrected[corrected > hi] = corrected[corrected > hi] / factor
+            return corrected
+    except Exception:
+        pass
+    return series
+
 # ── Ticker registry ────────────────────────────────────────────────────────────
 # Format: display name → Yahoo Finance symbol
 COMMODITY_TICKERS = {
@@ -211,79 +242,104 @@ UNTRACEABLE_COMMODITIES = {
 @st.cache_data(ttl=300)
 def fetch_current_prices() -> pd.DataFrame:
     """
-    DB-first: returns current prices from PostgreSQL when data is fresh (≤3 days stale).
-    Falls back to yfinance when the DB is stale or unreachable.
-    Returns DataFrame: Name, Sector, Price, Change, Pct_Change, Unit, Ticker, Is_Proxy.
+    Hybrid price fetch: yfinance for fresh data, DB as silent fallback.
+
+    Strategy:
+      1. Pull the full DB snapshot (always — gives us a guaranteed floor).
+      2. Attempt yfinance for all tickers.
+      3. For each ticker yfinance returns data for, use that (fresher).
+      4. For any ticker yfinance misses (weekend, thin market, API hiccup),
+         silently substitute the last known price from the DB.
+      5. Only warn if a ticker has no data anywhere (DB + yfinance both empty).
+
+    This means weekends and temporary yfinance outages are invisible to the
+    user — they see the last traded price, which is the correct behaviour.
     """
+    # ── Step 1: always load the DB snapshot as a fallback floor ───────────────
+    db_by_name: dict[str, dict] = {}
     try:
-        from services.data_contract import fetch_current_prices_db, data_freshness
-        freshness = data_freshness()
-        if not freshness["recommend_live"]:
-            db_df = fetch_current_prices_db()
-            if not db_df.empty:
-                return db_df
+        from services.data_contract import fetch_current_prices_db
+        db_df = fetch_current_prices_db()
+        if not db_df.empty:
+            db_by_name = {row["Name"]: row for row in db_df.to_dict("records")}
     except Exception:
         pass
 
+    # ── Step 2: attempt yfinance ───────────────────────────────────────────────
     tickers = list(COMMODITY_TICKERS.values())
-
+    yf_rows: dict[str, dict] = {}
     try:
-        data  = yf.download(tickers, period="2d", interval="1d", progress=False, auto_adjust=True)
+        data  = yf.download(tickers, period="5d", interval="1d", progress=False, auto_adjust=True)
         close = data["Close"]
 
-        rows = []
-        failed = []
         for name, ticker in COMMODITY_TICKERS.items():
             try:
-                series = close[ticker].dropna()
+                series = _scale_correct_series(ticker, close[ticker].dropna())
                 if len(series) >= 2:
-                    price  = series.iloc[-1]
-                    prev   = series.iloc[-2]
+                    price  = float(series.iloc[-1])
+                    prev   = float(series.iloc[-2])
                     change = price - prev
                     pct    = (change / prev) * 100
                 elif len(series) == 1:
-                    price  = series.iloc[-1]
+                    price  = float(series.iloc[-1])
                     change = 0.0
                     pct    = 0.0
                 else:
-                    failed.append(name)
-                    continue
+                    continue  # yfinance returned nothing; DB fallback used below
 
-                rows.append({
+                yf_rows[name] = {
                     "Name":       name,
                     "Sector":     COMMODITY_SECTORS.get(name, "Other"),
-                    "Price":      round(float(price), 4),
-                    "Change":     round(float(change), 4),
-                    "Pct_Change": round(float(pct), 2),
+                    "Price":      round(price, 4),
+                    "Change":     round(change, 4),
+                    "Pct_Change": round(pct, 2),
                     "Unit":       COMMODITY_UNITS.get(name, "USD"),
                     "Ticker":     ticker,
                     "Is_Proxy":   COMMODITY_IS_PROXY.get(name, False),
-                })
+                }
             except Exception:
-                failed.append(name)
                 continue
+    except Exception:
+        pass  # yfinance completely unavailable; fall through to DB-only
 
-        if failed:
-            st.warning(
-                f"⚠️ Could not retrieve prices for {len(failed)} instrument(s): "
-                + ", ".join(failed[:5])
-                + ("…" if len(failed) > 5 else "")
-                + ". Data shown may be incomplete."
-            )
+    # ── Step 3: merge — yfinance wins when available, DB fills the gaps ────────
+    rows = []
+    truly_missing = []
+    for name in COMMODITY_TICKERS:
+        if name in yf_rows:
+            rows.append(yf_rows[name])
+        elif name in db_by_name:
+            rows.append(db_by_name[name])   # last known price, no warning
+        else:
+            truly_missing.append(name)
 
+    if truly_missing:
+        st.warning(
+            f"⚠️ No price data available for {len(truly_missing)} instrument(s): "
+            + ", ".join(truly_missing[:5])
+            + ("…" if len(truly_missing) > 5 else "")
+            + ". Neither live feed nor DB has a record for these."
+        )
+
+    if rows:
         return pd.DataFrame(rows)
 
-    except Exception as e:
-        st.warning(f"Could not fetch live prices: {e}. Showing sample data.")
-        return _mock_prices()
+    # ── Step 4: absolute last resort ──────────────────────────────────────────
+    st.warning("Could not fetch any price data. Showing sample data.")
+    return _mock_prices()
 
 
 @st.cache_data(ttl=300)
 def fetch_historical(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """
-    Fetch OHLCV history for a single ticker.
-    period:   1d 5d 1mo 3mo 6mo 1y 2y 5y 10y ytd max
-    interval: 1m 5m 15m 30m 1h 1d 1wk 1mo
+    Fetch OHLCV history for a single ticker from yfinance, with per-row
+    scale correction applied for tickers with known unit-mismatch issues
+    (e.g. ZR=F returning cents/cwt instead of USD/cwt on some dates).
+
+    Correction is surgical: only rows whose Close is outside the valid
+    price band for this ticker are rescaled. Rows already at the correct
+    scale are left untouched, so a mixed-scale feed (common after a YF
+    contract-stitch change) is handled correctly.
     """
     try:
         df = yf.download(ticker, period=period, interval=interval,
@@ -291,10 +347,34 @@ def fetch_historical(ticker: str, period: str = "1y", interval: str = "1d") -> p
         df.index = pd.to_datetime(df.index)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        return df
     except Exception as e:
         st.warning(f"Could not fetch history for {ticker}: {e}")
         return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    # ── Per-row scale correction for tickers with known unit issues ───────────
+    if "Close" in df.columns:
+        try:
+            from pipeline.price_validator import SANITY_BANDS, _detect_scale_factor
+            band = SANITY_BANDS.get(ticker)
+            if band is not None:
+                lo, hi = band
+                outside_mask = df["Close"] > hi
+                if outside_mask.any():
+                    factor = _detect_scale_factor(ticker, df["Close"][outside_mask].dropna())
+                    if factor is None:
+                        factor = _detect_scale_factor(ticker, df["Close"].dropna())
+                    if factor is not None:
+                        for col in ("Open", "High", "Low", "Close"):
+                            if col in df.columns:
+                                bad = df[col] > hi
+                                df.loc[bad, col] = df.loc[bad, col] / factor
+        except Exception:
+            pass
+
+    return df
 
 
 def _mock_prices() -> pd.DataFrame:
