@@ -142,12 +142,16 @@ render_topbar(df)
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
     st.divider()
-    st.page_link("app.py",              label="Home")
-    st.page_link("pages/1_Pricing.py",  label="Pricing")
-    st.page_link("pages/2_Charts.py",   label="Charts")
-    st.page_link("pages/3_News.py",     label="News")
-    st.page_link("pages/4_Models.py",   label="Models")
-    st.page_link("pages/5_Database.py", label="Database")
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/5_Database.py",              label="Database")
+    st.divider()
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
     st.divider()
     st.caption(f"Last refresh · {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
     if st.button("↻  Refresh", use_container_width=True):
@@ -172,6 +176,46 @@ st.markdown(
     f'</p>',
     unsafe_allow_html=True,
 )
+
+# ── How it works ─────────────────────────────────────────────────────────────
+with st.expander("How it works — the two analytical layers", expanded=False):
+    col_qs, col_mc = st.columns(2, gap="medium")
+    with col_qs:
+        st.markdown(
+            f"""
+<div style="background:{DEPTH};border:0.5px solid rgba(123,156,255,0.2);
+border-left:3px solid #7B9CFF;border-radius:8px;padding:16px 18px;height:100%">
+  <div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.12em;
+              text-transform:uppercase;margin-bottom:8px">CAUSAL QS ENGINE · Internal Response</div>
+  <div style="font-size:13px;color:rgba(238,242,255,0.80);line-height:1.7;margin-bottom:12px">
+    When a market event fires — a vol spike, a momentum break, a regime shift — the QS Engine
+    traces how that trigger propagates: through statistical models, into an HMM regime detector,
+    and out as a directional position recommendation. It is the machine's response to a stimulus.
+  </div>
+  <div style="font-size:11px;color:rgba(238,242,255,0.4)">
+    Pages: <b>Models</b> (full model stack) · <b>Causal QS Engine</b> (trigger trace)
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+    with col_mc:
+        st.markdown(
+            f"""
+<div style="background:{DEPTH};border:0.5px solid rgba(249,158,11,0.2);
+border-left:3px solid {AMBER};border-radius:8px;padding:16px 18px;height:100%">
+  <div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.12em;
+              text-transform:uppercase;margin-bottom:8px">MACRO-MARKET CASCADE · External Input</div>
+  <div style="font-size:13px;color:rgba(238,242,255,0.80);line-height:1.7;margin-bottom:12px">
+    Before any trigger fires, macro conditions set the stage. The Cascade shows how DXY (dollar
+    strength), VIX (risk sentiment), and TLT (rate expectations) flow through sector forecasts
+    down to individual commodity outlooks. It is the environment that the QS Engine operates within.
+  </div>
+  <div style="font-size:11px;color:rgba(238,242,255,0.4)">
+    Pages: <b>Macro-Market Cascade</b> (sector flow) · <b>Portfolio</b> (allocation output)
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
 
 # ── Sub-tabs ──────────────────────────────────────────────────────────────────
 tab_live, tab_watch, tab_alerts = st.tabs(["LIVE", "WATCHLIST", "ALERTS"])

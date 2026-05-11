@@ -50,6 +50,34 @@ def _hex_rgba(h: str, a: float) -> str:
     return f"rgba({r},{g},{b},{a})"
 
 
+def _signal_strength(final_pct: float, uncertainty_band: float):
+    """
+    Returns (label, bar_color) based on how clearly final_pct clears the
+    uncertainty band.  A general audience sees 'Inconclusive' instead of
+    a misleading Bullish/Bearish when the bar is buried in noise.
+
+    Thresholds (relative to the 90% CI half-width):
+      |final| < 0.5× band  →  Inconclusive  (signal is noise)
+      0.5–1.0×             →  Weak
+      1.0–2.0×             →  Moderate
+      > 2.0×               →  Strong
+    """
+    if uncertainty_band <= 0:
+        uncertainty_band = 1.0
+    ratio = abs(final_pct) / uncertainty_band
+    direction = "▲" if final_pct >= 0 else "▼"
+    if ratio < 0.5:
+        return "— Inconclusive", _hex_rgba(ICE, 0.18)
+    if ratio < 1.0:
+        color = _hex_rgba(GREEN, 0.55) if final_pct >= 0 else _hex_rgba(RED, 0.55)
+        return f"{direction} Weak", color
+    if ratio < 2.0:
+        color = GREEN if final_pct >= 0 else RED
+        return f"{direction} Moderate", color
+    color = GREEN if final_pct >= 0 else RED
+    return f"{direction} Strong", color
+
+
 def _color_metric_html(label: str, value: str, sub: str, color: str) -> str:
     return f"""
 <div style="
@@ -350,8 +378,8 @@ def build_cascade_sankey(macro_state: Dict, forecasts: pd.DataFrame) -> go.Figur
         **PLOTLY_LAYOUT,
         height=460,
         margin=dict(t=20, l=10, r=10, b=10),
-        font=dict(color=ICE, size=12),
     )
+    fig.update_layout(font_size=12)
     return fig
 
 
@@ -388,11 +416,15 @@ def build_sector_bar(forecasts: pd.DataFrame, sector: str) -> go.Figure:
         opacity=0.75,
         hovertemplate="%{x}<br>Macro adj: %{y:+.2f}%<extra></extra>",
     ))
+    _final_colors = [
+        _signal_strength(fp, ub)[1]
+        for fp, ub in zip(df["final_pct"], df["uncertainty_band"])
+    ]
     fig.add_trace(go.Bar(
         name="Final",
         x=short_names,
         y=df["final_pct"],
-        marker_color=[GREEN if v > 0 else RED for v in df["final_pct"]],
+        marker_color=_final_colors,
         error_y=dict(
             type="data", array=df["uncertainty_band"],
             visible=True, color=_hex_rgba(AMBER, 0.5), thickness=1.5, width=5,
@@ -406,10 +438,10 @@ def build_sector_bar(forecasts: pd.DataFrame, sector: str) -> go.Figure:
         barmode="group",
         margin=dict(t=4, l=10, r=10, b=30),
         showlegend=True,
-        legend=dict(orientation="h", y=1.18, x=0, font=dict(size=9)),
         yaxis_title="1-wk Forecast (%)",
         yaxis_tickformat="+.2f",
     )
+    fig.update_layout(legend=dict(orientation="h", y=1.18, x=0, font=dict(size=9)))
     return fig
 
 
@@ -427,13 +459,6 @@ def build_comparison_table(forecasts: pd.DataFrame) -> pd.DataFrame:
         sign = "+" if v >= 0 else ""
         return f"{sign}{v:.2f}%"
 
-    def _dir(v):
-        if v > 0.08:
-            return "▲ Bullish"
-        if v < -0.08:
-            return "▼ Bearish"
-        return "● Neutral"
-
     tbl = pd.DataFrame({
         "Sector":               df["sector"],
         "Commodity":            df["Short Name"],
@@ -441,7 +466,9 @@ def build_comparison_table(forecasts: pd.DataFrame) -> pd.DataFrame:
         "Macro Adjustment":     df["macro_adj_pct"].map(_fmt),
         "Final Forecast":       df["final_pct"].map(_fmt),
         "90% Band (±)":        df["uncertainty_band"].map(lambda v: f"{v:.2f}%"),
-        "Direction":            df["final_pct"].map(_dir),
+        "Signal Strength":      df.apply(
+            lambda r: _signal_strength(r["final_pct"], r["uncertainty_band"])[0], axis=1
+        ),
     })
     return tbl.reset_index(drop=True)
 
@@ -679,26 +706,43 @@ def accuracy_scorecard(hist_df: pd.DataFrame) -> pd.DataFrame:
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
     st.divider()
-    st.page_link("app.py",                       label="Home")
-    st.page_link("pages/1_Pricing.py",            label="Pricing")
-    st.page_link("pages/2_Charts.py",             label="Charts")
-    st.page_link("pages/3_News.py",               label="News")
-    st.page_link("pages/4_Models.py",             label="Models")
-    st.page_link("pages/5_Database.py",           label="Database")
-    st.page_link("pages/6_Causal.py",             label="Causal Chain")
-    st.page_link("pages/6_Causal_Chains.py",      label="Causal Chains ← here")
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/5_Database.py",              label="Database")
     st.divider()
-    st.caption("Data as of latest DB ingest. Macro signals require network.")
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
+    st.divider()
+    st.caption("Macro signals require network · price data from latest DB ingest")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.title("🌊 Causal Chain Visualization")
-st.caption(
-    "Real-time view of how macro signals — Real Yields, USD Strength, Risk Sentiment — "
-    "cascade through sector forecasts to individual commodity outlooks."
+st.title("Macro-Market Cascade")
+st.markdown(
+    """
+<div style="background:#0C1228;border:0.5px solid rgba(249,158,11,0.25);
+border-left:3px solid #F59E0B;border-radius:8px;padding:14px 18px;margin-bottom:12px">
+  <div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.12em;
+              text-transform:uppercase;margin-bottom:6px">EXTERNAL INPUT LAYER</div>
+  <div style="font-size:13px;color:rgba(238,242,255,0.80);line-height:1.65">
+    The Macro-Market Cascade is the <b style="color:#EEF2FF">external input layer</b> — macro signals
+    (DXY, VIX, TLT) shape the environment that individual commodity forecasts operate within.
+    This page visualises how those signals flow through sectors into specific commodity outlooks,
+    and how confident the model is in each channel.
+  </div>
+  <div style="font-size:11px;color:rgba(238,242,255,0.35);margin-top:8px">
+    Pair with <b>Causal QS Engine</b> to trace how a specific trigger event responds to these conditions. →
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
 )
 st.divider()
 
@@ -765,19 +809,35 @@ else:
     tlt_color, tlt_label = BLUE,  "Rates Stable"
 
 m1, m2, m3, m4 = st.columns(4)
+_sub_dim = f"color:{_hex_rgba(ICE, 0.32)};font-size:10px"
 with m1:
     st.markdown(
-        _color_metric_html("DXY Z-Score (63d)", f"{dxy_z:+.2f}", dxy_label, dxy_color),
+        _color_metric_html(
+            "DXY Z-Score (63d)", f"{dxy_z:+.2f}",
+            f"{dxy_label}<br><span style='{_sub_dim}'>"
+            "Dollar strength suppresses USD-priced commodity returns</span>",
+            dxy_color,
+        ),
         unsafe_allow_html=True,
     )
 with m2:
     st.markdown(
-        _color_metric_html("VIX Level", f"{vix:.1f}", vix_label, vix_color),
+        _color_metric_html(
+            "VIX Level", f"{vix:.1f}",
+            f"{vix_label}<br><span style='{_sub_dim}'>"
+            "Elevated volatility compresses risk appetite and weakens industrial demand</span>",
+            vix_color,
+        ),
         unsafe_allow_html=True,
     )
 with m3:
     st.markdown(
-        _color_metric_html("TLT 21d Momentum", f"{tlt21*100:+.2f}%", tlt_label, tlt_color),
+        _color_metric_html(
+            "TLT 21d Momentum", f"{tlt21*100:+.2f}%",
+            f"{tlt_label}<br><span style='{_sub_dim}'>"
+            "Rising rates raise inventory costs and reinforce USD headwinds</span>",
+            tlt_color,
+        ),
         unsafe_allow_html=True,
     )
 with m4:
@@ -791,7 +851,12 @@ with m4:
     comp_label = ("Bearish Macro Environment" if composite > 0.25
                   else ("Bullish Macro Environment" if composite < -0.25 else "Mixed Signals"))
     st.markdown(
-        _color_metric_html("Macro Composite", f"{composite:+.2f}", comp_label, comp_color),
+        _color_metric_html(
+            "Macro Composite", f"{composite:+.2f}",
+            f"{comp_label}<br><span style='{_sub_dim}'>"
+            "Weighted: real yields 30% · USD 40% · risk sentiment 30%</span>",
+            comp_color,
+        ),
         unsafe_allow_html=True,
     )
 
@@ -964,7 +1029,27 @@ else:
 
 st.divider()
 st.caption(
-    "Causal Chain Visualization · Accendio Commodities Intelligence · "
+    "Macro-Market Cascade · Accendio Commodities Intelligence · "
     "Forecasts are model-generated and for informational purposes only. "
     "Macro overlay based on DXY, VIX, and TLT signals."
 )
+
+st.divider()
+st.markdown(
+    """
+<div style="background:#09102A;border:0.5px solid rgba(123,156,255,0.15);
+border-radius:8px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center">
+  <div>
+    <div style="font-size:10px;color:rgba(238,242,255,0.3);letter-spacing:.12em;text-transform:uppercase;margin-bottom:4px">
+      NEXT STEP
+    </div>
+    <div style="font-size:13px;color:rgba(238,242,255,0.75)">
+      Trace how a specific trigger event responds to these macro conditions →
+      <b style="color:#EEF2FF">Causal QS Engine</b>
+    </div>
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+st.page_link("pages/6_Causal_QS_Engine.py", label="→ Open Causal QS Engine")
