@@ -37,7 +37,7 @@ SECTOR_COMMODITIES: Dict[str, List[str]] = {
     "Livestock": ["Feeder Cattle", "Lean Hogs"],
 }
 
-# Per-sector macro effect coefficients — same sign convention as 6_Causal_Chains.py.
+# Per-sector macro effect coefficients — same sign convention as 7_Macro_Market_Cascade.py.
 # Effect in percentage-points per unit of normalised signal.
 #   real_yields > 0 → rates rising
 #   usd > 0         → dollar strengthening

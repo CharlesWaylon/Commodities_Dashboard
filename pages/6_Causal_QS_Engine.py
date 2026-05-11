@@ -208,8 +208,8 @@ def build_sankey(nodes: list, height: int = 380) -> go.Figure:
         height=height,
         margin=dict(t=30, l=10, r=10, b=10),
         title_text="",
-        font=dict(color="#E0E0E0", size=13),
     )
+    fig.update_layout(font_size=13)
     return fig
 
 
@@ -217,21 +217,39 @@ def build_sankey(nodes: list, height: int = 380) -> go.Figure:
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
     st.divider()
-    st.page_link("app.py",              label="Home")
-    st.page_link("pages/1_Pricing.py",  label="Pricing")
-    st.page_link("pages/2_Charts.py",   label="Charts")
-    st.page_link("pages/3_News.py",     label="News")
-    st.page_link("pages/4_Models.py",   label="Models")
-    st.page_link("pages/5_Database.py", label="Database")
-    st.page_link("pages/6_Causal.py",   label="Causal Chain")
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/5_Database.py",              label="Database")
+    st.divider()
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
     st.divider()
 
 
 # ── Page header ────────────────────────────────────────────────────────────────
-st.title("🔗 Causal Chain Explorer")
-st.caption(
-    "Trace how a macro trigger ripples through the model ecosystem: "
-    "vol shift → regime → ensemble → portfolio recommendation."
+st.title("Causal QS Engine")
+st.markdown(
+    """
+<div style="background:#0C1228;border:0.5px solid rgba(123,156,255,0.2);
+border-left:3px solid #7B9CFF;border-radius:8px;padding:14px 18px;margin-bottom:12px">
+  <div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.12em;
+              text-transform:uppercase;margin-bottom:6px">INTERNAL RESPONSE LAYER</div>
+  <div style="font-size:13px;color:rgba(238,242,255,0.80);line-height:1.65">
+    The QS Engine is the <b style="color:#EEF2FF">internal response layer</b> — a live trigger fires,
+    propagates through statistical, regime, and ensemble models, and produces a position recommendation.
+    Use this page to trace the mechanics: pick a trigger family, set a commodity, and follow the signal
+    from raw event through to a directional output.
+  </div>
+  <div style="font-size:11px;color:rgba(238,242,255,0.35);margin-top:8px">
+    Pair with <b>Macro-Market Cascade</b> to see what drove the macro conditions that seeded the trigger. →
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
 )
 st.divider()
 
@@ -533,3 +551,23 @@ if st.session_state.get("load_recent_requested"):
             "Use the controls above to trace any of these — "
             "enter the family name and date manually."
         )
+
+st.divider()
+st.markdown(
+    """
+<div style="background:#09102A;border:0.5px solid rgba(123,156,255,0.15);
+border-radius:8px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center">
+  <div>
+    <div style="font-size:10px;color:rgba(238,242,255,0.3);letter-spacing:.12em;text-transform:uppercase;margin-bottom:4px">
+      NEXT STEP
+    </div>
+    <div style="font-size:13px;color:rgba(238,242,255,0.75)">
+      See what macro conditions set the stage for these triggers →
+      <b style="color:#EEF2FF">Macro-Market Cascade</b>
+    </div>
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+st.page_link("pages/7_Macro_Market_Cascade.py", label="→ Open Macro-Market Cascade")

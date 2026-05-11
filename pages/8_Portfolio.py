@@ -39,14 +39,16 @@ TEAL    = "#26C6DA"
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
     st.divider()
-    st.page_link("app.py",               label="Home")
-    st.page_link("pages/1_Pricing.py",   label="Pricing")
-    st.page_link("pages/2_Charts.py",    label="Charts")
-    st.page_link("pages/3_News.py",      label="News")
-    st.page_link("pages/4_Models.py",    label="Models")
-    st.page_link("pages/5_Database.py",  label="Database")
-    st.page_link("pages/6_Causal.py",    label="Causal Chain")
-    st.page_link("pages/7_Portfolio.py", label="Portfolio")
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/5_Database.py",              label="Database")
+    st.divider()
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
     st.divider()
 
     st.subheader("QAOA Parameters")
@@ -746,13 +748,11 @@ if "bt_result" in st.session_state:
                 tickfont=dict(color="#C0CDE0"),
                 gridcolor=GRID,
             ),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom", y=1.01,
-                xanchor="left", x=0,
-                font=dict(color="#E0E0E0"),
-            ),
         )
+        _fig_bt.update_layout(legend=dict(
+            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+            font=dict(color="#E0E0E0"),
+        ))
         st.plotly_chart(_fig_bt, use_container_width=True, config={"displayModeBar": False})
 
         # ── Lift vs equal-weight ──────────────────────────────────────────────
@@ -797,8 +797,8 @@ if "bt_result" in st.session_state:
                 margin=dict(t=20, l=10, r=10, b=40),
                 xaxis=dict(title="Period log-return (%)", tickfont=dict(color="#C0CDE0")),
                 yaxis=dict(title="Count", tickfont=dict(color="#C0CDE0"), gridcolor=GRID),
-                legend=dict(font=dict(color="#E0E0E0")),
             )
+            _fig_dist.update_layout(legend=dict(font=dict(color="#E0E0E0")))
             st.plotly_chart(_fig_dist, use_container_width=True,
                             config={"displayModeBar": False})
 

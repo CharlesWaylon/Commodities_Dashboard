@@ -507,7 +507,7 @@ if __name__ == "__main__":
         print(f"ALL {PASS} ASSERTIONS PASSED")
         print(
             "Phase 4 Part 1 complete: CausalChain tracer ready.\n"
-            "Part 2: Sankey diagram + narrative panel (pages/6_Causal.py)."
+            "Part 2: Sankey diagram + narrative panel (pages/6_Causal_QS_Engine.py)."
         )
     else:
         print(f"{PASS} passed  |  {FAIL} FAILED")

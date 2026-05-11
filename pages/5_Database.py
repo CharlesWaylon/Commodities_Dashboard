@@ -21,13 +21,16 @@ render_topbar()
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
     st.divider()
-    st.page_link("app.py",              label="Home")
-    st.page_link("pages/1_Pricing.py",  label="Pricing")
-    st.page_link("pages/2_Charts.py",   label="Charts")
-    st.page_link("pages/3_News.py",     label="News")
-    st.page_link("pages/4_Models.py",   label="Models")
-    st.page_link("pages/5_Database.py", label="Database")
-    st.page_link("pages/6_Causal.py",   label="Causal Chain")
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/5_Database.py",              label="Database")
+    st.divider()
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
     st.divider()
 
 st.title("Database Inspector")
@@ -138,7 +141,7 @@ if info["price_rows"] > 0:
     coverage["To"]   = coverage["To"].dt.strftime("%Y-%m-%d")
     coverage["Latest_Close"] = coverage["Latest_Close"].apply(lambda x: f"{x:,.4f}")
 
-    st.dataframe(coverage, width='stretch', hide_index=True)
+    st.dataframe(coverage, use_container_width=True, hide_index=True)
     st.divider()
 
     # ── Raw Data Viewer ────────────────────────────────────────────────────────
@@ -154,7 +157,7 @@ if info["price_rows"] > 0:
         display = sub.head(30)[["Date", "Close"]].copy()
         display["Date"]  = display["Date"].dt.strftime("%Y-%m-%d")
         display["Close"] = display["Close"].apply(lambda x: f"{x:,.4f}")
-        st.dataframe(display, width='stretch', hide_index=True)
+        st.dataframe(display, use_container_width=True, hide_index=True)
 
     with col_chart:
         st.caption(f"All stored close prices for **{selected}**")
@@ -175,7 +178,7 @@ if info["price_rows"] > 0:
             xaxis=dict(gridcolor="#2C3347"),
             yaxis=dict(gridcolor="#2C3347"),
         )
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
 else:
     st.info("No data in the database yet. Use the ingestion buttons above to populate it.")

@@ -1,20 +1,37 @@
-# 📈 Commodities Dashboard
+# Accendio — Commodities Intelligence Dashboard
 
-An interactive, real-time market dashboard for the **Future of Commodities Club**.  
+An interactive, real-time market intelligence platform for the **Future of Commodities Club**.  
 Built with Python, Streamlit, and Plotly — live data, no paid APIs required.
+
+---
+
+## The Two Analytical Layers
+
+Accendio is organised around two distinct analytical layers. Understanding the distinction makes every page more legible.
+
+### External Input Layer — Macro-Market Cascade
+Macro signals set the environment before any model fires. **DXY** (dollar strength), **VIX** (risk sentiment), and **TLT** (rate expectations) each carry predictable transmission effects across commodity sectors. The Macro-Market Cascade visualises how these three channels flow through sectors (Energy, Metals, Grains, Livestock) into individual commodity forecasts, and quantifies confidence in each transmission link.
+
+### Internal Response Layer — Causal QS Engine
+Once the macro environment is established, the QS Engine traces how a specific market event — a vol spike, a momentum break, a regime shift — propagates through the model stack: trigger → volatility estimate (GARCH) → regime detector (HMM) → MetaPredictor ensemble → directional position recommendation.
+
+**Use both together:** the Cascade tells you *why* conditions are what they are; the QS Engine tells you *what the model recommends doing about it*.
 
 ---
 
 ## What It Does
 
-| Page | Description |
-|------|-------------|
-| 🏠 **Overview** | Market snapshot — price cards grouped by sector, top movers, quick table |
-| 💰 **Pricing** | Full sortable/filterable table + performance treemap heatmap |
-| 📊 **Charts** | Interactive historical charts (line, candlestick, area) with SMAs & volume |
-| 📰 **News** | Live commodity news aggregated from free RSS feeds (Reuters, CNBC, FT, etc.) |
-| 🤖 **Models** | 5-tab predictive dashboard: statistical, ML, deep learning, quantum, and market signals |
-| 🗄️ **Database** | Inspect stored data, trigger manual ingestion, view coverage per commodity |
+| # | Page | Layer | Description |
+|---|------|-------|-------------|
+| Home | **Command Centre** | Overview | Live heatmap, sector performance timeline, cross-market correlations, intelligence brief |
+| 1 | **Pricing** | Data | Full sortable price table + performance treemap across 41 instruments |
+| 2 | **Charts** | Data | Interactive OHLCV charts with SMAs, volume, and multi-commodity comparison |
+| 3 | **News** | Data | Live commodity news aggregated from free RSS feeds (Reuters, CNBC, FT, etc.) |
+| 4 | **Models** | Engine | 5-tab predictive dashboard: statistical, ML, deep learning, quantum, and market signals |
+| 5 | **Database** | Data | Inspect stored data, trigger manual ingestion, view coverage per commodity |
+| 6 | **Causal QS Engine** | Internal response | Trace a trigger event through the full model stack to a position recommendation |
+| 7 | **Macro-Market Cascade** | External input | Visualise how DXY / VIX / TLT cascade through sectors to commodity forecasts |
+| 8 | **Portfolio** | Output | QAOA quantum-inspired portfolio allocation, correlation heatmap, consistency flags |
 
 ---
 
@@ -166,12 +183,15 @@ Commodities_Dashboard/
 │
 ├── app.py                    ← Main entry point / Overview page
 │
-├── pages/                    ← Streamlit auto-discovers these as sidebar pages
-│   ├── 1_Pricing.py          ← Full price table + treemap
-│   ├── 2_Charts.py           ← Historical charts + comparison
-│   ├── 3_News.py             ← RSS news aggregator
-│   ├── 4_Models.py           ← 5-tab predictive model dashboard (see Models section below)
-│   └── 5_Database.py         ← DB inspector + manual ingestion trigger
+├── pages/                         ← Streamlit auto-discovers these as sidebar pages
+│   ├── 1_Pricing.py               ← Full price table + treemap
+│   ├── 2_Charts.py                ← Historical charts + comparison
+│   ├── 3_News.py                  ← RSS news aggregator
+│   ├── 4_Models.py                ← 5-tab predictive model dashboard (see Models section below)
+│   ├── 5_Database.py              ← DB inspector + manual ingestion trigger
+│   ├── 6_Causal_QS_Engine.py      ← Internal response layer: trigger → model stack → recommendation
+│   ├── 7_Macro_Market_Cascade.py  ← External input layer: DXY/VIX/TLT → sectors → commodities
+│   └── 8_Portfolio.py             ← QAOA portfolio optimiser + correlation heatmap
 │
 ├── models/                   ← Predictive model library
 │   ├── features.py           ← Core feature matrix builder (48 features)

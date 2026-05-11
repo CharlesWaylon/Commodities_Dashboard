@@ -62,13 +62,16 @@ REGIME_COLORS = {
 with st.sidebar:
     st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
     st.divider()
-    st.page_link("app.py",              label="Home")
-    st.page_link("pages/1_Pricing.py",  label="Pricing")
-    st.page_link("pages/2_Charts.py",   label="Charts")
-    st.page_link("pages/3_News.py",     label="News")
-    st.page_link("pages/4_Models.py",   label="Models")
-    st.page_link("pages/5_Database.py", label="Database")
-    st.page_link("pages/6_Causal.py",   label="Causal Chain")
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/5_Database.py",              label="Database")
+    st.divider()
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
     st.divider()
 
 st.title("Analytics & Predictive Models")
@@ -320,7 +323,7 @@ else:
 # ── Inline causal chain panel (Phase 4 Part 3) ────────────────────────────────
 # Shown when the user clicks "🔗 Trace Chain" on any trigger card above.
 # Compact view: 5-node pipeline badges + narrative + recommendation.
-# The full Sankey lives on pages/6_Causal.py.
+# The full Sankey lives on pages/6_Causal_QS_Engine.py.
 _inline_ev = st.session_state.get("_inline_chain_ev")
 if _inline_ev is not None:
     from models.causal_chain import CausalChain as _CC
@@ -426,10 +429,9 @@ if _inline_ev is not None:
     _ic_link_col, _ic_clear_col, _ = st.columns([2, 1, 3])
     with _ic_link_col:
         st.page_link(
-            "pages/6_Causal.py",
-            label="🔗 Open full Causal Chain Explorer →",
-            help="Opens the Sankey diagram and layer-by-layer breakdown. "
-                 "Controls are pre-filled for this trigger.",
+            "pages/6_Causal_QS_Engine.py",
+            label="🔗 Open Causal QS Engine →",
+            help="Opens the full trigger trace with Sankey diagram and layer-by-layer breakdown.",
         )
     with _ic_clear_col:
         if st.button("✕ Clear", key="_ic_clear_btn"):
@@ -601,7 +603,7 @@ with tab1:
             ))
             dark_layout(fig_arima, height=400,
                         title=f"{stat_commodity} — ARIMA{arima_result['order']} {stat_horizon}d Forecast")
-            st.plotly_chart(fig_arima, width='stretch')
+            st.plotly_chart(fig_arima, use_container_width=True)
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Model Order", str(arima_result["order"]))
@@ -648,7 +650,7 @@ with tab1:
                 ))
             dark_layout(fig_garch, height=380,
                         title=f"{stat_commodity} — {garch.model} Conditional Volatility (Annualised %)")
-            st.plotly_chart(fig_garch, width='stretch')
+            st.plotly_chart(fig_garch, use_container_width=True)
 
             g1, g2, g3, g4 = st.columns(4)
             g1.metric("Model", garch.model)
@@ -658,7 +660,7 @@ with tab1:
                       help="GJR-GARCH asymmetry: negative γ = bad news raises vol more than good news")
 
             with st.expander("Model Parameters"):
-                st.dataframe(params.style.format("{:.6f}"), width='stretch')
+                st.dataframe(params.style.format("{:.6f}"), use_container_width=True)
         except Exception as e:
             st.warning(f"GARCH failed: {e}")
 
@@ -754,7 +756,7 @@ with tab1:
                 fig_kf.add_hline(y=-2.0, line_dash="dot", line_color=GREEN,  opacity=0.6, row=2, col=1)
                 fig_kf.add_hline(y=0.0,  line_dash="dash", line_color="#888", opacity=0.4, row=2, col=1)
                 dark_layout(fig_kf, height=480, title=f"Kalman Filter — {pair_label}")
-                st.plotly_chart(fig_kf, width='stretch')
+                st.plotly_chart(fig_kf, use_container_width=True)
 
                 k1, k2, k3, k4 = st.columns(4)
                 z_now  = float(zscore.dropna().iloc[-1])
@@ -830,7 +832,7 @@ with tab1:
                 coloraxis_colorbar=dict(title="p-value"),
             )
             fig_gc.update_xaxes(tickangle=-40)
-            st.plotly_chart(fig_gc, width='stretch')
+            st.plotly_chart(fig_gc, use_container_width=True)
 
             v1, v2, v3 = st.columns(3)
             v1.metric("VAR Lag Order", var._lag_order)
@@ -1109,7 +1111,7 @@ with tab1:
                 )
                 fig_irf.update_xaxes(title_text="Days", gridcolor=GRID)
                 fig_irf.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
-                st.plotly_chart(fig_irf, width='stretch')
+                st.plotly_chart(fig_irf, use_container_width=True)
             except Exception as e:
                 st.caption(f"IRF unavailable: {e}")
 
@@ -1143,7 +1145,7 @@ with tab1:
                     xaxis=dict(title="Commodity", gridcolor=GRID, tickangle=-40),
                     yaxis=dict(title="% of forecast error variance", gridcolor=GRID),
                 )
-                st.plotly_chart(fig_fevd, width='stretch')
+                st.plotly_chart(fig_fevd, use_container_width=True)
             except Exception as e:
                 st.caption(f"FEVD unavailable: {e}")
 
@@ -1205,7 +1207,7 @@ with tab2:
                 ))
             dark_layout(fig_hmm, height=380,
                         title=f"{hmm_commodity} Price — Colour-coded by HMM Regime")
-            st.plotly_chart(fig_hmm, width='stretch')
+            st.plotly_chart(fig_hmm, use_container_width=True)
 
             # State probabilities heatmap (last 126 days)
             prob_tail = probs.tail(126)
@@ -1221,7 +1223,7 @@ with tab2:
                 font_color="#FAFAFA", height=250,
                 margin=dict(t=40, l=80, r=20, b=40),
             )
-            st.plotly_chart(fig_prob, width='stretch')
+            st.plotly_chart(fig_prob, use_container_width=True)
 
             cols = st.columns(len(counts))
             for col_widget, (regime, cnt) in zip(cols, counts.items()):
@@ -1265,7 +1267,7 @@ with tab2:
                 ))
                 dark_layout(fig_shap, height=380, title="Global SHAP Feature Importance (Top 15)")
                 fig_shap.update_layout(yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_shap, width='stretch')
+                st.plotly_chart(fig_shap, use_container_width=True)
 
             with x2:
                 feats  = waterfall["features"][:12]
@@ -1280,7 +1282,7 @@ with tab2:
                             title=f"SHAP Waterfall — {waterfall['date']}")
                 fig_wf.update_layout(yaxis=dict(autorange="reversed"))
                 fig_wf.add_vline(x=0, line_color="#888", line_width=1)
-                st.plotly_chart(fig_wf, width='stretch')
+                st.plotly_chart(fig_wf, use_container_width=True)
 
             # ── Signal summary cards ───────────────────────────────────────
             st.markdown("##### Model Signal")
@@ -1365,7 +1367,7 @@ with tab2:
             ))
             dark_layout(fig_rf, height=400, title=f"RF Gini Importance — {ml_commodity} (Top 20)")
             fig_rf.update_layout(yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_rf, width='stretch')
+            st.plotly_chart(fig_rf, use_container_width=True)
 
             r1, r2, r3 = st.columns(3)
             r1.metric("Spearman IC", f"{rf_ic:.4f}",
@@ -1438,7 +1440,7 @@ with tab2:
                                 title=f"Surviving Factors — {en_commodity} (Top 20 of {sparsity['n_features_nonzero']})")
                     fig_en.update_layout(yaxis=dict(autorange="reversed"))
                     fig_en.add_vline(x=0, line_color="#888", line_width=1)
-                    st.plotly_chart(fig_en, width='stretch')
+                    st.plotly_chart(fig_en, use_container_width=True)
                 else:
                     st.warning("All features zeroed out — price-derived features carry no signal for this instrument. "
                                "Consider adding macro/sentiment signals via features/assembler.py.")
@@ -1468,7 +1470,7 @@ with tab2:
                     if coef_table.empty:
                         st.write("No non-zero coefficients.")
                     else:
-                        st.dataframe(coef_table, width='stretch', hide_index=True)
+                        st.dataframe(coef_table, use_container_width=True, hide_index=True)
 
         except Exception as e:
             st.warning(f"Elastic Net failed: {e}")
@@ -1542,7 +1544,7 @@ with tab2:
                                  annotation_text="0.08 strong",
                                  annotation_position="top right",
                                  annotation_font_color=GREEN)
-                st.plotly_chart(fig_lb, width='stretch')
+                st.plotly_chart(fig_lb, use_container_width=True)
 
                 # Summary metrics row
                 _strong_n = sum(1 for r in _lb_rows if r["Grade"] == "STRONG")
@@ -1565,7 +1567,7 @@ with tab2:
                     _display_df = _lb_df.copy()
                     _display_df["IC (Spearman)"] = _display_df["IC (Spearman)"].map("{:+.4f}".format)
                     _display_df["Sparsity %"]    = _display_df["Sparsity %"].map("{:.0f}%".format)
-                    st.dataframe(_display_df, width='stretch', hide_index=True)
+                    st.dataframe(_display_df, use_container_width=True, hide_index=True)
 
             except Exception as _e:
                 st.warning(f"Full leaderboard failed: {_e}")
@@ -1737,7 +1739,7 @@ with tab3:
         fig_macro.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.5, row=3, col=1)
 
         dark_layout(fig_macro, height=520, title="Macro Regime Dashboard")
-        st.plotly_chart(fig_macro, width='stretch')
+        st.plotly_chart(fig_macro, use_container_width=True)
 
         vix_now = float(macro_df["vix"].dropna().iloc[-1])
         dxy_z   = float(macro_df["dxy_zscore63"].dropna().iloc[-1])
@@ -1785,7 +1787,7 @@ with tab3:
         fig_mei.add_hline(y=0.5,  line_dash="dot", line_color=RED,  opacity=0.7)
         fig_mei.add_hline(y=-0.5, line_dash="dot", line_color=BLUE, opacity=0.7)
         dark_layout(fig_mei, height=320, title="MEI v2 — El Niño (red) / La Niña (blue)")
-        st.plotly_chart(fig_mei, width='stretch')
+        st.plotly_chart(fig_mei, use_container_width=True)
 
         enso_now = float(mei_df["mei"].dropna().iloc[-1])
         phase    = "🔴 El Niño" if enso_now >= 0.5 else ("🔵 La Niña" if enso_now <= -0.5 else "⚪ Neutral")
@@ -1839,7 +1841,7 @@ with tab3:
                 ), row=i, col=1)
                 fig_et.add_hline(y=0, line_dash="dash", line_color="#555", opacity=0.6, row=i, col=1)
             dark_layout(fig_et, height=100 + 170 * len(et_cols), title="Energy Transition Signals")
-            st.plotly_chart(fig_et, width='stretch')
+            st.plotly_chart(fig_et, use_container_width=True)
 
             et_cols_metrics = st.columns(len(et_cols))
             for col_w, col_name in zip(et_cols_metrics, et_cols):
@@ -2048,7 +2050,7 @@ with tab4:
                 ))
                 dark_layout(fig_pr, height=420,
                             title=f"{dl_commodity} — Prophet 90-Day Forecast")
-                st.plotly_chart(fig_pr, width='stretch')
+                st.plotly_chart(fig_pr, use_container_width=True)
 
                 p1, p2, p3 = st.columns(3)
                 p1.metric("Yearly seasonal strength", f"{ss.get('yearly', 0):.3f}")
@@ -2078,7 +2080,7 @@ with tab4:
                 lstm.fit(prices, epochs=30)
                 forecasts = lstm.forecast(prices, horizon=21)
                 st.success("BiLSTM trained successfully!")
-                st.dataframe(forecasts.round(5), width='stretch')
+                st.dataframe(forecasts.round(5), use_container_width=True)
             except ImportError as e:
                 st.warning(f"PyTorch not installed or GPU unavailable: {e}")
             except Exception as e:
@@ -2099,7 +2101,7 @@ with tab4:
                 tft.fit(prices, max_epochs=20)
                 fc_df = tft.forecast(prices)
                 st.success("TFT trained!")
-                st.dataframe(fc_df.round(5), width='stretch')
+                st.dataframe(fc_df.round(5), use_container_width=True)
             except ImportError as e:
                 st.warning(f"pytorch-forecasting not installed: {e}")
             except Exception as e:
@@ -2188,7 +2190,7 @@ with tab5:
                 fig_ql.update_layout(paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
                                      font_color="#FAFAFA", height=350,
                                      margin=dict(t=50, l=55, r=20, b=40))
-                st.plotly_chart(fig_ql, width='stretch')
+                st.plotly_chart(fig_ql, use_container_width=True)
             except ImportError as e:
                 st.warning(f"PennyLane not installed: {e}")
             except Exception as e:
@@ -2212,7 +2214,7 @@ with tab5:
                 X = clean.drop(columns=[tgt.name]).values[-300:, :4]
                 y = clean[tgt.name].values[-300:]
                 result = comparison_study(X, y, n_qubits=4)
-                st.dataframe(result["summary"], width='stretch')
+                st.dataframe(result["summary"], use_container_width=True)
             except ImportError as e:
                 st.warning(f"PennyLane not installed: {e}")
             except Exception as e:
