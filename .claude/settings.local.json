@@ -51,7 +51,9 @@
       "Read(//opt/homebrew/Cellar/**)",
       "Bash(pip3 show *)",
       "Bash(mdfind -name \"python3\")",
-      "Bash(grep -E \"bin/python3$\")"
+      "Bash(grep -E \"bin/python3$\")",
+      "Bash(python3 -c \"import statsmodels, scipy; print\\('ok'\\)\")",
+      "Bash(/opt/anaconda3/bin/python3 -c ' *)"
     ]
   }
 }

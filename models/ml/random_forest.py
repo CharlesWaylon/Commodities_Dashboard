@@ -243,7 +243,10 @@ class CommodityRF:
         """
         if self._rf is None:
             raise RuntimeError("Call fit() first.")
-        X, y, _ = self._prepare(feat_df, target)
+        # Project to the reduced feature set selected during fit() so the
+        # scaler (fitted on ~21 columns) sees a matching schema. Without this,
+        # passing the full feat_df (~246 cols) raises a shape mismatch.
+        X, y, _ = self._prepare(feat_df[self._feature_names], target)
         split = int(len(X) * (1 - TEST_FRACTION))
         X_test = self._scaler.transform(X[split:])
         y_test = y[split:]

@@ -160,6 +160,7 @@ with st.sidebar:
     st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
     st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
     st.page_link("pages/8_Portfolio.py",             label="Portfolio")
+    st.page_link("pages/9_Scenarios.py",             label="Scenarios")
     st.divider()
     st.caption(f"Last refresh · {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
     if st.button("↻  Refresh", use_container_width=True):
