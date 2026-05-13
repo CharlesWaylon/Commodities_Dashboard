@@ -15,19 +15,18 @@ from __future__ import annotations
 import json
 import logging
 import math
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
+
+from sqlalchemy import text
+from database.db import get_engine
 
 import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
-
-_ROOT      = Path(__file__).resolve().parent.parent
-DEFAULT_DB = _ROOT / "data" / "commodities.db"
 
 # ── Sector → commodity map (kept here so the validator is self-contained) ─────
 SECTOR_COMMODITIES: Dict[str, List[str]] = {
@@ -225,65 +224,15 @@ class ValidationReport:
         return "\n".join(lines)
 
 
-# ── SQLite schema & helpers ────────────────────────────────────────────────────
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS cascade_validation_log (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_at           TEXT NOT NULL,
-    shock_date       TEXT NOT NULL,
-    shock_family     TEXT NOT NULL,
-    shock_strength   REAL NOT NULL,
-    sector           TEXT NOT NULL,
-    cascade_fcast    REAL,
-    baseline_fcast   REAL,
-    actual_5d        REAL,
-    actual_10d       REAL,
-    cascade_correct  INTEGER,
-    baseline_correct INTEGER,
-    mae_cascade      REAL,
-    mae_baseline     REAL,
-    lift             REAL,
-    lag_confirmed    INTEGER,
-    inserted_at      TEXT NOT NULL,
-    UNIQUE(run_at, shock_date, shock_family, sector)
-);
-CREATE INDEX IF NOT EXISTS idx_cvl_run_at ON cascade_validation_log(run_at);
-CREATE INDEX IF NOT EXISTS idx_cvl_shock  ON cascade_validation_log(shock_date, shock_family);
-CREATE INDEX IF NOT EXISTS idx_cvl_sector ON cascade_validation_log(sector, run_at);
-
-CREATE TABLE IF NOT EXISTS cascade_validation_summary (
-    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_at                TEXT NOT NULL UNIQUE,
-    shock_window_days     INTEGER,
-    n_shock_events        INTEGER,
-    sector_accuracy_json  TEXT,
-    sector_lift_json      TEXT,
-    lag_confirmed_pct     REAL,
-    avg_lag1_corr         REAL,
-    overall_status        TEXT,
-    flags_json            TEXT,
-    inserted_at           TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_cvs_run_at ON cascade_validation_summary(run_at);
-"""
-
-
-def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_SCHEMA_SQL)
-    return conn
+# ── SQLAlchemy persistence helpers ────────────────────────────────────────────
 
 
 def save_validation_report(
     report: ValidationReport,
-    db_path: Optional[Union[str, Path]] = None,
 ) -> int:
     """
     Persist a ValidationReport to the cascade_validation_log and
-    cascade_validation_summary SQLite tables.
+    cascade_validation_summary tables.
 
     Returns the number of detail rows written.
     """
@@ -293,61 +242,79 @@ def save_validation_report(
     for shock in report.shock_results:
         lag_ok = int(shock.lag_result.confirmed) if shock.lag_result else 0
         for sector, sr in shock.sector_results.items():
-            detail_rows.append((
-                report.computed_at,
-                shock.shock_date,
-                shock.shock_family,
-                shock.shock_strength,
-                sector,
-                sr.cascade_forecast_pct,
-                sr.baseline_forecast_pct,
-                sr.actual_return_5d,
-                sr.actual_return_10d,
-                int(sr.cascade_dir_correct),
-                int(sr.baseline_dir_correct),
-                sr.mae_cascade,
-                sr.mae_baseline,
-                sr.lift,
-                lag_ok,
-                now_iso,
-            ))
+            detail_rows.append({
+                "run_at":           report.computed_at,
+                "shock_date":       shock.shock_date,
+                "shock_family":     shock.shock_family,
+                "shock_strength":   shock.shock_strength,
+                "sector":           sector,
+                "cascade_fcast":    sr.cascade_forecast_pct,
+                "baseline_fcast":   sr.baseline_forecast_pct,
+                "actual_5d":        sr.actual_return_5d,
+                "actual_10d":       sr.actual_return_10d,
+                "cascade_correct":  int(sr.cascade_dir_correct),
+                "baseline_correct": int(sr.baseline_dir_correct),
+                "mae_cascade":      sr.mae_cascade,
+                "mae_baseline":     sr.mae_baseline,
+                "lift":             sr.lift,
+                "lag_confirmed":    lag_ok,
+                "inserted_at":      now_iso,
+            })
 
-    summary_row = (
-        report.computed_at,
-        report.shock_window_days,
-        report.n_shock_events,
-        json.dumps(report.sector_directional_accuracy),
-        json.dumps(report.sector_avg_lift),
-        report.lag_confirmed_pct,
-        report.avg_lag1_corr,
-        report.overall_status,
-        json.dumps(report.flags),
-        now_iso,
-    )
+    summary_row = {
+        "run_at":               report.computed_at,
+        "shock_window_days":    report.shock_window_days,
+        "n_shock_events":       report.n_shock_events,
+        "sector_accuracy_json": json.dumps(report.sector_directional_accuracy),
+        "sector_lift_json":     json.dumps(report.sector_avg_lift),
+        "lag_confirmed_pct":    report.lag_confirmed_pct,
+        "avg_lag1_corr":        report.avg_lag1_corr,
+        "overall_status":       report.overall_status,
+        "flags_json":           json.dumps(report.flags),
+        "inserted_at":          now_iso,
+    }
 
-    with _connect(db_path) as conn:
-        conn.executemany(
-            """
-            INSERT OR REPLACE INTO cascade_validation_log
-                (run_at, shock_date, shock_family, shock_strength, sector,
-                 cascade_fcast, baseline_fcast, actual_5d, actual_10d,
-                 cascade_correct, baseline_correct, mae_cascade, mae_baseline,
-                 lift, lag_confirmed, inserted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            detail_rows,
-        )
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO cascade_validation_summary
-                (run_at, shock_window_days, n_shock_events,
-                 sector_accuracy_json, sector_lift_json,
-                 lag_confirmed_pct, avg_lag1_corr,
-                 overall_status, flags_json, inserted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            summary_row,
-        )
+    detail_sql = text("""
+        INSERT INTO cascade_validation_log
+            (run_at, shock_date, shock_family, shock_strength, sector,
+             cascade_fcast, baseline_fcast, actual_5d, actual_10d,
+             cascade_correct, baseline_correct, mae_cascade, mae_baseline,
+             lift, lag_confirmed, inserted_at)
+        VALUES (:run_at, :shock_date, :shock_family, :shock_strength, :sector,
+                :cascade_fcast, :baseline_fcast, :actual_5d, :actual_10d,
+                :cascade_correct, :baseline_correct, :mae_cascade, :mae_baseline,
+                :lift, :lag_confirmed, :inserted_at)
+        ON CONFLICT (run_at, shock_date, shock_family, sector) DO UPDATE SET
+            cascade_correct  = EXCLUDED.cascade_correct,
+            baseline_correct = EXCLUDED.baseline_correct,
+            mae_cascade      = EXCLUDED.mae_cascade,
+            mae_baseline     = EXCLUDED.mae_baseline,
+            lift             = EXCLUDED.lift,
+            inserted_at      = EXCLUDED.inserted_at
+    """)
+    summary_sql = text("""
+        INSERT INTO cascade_validation_summary
+            (run_at, shock_window_days, n_shock_events,
+             sector_accuracy_json, sector_lift_json,
+             lag_confirmed_pct, avg_lag1_corr,
+             overall_status, flags_json, inserted_at)
+        VALUES (:run_at, :shock_window_days, :n_shock_events,
+                :sector_accuracy_json, :sector_lift_json,
+                :lag_confirmed_pct, :avg_lag1_corr,
+                :overall_status, :flags_json, :inserted_at)
+        ON CONFLICT (run_at) DO UPDATE SET
+            n_shock_events       = EXCLUDED.n_shock_events,
+            sector_accuracy_json = EXCLUDED.sector_accuracy_json,
+            sector_lift_json     = EXCLUDED.sector_lift_json,
+            overall_status       = EXCLUDED.overall_status,
+            flags_json           = EXCLUDED.flags_json,
+            inserted_at          = EXCLUDED.inserted_at
+    """)
+
+    with get_engine().connect() as conn:
+        if detail_rows:
+            conn.execute(detail_sql, detail_rows)
+        conn.execute(summary_sql, summary_row)
         conn.commit()
 
     log.info(
@@ -357,10 +324,7 @@ def save_validation_report(
     return len(detail_rows)
 
 
-def recent_validation_reports(
-    n: int = 12,
-    db_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
+def recent_validation_reports(n: int = 12) -> pd.DataFrame:
     """
     Return the last `n` validation summary rows as a DataFrame.
 
@@ -368,20 +332,18 @@ def recent_validation_reports(
              sector_accuracy_json (parsed dict), lag_confirmed_pct, flags_json.
     """
     try:
-        with _connect(db_path) as conn:
-            df = pd.read_sql_query(
-                """
-                SELECT run_at, shock_window_days, n_shock_events,
-                       sector_accuracy_json, sector_lift_json,
-                       lag_confirmed_pct, avg_lag1_corr,
-                       overall_status, flags_json
-                FROM   cascade_validation_summary
-                ORDER  BY run_at DESC
-                LIMIT  ?
-                """,
-                conn,
-                params=[n],
-            )
+        sql = text(f"""
+            SELECT run_at, shock_window_days, n_shock_events,
+                   sector_accuracy_json, sector_lift_json,
+                   lag_confirmed_pct, avg_lag1_corr,
+                   overall_status, flags_json
+            FROM   cascade_validation_summary
+            ORDER  BY run_at DESC
+            LIMIT  {int(n)}
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(sql)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         for col in ("sector_accuracy_json", "sector_lift_json", "flags_json"):
             if col in df.columns:
                 df[col] = df[col].apply(lambda s: json.loads(s) if s else {})
@@ -394,30 +356,29 @@ def recent_validation_reports(
 def validation_detail(
     run_at: Optional[str] = None,
     sector: Optional[str] = None,
-    db_path: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
     """
     Return event-level detail rows, optionally filtered by run timestamp or sector.
     Defaults to the most recent run.
     """
     try:
-        with _connect(db_path) as conn:
+        engine = get_engine()
+        with engine.connect() as conn:
             if run_at is None:
                 row = conn.execute(
-                    "SELECT MAX(run_at) FROM cascade_validation_summary"
+                    text("SELECT MAX(run_at) FROM cascade_validation_summary")
                 ).fetchone()
                 run_at = row[0] if row and row[0] else None
             if run_at is None:
                 return pd.DataFrame()
 
-            conditions = ["run_at = ?"]
-            params: list = [run_at]
+            conditions = ["run_at = :run_at"]
+            params: dict = {"run_at": run_at}
             if sector:
-                conditions.append("sector = ?")
-                params.append(sector)
+                conditions.append("sector = :sector")
+                params["sector"] = sector
 
-            df = pd.read_sql_query(
-                f"""
+            sql = text(f"""
                 SELECT shock_date, shock_family, shock_strength, sector,
                        cascade_fcast, baseline_fcast, actual_5d, actual_10d,
                        cascade_correct, baseline_correct, mae_cascade, mae_baseline,
@@ -425,10 +386,9 @@ def validation_detail(
                 FROM   cascade_validation_log
                 WHERE  {' AND '.join(conditions)}
                 ORDER  BY shock_date DESC, sector
-                """,
-                conn,
-                params=params,
-            )
+            """)
+            result = conn.execute(sql, params)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         return df
     except Exception as exc:
         log.warning("validation_detail: %s", exc)

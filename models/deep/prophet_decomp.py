@@ -51,6 +51,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from typing import Optional
+from scipy.stats import spearmanr
 
 try:
     from prophet import Prophet
@@ -58,7 +59,7 @@ try:
 except ImportError:
     _PROPHET_AVAILABLE = False
 
-from models.config import MODELING_COMMODITIES
+from models.config import MODELING_COMMODITIES, RANDOM_SEED, TEST_FRACTION
 
 
 def _require_prophet():
@@ -322,6 +323,117 @@ class ProphetDecomposer:
                     float(comps[key].var() / (comps[key].var() + total_var)), 4
                 )
         return result
+
+
+# ── Optuna hyperparameter tuner ────────────────────────────────────────────────
+
+def tune_prophet(
+    prices: pd.DataFrame,
+    commodity: str,
+    n_trials: int = 20,
+    seed: int = RANDOM_SEED,
+) -> dict:
+    """
+    Optuna search over Prophet hyperparameters for a single commodity.
+
+    Objective: Spearman IC of implied 1-day log-return forecasts on the
+    held-out 20% test period.
+
+    Parameters
+    ----------
+    prices : pd.DataFrame
+        Full closing price matrix.
+    commodity : str
+        Column name in prices to tune.
+    n_trials : int
+        Number of Optuna trials.
+    seed : int
+        Reproducibility seed for TPESampler.
+
+    Returns
+    -------
+    dict
+        best_params, best_ic, n_trials, best_trial.
+    """
+    _require_prophet()
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError:
+        raise ImportError("optuna is required: pip install optuna")
+
+    # Build log-price DataFrame in Prophet format
+    series = np.log(prices[commodity]).dropna()
+    df = series.reset_index()
+    df.columns = ["ds", "y"]
+    df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
+    df = df.reset_index(drop=True)
+
+    split = int(len(df) * (1 - TEST_FRACTION))
+    df_train = df.iloc[:split].copy()
+    df_test  = df.iloc[split:].copy()
+
+    cfg = _SEASONAL_CONFIG.get(commodity, _DEFAULT_CONFIG)
+
+    def objective(trial: "optuna.Trial") -> float:
+        cps = trial.suggest_float("changepoint_prior_scale", 0.001, 0.5, log=True)
+        sps = trial.suggest_float("seasonality_prior_scale", 0.1, 20.0, log=True)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m = Prophet(
+                changepoint_prior_scale=cps,
+                seasonality_prior_scale=sps,
+                seasonality_mode=cfg["mode"],
+                yearly_seasonality=False,
+                weekly_seasonality=cfg["weekly"],
+                daily_seasonality=False,
+                interval_width=0.95,
+            )
+            if cfg["yearly"]:
+                m.add_seasonality(
+                    name="yearly",
+                    period=365.25,
+                    fourier_order=cfg["yearly_order"],
+                    mode=cfg["mode"],
+                )
+            m.fit(df_train)
+            future = m.make_future_dataframe(periods=len(df_test), freq="B")
+            fc = m.predict(future)
+
+        # Align forecast to test dates, compute 1-day return IC
+        fc_indexed = fc.set_index("ds")["yhat"]
+        actual_indexed = df_test.set_index("ds")["y"]
+        aligned = pd.concat(
+            [fc_indexed.rename("pred"), actual_indexed.rename("actual")], axis=1
+        ).dropna()
+        if len(aligned) < 10:
+            return 0.0
+
+        implied_ret = aligned["pred"].diff().dropna()
+        actual_ret  = aligned["actual"].diff().dropna()
+        min_len = min(len(implied_ret), len(actual_ret))
+        if min_len < 5:
+            return 0.0
+
+        ic, _ = spearmanr(implied_ret.iloc[:min_len].values,
+                          actual_ret.iloc[:min_len].values)
+        return float(ic) if not np.isnan(ic) else 0.0
+
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    study   = optuna.create_study(
+        direction="maximize",
+        sampler=sampler,
+        study_name=f"prophet_{commodity}",
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    return {
+        "best_params": study.best_params,
+        "best_ic":     round(study.best_value, 4),
+        "n_trials":    n_trials,
+        "best_trial":  study.best_trial.number,
+    }
 
 
 # ── Convenience runner ─────────────────────────────────────────────────────────

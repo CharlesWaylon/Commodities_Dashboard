@@ -57,11 +57,13 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
+
+from sqlalchemy import text
+from database.db import get_engine
 
 import numpy as np
 import pandas as pd
@@ -70,32 +72,12 @@ from models.ic_tracker import compute_ic   # reuse rank-IC implementation
 
 log = logging.getLogger(__name__)
 
-_ROOT      = Path(__file__).resolve().parent.parent
-DEFAULT_DB = _ROOT / "data" / "commodities.db"
-
 # Default grid: 9 evenly spaced strength thresholds
 DEFAULT_THRESHOLD_GRID: List[float] = [round(t, 2) for t in np.arange(0.1, 1.0, 0.1)]
 
 # Fallback threshold when not enough data or IC is negative everywhere
 FALLBACK_THRESHOLD = 0.50
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS threshold_config (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    family                  TEXT NOT NULL,
-    optimal_threshold       REAL NOT NULL,
-    best_ic                 REAL,
-    continuous_ic           REAL,
-    n_events_total          INTEGER,
-    n_events_at_threshold   INTEGER,
-    lookback_days           INTEGER,
-    forward_days            INTEGER,
-    grid_results            TEXT,
-    evaluated_at            TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_threshold_config_family
-    ON threshold_config(family, evaluated_at);
-"""
 
 
 # ── Data classes ───────────────────────────────────────────────────────────────
@@ -122,7 +104,6 @@ class TunerConfig:
     threshold_grid:    List[float]          = field(default_factory=lambda: list(DEFAULT_THRESHOLD_GRID))
     min_events_above:  int                  = 8
     save_to_db:        bool                 = True
-    db_path:           Optional[Path]       = None
     dry_run:           bool                 = False
 
 
@@ -179,57 +160,43 @@ class TuneResult:
         )
 
 
-# ── SQLite helpers ─────────────────────────────────────────────────────────────
+# ── SQLAlchemy helpers ─────────────────────────────────────────────────────────
 
-def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_SCHEMA_SQL)
-    return conn
-
-
-def save_tune_results(
-    results: Dict[str, TuneResult],
-    db_path: Optional[Union[str, Path]] = None,
-) -> int:
+def save_tune_results(results: Dict[str, TuneResult]) -> int:
     """Persist tuning results to threshold_config.  Returns rows written."""
     if not results:
         return 0
-    conn = _connect(db_path)
     rows = []
     for r in results.values():
-        rows.append((
-            r.family,
-            r.optimal_threshold,
-            r.best_ic,
-            r.continuous_ic,
-            r.n_events_total,
-            r.n_events_at_threshold,
-            r.lookback_days,
-            r.forward_days,
-            json.dumps({str(k): v for k, v in r.grid_results.items()}),
-            r.evaluated_at,
-        ))
-    conn.executemany(
-        """
+        rows.append({
+            "family":                r.family,
+            "optimal_threshold":     r.optimal_threshold,
+            "best_ic":               r.best_ic,
+            "continuous_ic":         r.continuous_ic,
+            "n_events_total":        r.n_events_total,
+            "n_events_at_threshold": r.n_events_at_threshold,
+            "lookback_days":         r.lookback_days,
+            "forward_days":          r.forward_days,
+            "grid_results":          json.dumps({str(k): v for k, v in r.grid_results.items()}),
+            "evaluated_at":          r.evaluated_at,
+        })
+    sql = text("""
         INSERT INTO threshold_config
             (family, optimal_threshold, best_ic, continuous_ic,
              n_events_total, n_events_at_threshold,
              lookback_days, forward_days, grid_results, evaluated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    conn.commit()
-    conn.close()
+        VALUES (:family, :optimal_threshold, :best_ic, :continuous_ic,
+                :n_events_total, :n_events_at_threshold,
+                :lookback_days, :forward_days, :grid_results, :evaluated_at)
+    """)
+    with get_engine().connect() as conn:
+        conn.execute(sql, rows)
+        conn.commit()
     log.info("Saved %d threshold result(s) to DB.", len(rows))
     return len(rows)
 
 
-def load_optimal_thresholds(
-    db_path: Optional[Union[str, Path]] = None,
-) -> Dict[str, float]:
+def load_optimal_thresholds() -> Dict[str, float]:
     """
     Return the most recent optimal threshold per trigger family.
 
@@ -240,9 +207,7 @@ def load_optimal_thresholds(
     Empty dict if the table has no rows yet.
     """
     try:
-        conn = _connect(db_path)
-        df = pd.read_sql_query(
-            """
+        sql = text("""
             SELECT   family, optimal_threshold
             FROM     threshold_config
             WHERE    (family, evaluated_at) IN (
@@ -250,35 +215,30 @@ def load_optimal_thresholds(
                          FROM   threshold_config
                          GROUP  BY family
                      )
-            """,
-            conn,
-        )
-        conn.close()
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(sql)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         return dict(zip(df["family"], df["optimal_threshold"]))
     except Exception as exc:
         log.warning("load_optimal_thresholds failed: %s", exc)
         return {}
 
 
-def recent_tune_history(
-    n: int = 10,
-    db_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
+def recent_tune_history(n: int = 10) -> pd.DataFrame:
     """Last n tuning runs per family — useful for the Health tab."""
     try:
-        conn = _connect(db_path)
-        df = pd.read_sql_query(
-            f"""
+        sql = text(f"""
             SELECT family, optimal_threshold, best_ic, continuous_ic,
                    n_events_total, n_events_at_threshold,
                    lookback_days, forward_days, evaluated_at
             FROM   threshold_config
             ORDER  BY evaluated_at DESC
             LIMIT  {int(n)}
-            """,
-            conn,
-        )
-        conn.close()
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(sql)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         return df
     except Exception:
         return pd.DataFrame()
@@ -452,7 +412,7 @@ class ThresholdTuner:
 
         # Persist unless dry_run
         if not cfg.dry_run and cfg.save_to_db:
-            save_tune_results(results, db_path=cfg.db_path)
+            save_tune_results(results)
 
         return results
 

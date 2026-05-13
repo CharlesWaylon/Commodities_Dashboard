@@ -54,13 +54,15 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import sys
 import warnings
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence
+
+from sqlalchemy import text
+from database.db import get_engine
 
 import numpy as np
 import pandas as pd
@@ -71,7 +73,6 @@ log = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _ROOT        = Path(__file__).resolve().parent.parent
-DEFAULT_DB   = _ROOT / "data" / "commodities.db"
 DEFAULT_PKL  = _ROOT / "data" / "meta_predictor.pkl"
 
 # ── Core commodity universe (mirrors pages/4_Models.py) ───────────────────────
@@ -92,45 +93,6 @@ CORE_TICKERS: Dict[str, str] = {
 # Minimum training pairs before the predictor is considered usable
 MIN_PAIRS = 20
 
-# SQLite schema for the training audit log
-_TRAINING_LOG_SCHEMA = """
-CREATE TABLE IF NOT EXISTS model_training_log (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    retrained_at        TEXT NOT NULL,
-    n_commodities       INTEGER NOT NULL,
-    n_training_pairs    INTEGER NOT NULL,
-    tier_distribution   TEXT,
-    tree_n_leaves       INTEGER,
-    top_feature         TEXT,
-    save_path           TEXT,
-    error               TEXT,
-    config_json         TEXT,
-    inserted_at         TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_training_log_retrained_at
-    ON model_training_log(retrained_at);
-"""
-
-# ── Causal monitoring schema ───────────────────────────────────────────────────
-_CAUSAL_MONITORING_SCHEMA = """
-CREATE TABLE IF NOT EXISTS causal_monitoring_log (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    logged_at               TEXT NOT NULL,
-    run_type                TEXT NOT NULL DEFAULT 'daily',
-    granger_refreshed       INTEGER NOT NULL DEFAULT 0,
-    granger_summary_json    TEXT,
-    route_coefficients_json TEXT,
-    route_shift_pct_json    TEXT,
-    sector_ic_json          TEXT,
-    cascade_status          TEXT,
-    cascade_accuracy_json   TEXT,
-    cascade_n_events        INTEGER DEFAULT 0,
-    alerts_json             TEXT,
-    n_alerts                INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_causal_monitoring_logged_at
-    ON causal_monitoring_log(logged_at);
-"""
 
 # Commodity groups for Granger causality (names must match prices.columns exactly)
 _GRANGER_GROUPS: Dict[str, List[str]] = {
@@ -166,7 +128,6 @@ class RetrainConfig:
     max_depth       : DecisionTree max_depth for MetaPredictor.
     min_samples_leaf: minimum leaf size (prevents over-fitting on small data).
     save_path       : where to save the pkl. None → DEFAULT_PKL.
-    db_path         : SQLite path for the audit log. None → DEFAULT_DB.
     dry_run         : if True, trains but does NOT save the pkl or write the log.
     """
     commodities:      Optional[List[str]] = None
@@ -175,7 +136,6 @@ class RetrainConfig:
     max_depth:        int                 = 5
     min_samples_leaf: int                 = 10
     save_path:             Optional[Path] = None
-    db_path:               Optional[Path] = None
     dry_run:               bool           = False
     skip_causal_monitoring: bool          = False
     force_granger:         bool           = False
@@ -346,77 +306,61 @@ def _load_climate(price_index: Optional[pd.DatetimeIndex] = None) -> pd.DataFram
         return pd.DataFrame()
 
 
-# ── SQLite audit log ───────────────────────────────────────────────────────────
+# ── SQLAlchemy audit log ───────────────────────────────────────────────────────
 
-def _connect_log(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_TRAINING_LOG_SCHEMA)
-    return conn
-
-
-def _persist_training_log(
-    summary: RetrainSummary,
-    db_path: Optional[Union[str, Path]] = None,
-) -> None:
+def _persist_training_log(summary: RetrainSummary) -> None:
     """Write one row to model_training_log. Silent on failure."""
     try:
-        conn = _connect_log(db_path)
-        conn.execute(
-            """
+        row = {
+            "retrained_at":      summary.retrained_at,
+            "n_commodities":     summary.n_commodities,
+            "n_training_pairs":  summary.n_training_pairs,
+            "tier_distribution": json.dumps(summary.tier_distribution),
+            "tree_n_leaves":     summary.tree_n_leaves,
+            "top_feature":       summary.top_feature,
+            "save_path":         summary.save_path,
+            "error":             summary.error,
+            "config_json":       json.dumps(
+                asdict(summary.config),
+                default=lambda v: str(v),
+            ) if summary.config else "{}",
+            "inserted_at":       datetime.now(timezone.utc).isoformat(),
+        }
+        sql = text("""
             INSERT INTO model_training_log
                 (retrained_at, n_commodities, n_training_pairs,
                  tier_distribution, tree_n_leaves, top_feature,
                  save_path, error, config_json, inserted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                summary.retrained_at,
-                summary.n_commodities,
-                summary.n_training_pairs,
-                json.dumps(summary.tier_distribution),
-                summary.tree_n_leaves,
-                summary.top_feature,
-                summary.save_path,
-                summary.error,
-                json.dumps(
-                    asdict(summary.config),
-                    default=lambda v: str(v),   # Path → str, any other non-serializable
-                ) if summary.config else "{}",
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        conn.commit()
-        conn.close()
-        log.info("Training log persisted to %s", db_path or DEFAULT_DB)
+            VALUES (:retrained_at, :n_commodities, :n_training_pairs,
+                    :tier_distribution, :tree_n_leaves, :top_feature,
+                    :save_path, :error, :config_json, :inserted_at)
+        """)
+        with get_engine().connect() as conn:
+            conn.execute(sql, row)
+            conn.commit()
+        log.info("Training log persisted.")
     except Exception as exc:
         log.warning("Could not write training log: %s", exc)
 
 
-def recent_training_runs(
-    n: int = 10,
-    db_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
+def recent_training_runs(n: int = 10) -> pd.DataFrame:
     """
     Return the last `n` training log entries as a DataFrame.
     Useful for the dashboard Model Health tab (Phase 5 Part 2).
     Returns empty DataFrame if the log table doesn't exist yet.
     """
     try:
-        conn = _connect_log(db_path)
-        df = pd.read_sql_query(
-            f"""
+        sql = text(f"""
             SELECT retrained_at, n_commodities, n_training_pairs,
                    tier_distribution, tree_n_leaves, top_feature,
                    save_path, error
             FROM   model_training_log
             ORDER  BY retrained_at DESC
             LIMIT  {int(n)}
-            """,
-            conn,
-        )
-        conn.close()
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(sql)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         return df
     except Exception:
         return pd.DataFrame()
@@ -424,23 +368,15 @@ def recent_training_runs(
 
 # ── Causal monitoring helpers ─────────────────────────────────────────────────
 
-def _causal_db_connect(db_path=None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_CAUSAL_MONITORING_SCHEMA)
-    return conn
-
-
-def _granger_is_stale(db_path=None) -> bool:
+def _granger_is_stale() -> bool:
     """True if Granger has not been refreshed within the last _GRANGER_STALE_DAYS."""
     try:
-        conn = _causal_db_connect(db_path)
-        row  = conn.execute(
+        sql = text(
             "SELECT logged_at FROM causal_monitoring_log "
             "WHERE granger_refreshed=1 ORDER BY logged_at DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(sql).fetchone()
         if not row:
             return True
         last_dt  = datetime.fromisoformat(row[0]).replace(tzinfo=timezone.utc)
@@ -452,7 +388,6 @@ def _granger_is_stale(db_path=None) -> bool:
 
 def _run_granger_refresh(
     prices:   pd.DataFrame,
-    db_path=None,
     force:    bool = False,
     max_lag:  int  = 5,
     lookback: int  = 504,
@@ -464,7 +399,7 @@ def _run_granger_refresh(
       error     : str
     Only runs when stale (>7 days) or force=True.
     """
-    if not force and not _granger_is_stale(db_path):
+    if not force and not _granger_is_stale():
         return {"refreshed": False, "summary": {}, "error": ""}
 
     from models.statistical.var_vecm import CommodityVAR
@@ -508,15 +443,15 @@ def _run_granger_refresh(
     }
 
 
-def _load_last_monitoring_field(field_name: str, db_path=None) -> Dict:
+def _load_last_monitoring_field(field_name: str) -> Dict:
     """Generic helper: load one JSON field from the most recent monitoring row."""
     try:
-        conn = _causal_db_connect(db_path)
-        row  = conn.execute(
+        sql = text(
             f"SELECT {field_name} FROM causal_monitoring_log "
             f"WHERE {field_name} IS NOT NULL ORDER BY logged_at DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(sql).fetchone()
         if row and row[0]:
             return json.loads(row[0])
     except Exception:
@@ -524,7 +459,7 @@ def _load_last_monitoring_field(field_name: str, db_path=None) -> Dict:
     return {}
 
 
-def _detect_route_shifts(db_path=None) -> Dict:
+def _detect_route_shifts() -> Dict:
     """
     Load current macro_routes.pkl → compare routing_matrix to previous run.
     Returns: coefficients, shift_pcts, alerts.
@@ -546,7 +481,7 @@ def _detect_route_shifts(db_path=None) -> Dict:
         }
         result["coefficients"] = current_coefs
 
-        prev_coefs = _load_last_monitoring_field("route_coefficients_json", db_path)
+        prev_coefs = _load_last_monitoring_field("route_coefficients_json")
         shift_pcts: Dict[str, Dict[str, float]] = {}
         alerts:     List[str]                   = []
 
@@ -601,7 +536,6 @@ def _run_cascade_validation_step(
     harness,
     prices:   pd.DataFrame,
     macro:    pd.DataFrame,
-    db_path=None,
     dry_run:  bool = False,
 ) -> Dict:
     """
@@ -622,14 +556,13 @@ def _run_cascade_validation_step(
             forward_days_primary   = 5,
             forward_days_secondary = 10,
             save                   = not dry_run,
-            db_path                = db_path,
         )
         result["status"]   = report.overall_status
         result["accuracy"] = {k: round(v, 4) for k, v in report.sector_directional_accuracy.items()}
         result["n_events"] = report.n_shock_events
 
         # Compare accuracy to previous run
-        prev_acc = _load_last_monitoring_field("cascade_accuracy_json", db_path)
+        prev_acc = _load_last_monitoring_field("cascade_accuracy_json")
         for sector, acc in result["accuracy"].items():
             prev = prev_acc.get(sector)
             if prev is not None:
@@ -665,37 +598,37 @@ def _persist_causal_monitoring(
     sector_ic:  Dict[str, float],
     cascade:    Dict,
     all_alerts: List[str],
-    db_path=None,
 ) -> None:
     """Write one row to causal_monitoring_log. Silent on failure."""
     try:
-        conn = _causal_db_connect(db_path)
-        conn.execute(
-            """
+        row = {
+            "logged_at":               logged_at,
+            "run_type":                run_type,
+            "granger_refreshed":       1 if granger.get("refreshed") else 0,
+            "granger_summary_json":    json.dumps(granger.get("summary", {})),
+            "route_coefficients_json": json.dumps(routes.get("coefficients", {})),
+            "route_shift_pct_json":    json.dumps(routes.get("shift_pcts", {})),
+            "sector_ic_json":          json.dumps(sector_ic),
+            "cascade_status":          cascade.get("status", ""),
+            "cascade_accuracy_json":   json.dumps(cascade.get("accuracy", {})),
+            "cascade_n_events":        cascade.get("n_events", 0),
+            "alerts_json":             json.dumps(all_alerts),
+            "n_alerts":                len(all_alerts),
+        }
+        sql = text("""
             INSERT INTO causal_monitoring_log
                 (logged_at, run_type, granger_refreshed, granger_summary_json,
                  route_coefficients_json, route_shift_pct_json,
                  sector_ic_json, cascade_status, cascade_accuracy_json,
                  cascade_n_events, alerts_json, n_alerts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                logged_at,
-                run_type,
-                1 if granger.get("refreshed") else 0,
-                json.dumps(granger.get("summary", {})),
-                json.dumps(routes.get("coefficients", {})),
-                json.dumps(routes.get("shift_pcts", {})),
-                json.dumps(sector_ic),
-                cascade.get("status", ""),
-                json.dumps(cascade.get("accuracy", {})),
-                cascade.get("n_events", 0),
-                json.dumps(all_alerts),
-                len(all_alerts),
-            ),
-        )
-        conn.commit()
-        conn.close()
+            VALUES (:logged_at, :run_type, :granger_refreshed, :granger_summary_json,
+                    :route_coefficients_json, :route_shift_pct_json,
+                    :sector_ic_json, :cascade_status, :cascade_accuracy_json,
+                    :cascade_n_events, :alerts_json, :n_alerts)
+        """)
+        with get_engine().connect() as conn:
+            conn.execute(sql, row)
+            conn.commit()
         log.info(
             "Causal monitoring logged: %d alert(s), cascade=%s, granger_refreshed=%s.",
             len(all_alerts), cascade.get("status"), granger.get("refreshed"),
@@ -732,7 +665,7 @@ def run_causal_monitoring(
     # (a) Granger causality refresh (weekly)
     try:
         granger_result = _run_granger_refresh(
-            prices, cfg.db_path, force=getattr(cfg, "force_granger", False)
+            prices, force=getattr(cfg, "force_granger", False)
         )
         if granger_result.get("error"):
             log.warning("Granger refresh partial error: %s", granger_result["error"])
@@ -741,7 +674,7 @@ def run_causal_monitoring(
 
     # (b) Route coefficient shift detection (daily — uses freshly-built pkl)
     try:
-        routes_result = _detect_route_shifts(cfg.db_path)
+        routes_result = _detect_route_shifts()
         all_alerts.extend(routes_result.get("alerts", []))
         if routes_result["alerts"]:
             log.warning(
@@ -754,7 +687,7 @@ def run_causal_monitoring(
 
     # (c) Sector IC monitoring
     try:
-        prev_ic    = _load_last_monitoring_field("sector_ic_json", cfg.db_path)
+        prev_ic    = _load_last_monitoring_field("sector_ic_json")
         ic_alerts  = _check_sector_ic_alerts(sector_ic, prev_ic)
         all_alerts.extend(ic_alerts)
     except Exception as exc:
@@ -764,8 +697,7 @@ def run_causal_monitoring(
     try:
         cascade_result = _run_cascade_validation_step(
             harness, prices, macro,
-            db_path  = cfg.db_path,
-            dry_run  = cfg.dry_run,
+            dry_run = cfg.dry_run,
         )
         all_alerts.extend(cascade_result.get("alerts", []))
     except Exception as exc:
@@ -785,7 +717,7 @@ def run_causal_monitoring(
         _persist_causal_monitoring(
             logged_at, run_type,
             granger_result, routes_result, sector_ic, cascade_result,
-            all_alerts, cfg.db_path,
+            all_alerts,
         )
 
     return {
@@ -797,28 +729,23 @@ def run_causal_monitoring(
     }
 
 
-def recent_causal_monitoring_runs(
-    n: int = 10,
-    db_path=None,
-) -> pd.DataFrame:
+def recent_causal_monitoring_runs(n: int = 10) -> pd.DataFrame:
     """
     Return the last `n` causal monitoring rows as a DataFrame.
     Useful for the dashboard Health tab.
     """
     try:
-        conn = _causal_db_connect(db_path)
-        df   = pd.read_sql_query(
-            f"""
+        sql = text(f"""
             SELECT logged_at, run_type, granger_refreshed, cascade_status,
                    n_alerts, alerts_json, cascade_n_events,
                    cascade_accuracy_json, sector_ic_json
             FROM   causal_monitoring_log
             ORDER  BY logged_at DESC
             LIMIT  {int(n)}
-            """,
-            conn,
-        )
-        conn.close()
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(sql)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         return df
     except Exception:
         return pd.DataFrame()
@@ -878,10 +805,10 @@ def run_daily_retrain(
                     store_correlation_snapshot,
                     store_covariance_snapshot,
                 )
-                n_corr = store_correlation_snapshot(db_path=cfg.db_path)
+                n_corr = store_correlation_snapshot()
                 summary.n_corr_pairs = n_corr
                 log.info("Stored %d correlation pairs in correlation_snapshots.", n_corr)
-                n_cov = store_covariance_snapshot(db_path=cfg.db_path)
+                n_cov = store_covariance_snapshot()
                 log.info("Stored %d covariance entries in covariance_snapshots.", n_cov)
             except Exception as exc:
                 log.warning("Correlation/covariance snapshot skipped: %s", exc)
@@ -949,7 +876,7 @@ def run_daily_retrain(
                 }
                 # Merge both dicts; sector rows use sector name as commodity field
                 combined = {**ic_results, **sector_ic}
-                n_ic = log_ic_scores(combined, db_path=cfg.db_path)
+                n_ic = log_ic_scores(combined)
                 log.info(
                     "Logged %d IC score(s) to ic_log "
                     "(%d commodity-level, %d sector-level).",
@@ -1005,7 +932,6 @@ def run_daily_retrain(
                 n_fc = log_forecasts(
                     {k: v for k, v in fc_dict.items()},
                     forecast_date=latest_date.date(),
-                    db_path=cfg.db_path,
                 )
                 summary.n_forecasts_logged = n_fc
                 log.info("Logged %d forecast rows for %s", n_fc, latest_date.date())
@@ -1021,7 +947,6 @@ def run_daily_retrain(
                     realize_forecasts(
                         actuals,
                         forecast_date=latest_date.date(),
-                        db_path=cfg.db_path,
                     )
 
                 # Consistency check on the latest ensemble forecast
@@ -1030,7 +955,7 @@ def run_daily_retrain(
                     for rec in latest_records
                     if rec.tier_forecasts
                 }
-                corr_mat = load_correlation_matrix(db_path=cfg.db_path)
+                corr_mat = load_correlation_matrix()
                 flags = check_forecast_consistency(
                     ensemble_fc, corr_matrix=corr_mat
                 )
@@ -1118,7 +1043,6 @@ def run_daily_retrain(
             cascade_result = run_cascade(
                 prices   = prices,
                 macro_df = macro,
-                db_path  = cfg.db_path,
                 dry_run  = False,
             )
             summary.n_cascade_forecasts = len(cascade_result.commodities)
@@ -1162,7 +1086,7 @@ def run_daily_retrain(
 
     # ── 11. Persist audit log (always, even on failure) ────────────────────────
     if not cfg.dry_run:
-        _persist_training_log(summary, cfg.db_path)
+        _persist_training_log(summary)
 
     return summary
 

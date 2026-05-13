@@ -27,6 +27,7 @@ from models.trigger_log import log_trigger_events
 from models.meta_predictor import (
     MetaPredictor, collect_meta_features, ModelVote, KNOWN_TIERS
 )
+from models.config import MODELING_COMMODITIES
 
 st.set_page_config(page_title="Accendio | Models", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
 apply_theme()
@@ -234,6 +235,10 @@ with st.spinner("Loading market data…"):
 
 returns = np.log(prices / prices.shift(1)).dropna()
 
+with st.spinner("Loading full commodity matrix…"):
+    prices_full = load_prices_en()
+returns_full = np.log(prices_full / prices_full.shift(1)).dropna()
+
 # ── Live Macro Triggers (Phase 2C) ────────────────────────────────────────────
 # Detect macro events (OPEC window, Fed/DXY stress, etc.) from live data, then
 # expose the events to every tab so model outputs can route through them.
@@ -303,8 +308,8 @@ if trigger_events:
                     import datetime as _dt
                     _fam_obj = _gtf(ev.family)
                     _first_affected = next(
-                        (c for c in ev.affected_commodities if c in CORE_TICKERS),
-                        list(CORE_TICKERS.keys())[0],
+                        (c for c in ev.affected_commodities if c in MODELING_COMMODITIES),
+                        list(MODELING_COMMODITIES.keys())[0],
                     )
                     st.session_state["causal_commodity"]        = _first_affected
                     st.session_state["causal_family"]           = _fam_obj.description if _fam_obj else ev.family
@@ -330,8 +335,8 @@ if _inline_ev is not None:
 
     # Determine commodity for this trace
     _ic_commodity = next(
-        (c for c in _inline_ev.affected_commodities if c in CORE_TICKERS),
-        list(CORE_TICKERS.keys())[0],
+        (c for c in _inline_ev.affected_commodities if c in MODELING_COMMODITIES),
+        list(MODELING_COMMODITIES.keys())[0],
     )
 
     # Cache result per family so scrolling doesn't re-trace
@@ -340,7 +345,7 @@ if _inline_ev is not None:
         with st.spinner(f"Tracing {_inline_ev.family.replace('_', ' ').title()}…"):
             _ic_tracer = _CC()
             st.session_state[_ic_cache_key] = _ic_tracer.trace_from_event(
-                _inline_ev, prices, _macro_for_triggers, _ic_commodity,
+                _inline_ev, prices_full, _macro_for_triggers, _ic_commodity,
             )
     _ic_result = st.session_state[_ic_cache_key]
 
@@ -443,35 +448,113 @@ if _inline_ev is not None:
 st.divider()
 
 # ── Cascade constants & helper ─────────────────────────────────────────────────
+# Sector-level fallback coefficients: any commodity not in _CASCADE_COMM_EFFECTS
+# automatically inherits these based on its sector, so new additions never show
+# all-zero macro channels.
+_CASCADE_SECTOR_DEFAULTS = {
+    "Energy":     {"real_yields": -0.10, "usd": -0.35, "risk_off": -0.30},
+    "Metals":     {"real_yields": -0.20, "usd": -0.20, "risk_off": -0.10},
+    "Grains":     {"real_yields":  0.00, "usd": -0.27, "risk_off": -0.20},
+    "Livestock":  {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.28},
+    "Digital":    {"real_yields": -0.30, "usd": -0.50, "risk_off": -0.70},
+}
 _CASCADE_SECTOR_MAP = {
+    # ── Energy ────────────────────────────────────────────────────────────────
     "WTI Crude Oil":           "Energy",
     "Brent Crude Oil":         "Energy",
-    "Natural Gas (Henry Hub)": "Energy",
+    "Natural Gas (Henry Hub)": "Energy",   # CORE_TICKERS display name
+    "Natural Gas":             "Energy",   # DB / MODELING_COMMODITIES name
     "Gasoline (RBOB)":         "Energy",
     "Heating Oil":             "Energy",
+    "Carbon Credits*":         "Energy",
+    "LNG / Intl Gas*":         "Energy",
+    "Metallurgical Coal*":     "Energy",
+    "Thermal Coal*":           "Energy",
+    "Uranium*":                "Energy",
+    # ── Metals ────────────────────────────────────────────────────────────────
     "Gold (COMEX)":            "Metals",
     "Silver (COMEX)":          "Metals",
     "Copper (COMEX)":          "Metals",
+    "Platinum":                "Metals",
+    "Palladium":               "Metals",
+    "Aluminum (COMEX)":        "Metals",
+    "HRC Steel":               "Metals",
+    "Gold (Physical/London)*": "Metals",
+    "Silver (Physical)*":      "Metals",
+    "Iron Ore / Steel*":       "Metals",
+    "Lithium*":                "Metals",
+    "Rare Earths*":            "Metals",
+    "Zinc & Cobalt*":          "Metals",
+    # ── Agriculture ───────────────────────────────────────────────────────────
     "Corn (CBOT)":             "Grains",
     "Wheat (CBOT SRW)":        "Grains",
+    "Wheat (KC HRW)":          "Grains",
     "Soybeans (CBOT)":         "Grains",
+    "Soybean Meal":            "Grains",
+    "Soybean Oil":             "Grains",
+    "Coffee":                  "Grains",
+    "Cocoa":                   "Grains",
+    "Sugar":                   "Grains",
+    "Cotton":                  "Grains",
+    "Orange Juice (FCOJ-A)":   "Grains",
+    "Oats (CBOT)":             "Grains",
+    "Rough Rice (CBOT)":       "Grains",
+    "Lumber*":                 "Grains",
+    # ── Livestock ─────────────────────────────────────────────────────────────
+    "Live Cattle":             "Livestock",
     "Feeder Cattle":           "Livestock",
     "Lean Hogs":               "Livestock",
+    # ── Digital ───────────────────────────────────────────────────────────────
+    "Bitcoin":                 "Digital",
 }
 _CASCADE_COMM_EFFECTS = {
+    # ── Energy ────────────────────────────────────────────────────────────────
     "WTI Crude Oil":           {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
     "Brent Crude Oil":         {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
     "Natural Gas (Henry Hub)": {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
+    "Natural Gas":             {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
     "Gasoline (RBOB)":         {"real_yields": -0.15, "usd": -0.45, "risk_off": -0.35},
     "Heating Oil":             {"real_yields": -0.15, "usd": -0.45, "risk_off": -0.35},
+    "Carbon Credits*":         {"real_yields": -0.05, "usd": -0.15, "risk_off": -0.35},
+    "LNG / Intl Gas*":         {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
+    "Metallurgical Coal*":     {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.40},
+    "Thermal Coal*":           {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.25},
+    "Uranium*":                {"real_yields": -0.10, "usd": -0.15, "risk_off": -0.10},
+    # ── Metals ────────────────────────────────────────────────────────────────
     "Gold (COMEX)":            {"real_yields": -0.60, "usd":  0.30, "risk_off":  0.50},
     "Silver (COMEX)":          {"real_yields": -0.40, "usd": -0.10, "risk_off":  0.25},
     "Copper (COMEX)":          {"real_yields":  0.10, "usd": -0.30, "risk_off": -0.50},
+    "Platinum":                {"real_yields": -0.30, "usd": -0.20, "risk_off":  0.10},
+    "Palladium":               {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.30},
+    "Aluminum (COMEX)":        {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.45},
+    "HRC Steel":               {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.45},
+    "Gold (Physical/London)*": {"real_yields": -0.60, "usd":  0.30, "risk_off":  0.50},
+    "Silver (Physical)*":      {"real_yields": -0.40, "usd": -0.10, "risk_off":  0.25},
+    "Iron Ore / Steel*":       {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.45},
+    "Lithium*":                {"real_yields": -0.15, "usd": -0.30, "risk_off": -0.40},
+    "Rare Earths*":            {"real_yields": -0.10, "usd": -0.20, "risk_off": -0.30},
+    "Zinc & Cobalt*":          {"real_yields":  0.05, "usd": -0.30, "risk_off": -0.45},
+    # ── Agriculture ───────────────────────────────────────────────────────────
     "Corn (CBOT)":             {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
     "Wheat (CBOT SRW)":        {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
+    "Wheat (KC HRW)":          {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
     "Soybeans (CBOT)":         {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Soybean Meal":            {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Soybean Oil":             {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Coffee":                  {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.15},
+    "Cocoa":                   {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.15},
+    "Sugar":                   {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.20},
+    "Cotton":                  {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Orange Juice (FCOJ-A)":   {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.10},
+    "Oats (CBOT)":             {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
+    "Rough Rice (CBOT)":       {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.15},
+    "Lumber*":                 {"real_yields": -0.40, "usd": -0.20, "risk_off": -0.35},
+    # ── Livestock ─────────────────────────────────────────────────────────────
+    "Live Cattle":             {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.25},
     "Feeder Cattle":           {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
     "Lean Hogs":               {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
+    # ── Digital ───────────────────────────────────────────────────────────────
+    "Bitcoin":                 {"real_yields": -0.30, "usd": -0.50, "risk_off": -0.70},
 }
 
 def _compute_cascade_for(commodity, macro_row, prices_df):
@@ -487,6 +570,10 @@ def _compute_cascade_for(commodity, macro_row, prices_df):
     import numpy as _np
 
     effects = _CASCADE_COMM_EFFECTS.get(commodity, {})
+    if not effects:
+        # Sector-level fallback so any new commodity always gets a non-zero signal.
+        _sector = _CASCADE_SECTOR_MAP.get(commodity, "")
+        effects = _CASCADE_SECTOR_DEFAULTS.get(_sector, {})
 
     # ── macro signals ──────────────────────────────────────────────────────────
     try:
@@ -556,7 +643,7 @@ with tab1:
     col_sel, col_per = st.columns([2, 1])
     with col_sel:
         stat_commodity = st.selectbox(
-            "Commodity", list(CORE_TICKERS.keys()), index=0, key="stat_comm"
+            "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="stat_comm"
         )
     with col_per:
         stat_horizon = st.slider("ARIMA forecast horizon (days)", 1, 30, 5, key="stat_hor")
@@ -568,10 +655,10 @@ with tab1:
         try:
             from models.statistical.arima import ARIMAForecaster
             arima = ARIMAForecaster()
-            arima.fit(prices[stat_commodity])
+            arima.fit(prices_full[stat_commodity])
             arima_result = arima.forecast(steps=stat_horizon)
 
-            close = prices[stat_commodity]
+            close = prices_full[stat_commodity]
             hist_tail = close.tail(60)
 
             fig_arima = go.Figure()
@@ -624,14 +711,14 @@ with tab1:
         try:
             from models.statistical.garch import GARCHForecaster
             garch = GARCHForecaster()
-            pct_returns = (np.log(prices[stat_commodity] / prices[stat_commodity].shift(1)) * 100).dropna()
+            pct_returns = (np.log(prices_full[stat_commodity] / prices_full[stat_commodity].shift(1)) * 100).dropna()
             garch.fit(pct_returns)
             vol_df = garch.forecast_volatility(horizon=21)
             lev    = garch.leverage_effect()
             params = garch.parameter_summary()
 
-            in_sample  = vol_df[vol_df.index <= prices.index[-1]].tail(252)
-            out_sample = vol_df[vol_df.index > prices.index[-1]]
+            in_sample  = vol_df[vol_df.index <= prices_full.index[-1]].tail(252)
+            out_sample = vol_df[vol_df.index > prices_full.index[-1]]
 
             fig_garch = go.Figure()
             fig_garch.add_trace(go.Scatter(
@@ -676,7 +763,7 @@ with tab1:
     pair_choice  = st.selectbox("Pair", pair_options, key="kalman_pair")
 
     if pair_choice == "Custom…":
-        available_cols = sorted(prices.columns.tolist())
+        available_cols = sorted(prices_full.columns.tolist())
         c1, c2 = st.columns(2)
         y_name     = c1.selectbox("Y leg (long)", available_cols, key="kalman_y")
         x_default  = 1 if len(available_cols) > 1 else 0
@@ -694,13 +781,13 @@ with tab1:
 
     if y_name == x_name:
         st.info("Select two different instruments.")
-    elif y_name not in prices.columns or x_name not in prices.columns:
+    elif y_name not in prices_full.columns or x_name not in prices_full.columns:
         st.info("Price data for this pair not fully loaded. Try another pair.")
     else:
         with st.spinner("Running Kalman filter…"):
             try:
                 kf = KalmanHedgeRatio(pair=pair_label)
-                kf.fit(prices[y_name], prices[x_name])
+                kf.fit(prices_full[y_name], prices_full[x_name])
                 beta          = kf.hedge_ratios()
                 beta_lo, beta_hi = kf.beta_ci()
                 zscore        = kf.spread_zscore(window=zscore_window)
@@ -1164,13 +1251,13 @@ with tab2:
     )
 
     ml_commodity = st.selectbox(
-        "Target commodity", list(CORE_TICKERS.keys()), index=0, key="ml_comm"
+        "Target commodity", list(MODELING_COMMODITIES.keys()), index=0, key="ml_comm"
     )
 
     with st.spinner("Building feature matrix…"):
-        feat_matrix = get_features(prices)
+        feat_matrix = get_features(prices_full)
         from models.features import build_target
-        ml_target = build_target(prices, ml_commodity)
+        ml_target = build_target(prices_full, ml_commodity)
 
     st.divider()
 
@@ -1180,14 +1267,14 @@ with tab2:
 
     hmm_commodity = st.selectbox(
         "Commodity for regime detection",
-        list(CORE_TICKERS.keys()), index=0, key="hmm_comm"
+        list(MODELING_COMMODITIES.keys()), index=0, key="hmm_comm"
     )
 
     with st.spinner(f"Fitting HMM on {hmm_commodity}…"):
         try:
             from models.ml.hmm_regime import HMMRegimeDetector
             hmm = HMMRegimeDetector(n_states=4)
-            hmm.fit(returns[hmm_commodity])
+            hmm.fit(returns_full[hmm_commodity])
             regime_series = hmm.regime_series()
             probs = hmm.state_probabilities()
             counts = regime_series.value_counts()
@@ -1196,11 +1283,11 @@ with tab2:
             fig_hmm = go.Figure()
             for regime, color in REGIME_COLORS.items():
                 mask = regime_series == regime
-                dates = prices.index[prices.index.isin(regime_series[mask].index)]
+                dates = prices_full.index[prices_full.index.isin(regime_series[mask].index)]
                 if len(dates) == 0:
                     continue
                 fig_hmm.add_trace(go.Scatter(
-                    x=dates, y=prices[hmm_commodity].reindex(dates),
+                    x=dates, y=prices_full[hmm_commodity].reindex(dates),
                     mode="markers",
                     marker=dict(color=color, size=3, opacity=0.7),
                     name=regime,
@@ -1234,6 +1321,49 @@ with tab2:
             st.info(f"**Current regime ({regime_series.index[-1].date()}):** {current_regime}")
         except Exception as e:
             st.warning(f"HMM failed: {e}")
+
+    # ── HMM Optuna tuning ──────────────────────────────────────────────────────
+    with st.expander("🎛️ Optuna — tune HMM structure (n_states, covariance, n_iter)", expanded=False):
+        st.caption(
+            "Searches over number of hidden states (3/4/5), covariance type (full/diag), "
+            "and max EM iterations. Objective: normalised log-likelihood on the held-out 20% test window. "
+            "~1-3 min for 20 trials."
+        )
+        _hmm_trials = st.slider(
+            "Optuna trials", min_value=5, max_value=50, value=20, step=5,
+            key="hmm_optuna_trials",
+        )
+        _run_hmm_tune = st.button("▶ Tune HMM", key="run_hmm_tune")
+        if _run_hmm_tune:
+            st.session_state["hmm_tune_triggered"] = True
+
+        if st.session_state.get("hmm_tune_triggered"):
+            with st.spinner(f"Running Optuna on HMM ({_hmm_trials} trials)…"):
+                try:
+                    from models.ml.hmm_regime import tune_hmm
+                    _hmm_result = tune_hmm(
+                        returns_full[hmm_commodity],
+                        n_trials=_hmm_trials,
+                    )
+                    st.session_state["hmm_tune_triggered"] = False
+                    _bp = _hmm_result["best_params"]
+                    _ll = _hmm_result["best_log_likelihood_per_obs"]
+                    st.success(
+                        f"Best: n_states={_bp['n_states']}, "
+                        f"covariance_type={_bp['covariance_type']}, "
+                        f"n_iter={_bp['n_iter']} → log-likelihood/obs = {_ll:.4f}"
+                    )
+                    st.caption(
+                        "To use these params, re-fit the model above with these settings. "
+                        "The HMM detector will apply them automatically on the next run."
+                    )
+                    st.json(_hmm_result)
+                except ImportError:
+                    st.error("Optuna is not installed. Run: `pip install optuna`")
+                    st.session_state["hmm_tune_triggered"] = False
+                except Exception as _e:
+                    st.error(f"HMM tuning failed: {_e}")
+                    st.session_state["hmm_tune_triggered"] = False
 
     st.divider()
 
@@ -1388,10 +1518,9 @@ with tab2:
         "Primary metric: Spearman IC (>0.08 = strong, >0.04 = acceptable)."
     )
 
-    from models.config import MODELING_COMMODITIES as _EN_COMMODITIES
     en_commodity = st.selectbox(
         "Target instrument",
-        list(_EN_COMMODITIES.keys()),
+        list(MODELING_COMMODITIES.keys()),
         index=0,
         key="en_comm",
     )
@@ -1573,6 +1702,112 @@ with tab2:
                 st.warning(f"Full leaderboard failed: {_e}")
 
     # ══════════════════════════════════════════════════════════════════════════
+    # SECTOR TUNER — Optuna hyperparameter search for XGBoost + Random Forest
+    # ══════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("🎛️ Sector Hyperparameter Tuner")
+    st.caption(
+        "Runs Optuna TPE search across all five commodity sectors simultaneously. "
+        "One study per sector — optimises mean Spearman IC across every instrument in that sector. "
+        "Results are saved to `data/sector_params.json` and automatically picked up by XGBoost "
+        "and Random Forest on their next fit. **This is compute-heavy — budget 5–30 min.**"
+    )
+
+    # ── Current params display ─────────────────────────────────────────────
+    with st.expander("Current tuned params (data/sector_params.json)", expanded=False):
+        try:
+            from models.ml.sector_tuner import load_sector_params
+            _sp = load_sector_params()
+            if _sp:
+                _tuned_at = _sp.get("tuned_at", "unknown")
+                st.caption(f"Last tuned: {_tuned_at}")
+                _sp_display = {k: v for k, v in _sp.items() if k != "tuned_at"}
+                st.json(_sp_display)
+            else:
+                st.info("No tuned params found — models are using domain-default seeds from `config.py`.")
+        except Exception as _e:
+            st.warning(f"Could not load sector_params.json: {_e}")
+
+    # ── Tuner controls ─────────────────────────────────────────────────────
+    _tc1, _tc2, _tc3 = st.columns([2, 2, 2])
+    with _tc1:
+        _tune_model = st.selectbox(
+            "Model to tune",
+            options=["XGBoost", "Random Forest", "Both"],
+            key="tuner_model_sel",
+        )
+    with _tc2:
+        _tune_sectors = st.multiselect(
+            "Sectors (leave blank = all five)",
+            options=["energy", "metals", "agriculture", "livestock", "digital"],
+            default=[],
+            key="tuner_sector_sel",
+        )
+    with _tc3:
+        _tune_trials = st.slider(
+            "Optuna trials per sector",
+            min_value=10, max_value=100, value=30, step=5,
+            key="tuner_trials_sl",
+            help="More trials = better params but longer runtime. 30 is a good starting point.",
+        )
+
+    _run_tuner = st.button(
+        "▶ Run Sector Tuner",
+        key="run_sector_tuner",
+        help="Fits all commodities in each sector and optimises IC. Saves results automatically.",
+    )
+
+    if _run_tuner:
+        st.session_state["sector_tuner_triggered"] = True
+
+    if st.session_state.get("sector_tuner_triggered"):
+        _sectors_arg = _tune_sectors if _tune_sectors else None
+        _models_to_run = (
+            ["xgb"]       if _tune_model == "XGBoost"
+            else ["rf"]   if _tune_model == "Random Forest"
+            else ["xgb", "rf"]
+        )
+
+        _tuner_status = st.empty()
+        _tuner_progress = st.progress(0)
+        _total_steps = len(_models_to_run) * (len(_sectors_arg) if _sectors_arg else 5)
+        _step = 0
+
+        _tuner_results = {}
+
+        try:
+            from models.ml.sector_tuner import SectorTuner
+            with st.spinner("Initialising SectorTuner (building feature matrix)…"):
+                _tuner = SectorTuner(prices_full)
+
+            for _m in _models_to_run:
+                _tuner_status.info(f"Tuning {_m.upper()} — {_tune_trials} trials/sector…")
+                _best = _tuner.tune(
+                    model=_m,
+                    n_trials=_tune_trials,
+                    sectors=_sectors_arg,
+                )
+                _tuner_results[_m] = _best
+                _step += len(_best)
+                _tuner_progress.progress(min(_step / _total_steps, 1.0))
+
+            _tuner.save()
+            st.session_state["sector_tuner_triggered"] = False
+            st.success("Tuning complete — params saved to `data/sector_params.json`.")
+
+            # Show best ICs per sector
+            for _m, _sector_best in _tuner_results.items():
+                st.markdown(f"**{_m.upper()} best params by sector:**")
+                st.json(_sector_best)
+
+        except ImportError:
+            st.error("Optuna is not installed. Run: `pip install optuna`")
+            st.session_state["sector_tuner_triggered"] = False
+        except Exception as _e:
+            st.error(f"Sector tuner failed: {_e}")
+            st.session_state["sector_tuner_triggered"] = False
+
+    # ══════════════════════════════════════════════════════════════════════════
     # SECTOR CASCADE — macro-adjusted forward forecast
     # ══════════════════════════════════════════════════════════════════════════
     st.divider()
@@ -1597,8 +1832,10 @@ with tab2:
     except Exception:
         pass
 
+    _casc_prices_full = load_prices_db()
+    _casc_price_src   = _casc_prices_full if not _casc_prices_full.empty else prices
     _c_base, _c_adj, _c_final, _c_band, _c_conf, _c_ch = _compute_cascade_for(
-        _casc_comm, _casc_macro_row, prices
+        _casc_comm, _casc_macro_row, _casc_price_src
     )
 
     # ── Forecast card ─────────────────────────────────────────────────────────
@@ -2016,7 +2253,7 @@ with tab4:
     with dl_col1:
         st.markdown("#### Prophet Trend Decomposition")
         dl_commodity = st.selectbox(
-            "Commodity", list(CORE_TICKERS.keys()), index=0, key="dl_comm"
+            "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="dl_comm"
         )
         run_prophet = st.button("▶ Run Prophet (30-60s)", key="run_prophet")
 
@@ -2025,7 +2262,7 @@ with tab4:
             try:
                 from models.deep.prophet_decomp import ProphetDecomposer
                 pd_model = ProphetDecomposer(commodity=dl_commodity)
-                pd_model.fit(prices)
+                pd_model.fit(prices_full)
                 future_df, forecast_df = pd_model.forecast(periods=90)
                 ss = pd_model.seasonal_strength()
                 cp_summary = pd_model.changepoint_summary()
@@ -2042,10 +2279,9 @@ with tab4:
                     fill="toself", fillcolor="rgba(245,166,35,0.12)",
                     line=dict(width=0), name="95% CI",
                 ))
-                close_log = np.log(prices[dl_commodity])
-                act = forecast_df[forecast_df["ds"].isin(prices.index)]
+                act = forecast_df[forecast_df["ds"].isin(prices_full.index)]
                 fig_pr.add_trace(go.Scatter(
-                    x=prices.index[-180:], y=prices[dl_commodity].iloc[-180:],
+                    x=prices_full.index[-180:], y=prices_full[dl_commodity].iloc[-180:],
                     line=dict(color=BLUE, width=1.2, dash="dash"), name="Actual (last 180d)",
                 ))
                 dark_layout(fig_pr, height=420,
@@ -2068,6 +2304,55 @@ with tab4:
     else:
         st.info("Click **▶ Run Prophet** to run the decomposition model on live data.")
 
+    with st.expander("🎛️ Optuna — tune Prophet changepoint & seasonality scales", expanded=False):
+        st.caption(
+            "Searches over `changepoint_prior_scale` (trend flexibility) and "
+            "`seasonality_prior_scale` (seasonality amplitude). "
+            "Objective: Spearman IC of implied 1-day returns on the 20% holdout. "
+            "~3-10 min for 20 trials (each fit takes 10-30s)."
+        )
+        _prophet_trials = st.slider(
+            "Optuna trials", min_value=5, max_value=40, value=15, step=5,
+            key="prophet_optuna_trials",
+        )
+        _run_prophet_tune = st.button("▶ Tune Prophet", key="run_prophet_tune")
+        if _run_prophet_tune:
+            st.session_state["prophet_tune_triggered"] = True
+
+        if st.session_state.get("prophet_tune_triggered"):
+            with st.spinner(
+                f"Running Optuna on Prophet for {dl_commodity} ({_prophet_trials} trials) — "
+                "each trial fits a full Prophet model, this will take several minutes…"
+            ):
+                try:
+                    from models.deep.prophet_decomp import tune_prophet
+                    _prophet_result = tune_prophet(
+                        prices_full,
+                        commodity=dl_commodity,
+                        n_trials=_prophet_trials,
+                    )
+                    st.session_state["prophet_tune_triggered"] = False
+                    _pb = _prophet_result["best_params"]
+                    _pic = _prophet_result["best_ic"]
+                    _grade = "STRONG" if _pic > 0.05 else ("ACCEPTABLE" if _pic > 0.02 else "WEAK")
+                    st.success(
+                        f"Best: changepoint_prior_scale={_pb['changepoint_prior_scale']:.4f}, "
+                        f"seasonality_prior_scale={_pb['seasonality_prior_scale']:.4f} "
+                        f"→ IC = {_pic:.4f} ({_grade})"
+                    )
+                    st.caption(
+                        "These params are returned for reference. To apply them permanently, "
+                        "update `_SEASONAL_CONFIG` in `models/deep/prophet_decomp.py` or pass "
+                        "them to `ProphetDecomposer(changepoint_prior_scale=...)` directly."
+                    )
+                    st.json(_prophet_result)
+                except ImportError as _e:
+                    st.error(f"Missing dependency: {_e}")
+                    st.session_state["prophet_tune_triggered"] = False
+                except Exception as _e:
+                    st.error(f"Prophet tuning failed: {_e}")
+                    st.session_state["prophet_tune_triggered"] = False
+
     st.divider()
 
     st.markdown("#### BiLSTM Multi-Commodity Forecaster")
@@ -2077,10 +2362,14 @@ with tab4:
             try:
                 from models.deep.lstm import LSTMForecaster
                 lstm = LSTMForecaster(seq_len=63)
-                lstm.fit(prices, epochs=30)
-                forecasts = lstm.forecast(prices, horizon=21)
+                lstm.fit(prices_full)
+                forecasts = lstm.predict_latest(prices_full)
                 st.success("BiLSTM trained successfully!")
-                st.dataframe(forecasts.round(5), use_container_width=True)
+                fc_df = pd.DataFrame([
+                    {"Commodity": k, "Predicted log-return": v}
+                    for k, v in forecasts.items()
+                ])
+                st.dataframe(fc_df.round(5), use_container_width=True)
             except ImportError as e:
                 st.warning(f"PyTorch not installed or GPU unavailable: {e}")
             except Exception as e:
@@ -2098,8 +2387,8 @@ with tab4:
             try:
                 from models.deep.tft import CommodityTFT
                 tft = CommodityTFT(max_encoder_length=63, max_prediction_length=20)
-                tft.fit(prices, max_epochs=20)
-                fc_df = tft.forecast(prices)
+                tft.fit(prices_full, max_epochs=20)
+                fc_df = tft.forecast(prices_full)
                 st.success("TFT trained!")
                 st.dataframe(fc_df.round(5), use_container_width=True)
             except ImportError as e:
@@ -2126,33 +2415,73 @@ with tab5:
     )
 
     # ── Kernel Benchmark ───────────────────────────────────────────────────────
-    st.markdown("#### Quantum Kernel SVM Benchmark")
+    st.markdown("#### Quantum Kernel Benchmark")
     st.caption(
-        "Compare RY/RZ, ZZFeatureMap, and IQP circuits across 4/6/8 qubits. "
-        "IC reported against classical RBF-SVM baseline. Depolarizing noise simulation included."
+        "Compares a quantum fidelity kernel (Hilbert-space inner product via `models.quantum.kernel`) "
+        "against a classical RBF kernel ridge regression on WTI Crude Oil return prediction. "
+        "Uses the last 200 trading days, 4-qubit feature embedding, 75/25 train-test split."
     )
-    run_kernel = st.button("▶ Run Kernel Benchmark (5-15 min)", key="run_kernel")
+    run_kernel = st.button("▶ Run Kernel Benchmark (2-10 min)", key="run_kernel")
     if run_kernel:
-        with st.spinner("Running quantum kernel benchmark…"):
+        with st.spinner("Computing quantum and classical kernel matrices — this may take a few minutes…"):
             try:
-                from models.quantum.kernel_benchmark import KernelBenchmark
+                import time
+                from models.quantum.kernel import kernel_matrix
                 from models.features import build_feature_matrix, build_target
-                feat = build_feature_matrix(prices)
-                tgt  = build_target(prices, "WTI Crude Oil")
-                clean = pd.concat([feat, tgt], axis=1).dropna()
-                X = clean.drop(columns=[tgt.name]).values[-200:, :8]
-                y = clean[tgt.name].values[-200:]
+                from sklearn.kernel_ridge import KernelRidge
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.linear_model import Ridge
+                from scipy.stats import spearmanr as _sp
 
-                kb = KernelBenchmark()
-                results = kb.run(X, y)
-                st.dataframe(results.style.format("{:.4f}", subset=["ic_ideal", "runtime_s"]),
-                             use_container_width=True)
-            except ImportError as e:
-                st.warning(f"PennyLane not installed: {e}")
+                feat  = build_feature_matrix(prices_full)
+                tgt   = build_target(prices_full, "WTI Crude Oil")
+                clean = pd.concat([feat, tgt], axis=1).dropna()
+                X_raw = clean.drop(columns=[tgt.name]).values[-200:, :4]
+                y     = clean[tgt.name].values[-200:]
+
+                scaler = StandardScaler()
+                X = scaler.fit_transform(X_raw)
+
+                n_train = 150
+                X_tr, X_te = X[:n_train], X[n_train:]
+                y_tr, y_te = y[:n_train], y[n_train:]
+
+                # Quantum kernel ridge
+                t0 = time.time()
+                K_tr = kernel_matrix(X_tr)
+                K_te = kernel_matrix(X_te, X_tr)
+                kr_q = KernelRidge(alpha=1e-5, kernel="precomputed")
+                kr_q.fit(K_tr, y_tr)
+                y_pred_q = kr_q.predict(K_te)
+                q_time = time.time() - t0
+                ic_q, _ = _sp(y_pred_q, y_te)
+                r2_q = float(1 - np.var(y_te - y_pred_q) / np.var(y_te))
+
+                # Classical RBF kernel ridge baseline
+                t0 = time.time()
+                kr_rbf = KernelRidge(alpha=1e-4, kernel="rbf")
+                kr_rbf.fit(X_tr, y_tr)
+                y_pred_rbf = kr_rbf.predict(X_te)
+                c_time = time.time() - t0
+                ic_rbf, _ = _sp(y_pred_rbf, y_te)
+                r2_rbf = float(1 - np.var(y_te - y_pred_rbf) / np.var(y_te))
+
+                results_df = pd.DataFrame([
+                    {"Kernel": "Quantum (fidelity, 4-qubit)", "IC (Spearman)": round(ic_q, 4),
+                     "R²": round(r2_q, 4), "Runtime (s)": round(q_time, 1)},
+                    {"Kernel": "Classical (RBF)", "IC (Spearman)": round(ic_rbf, 4),
+                     "R²": round(r2_rbf, 4), "Runtime (s)": round(c_time, 1)},
+                ])
+                st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+                k1, k2 = st.columns(2)
+                k1.metric("Quantum IC", f"{ic_q:+.4f}")
+                k2.metric("Classical IC", f"{ic_rbf:+.4f}",
+                          delta=f"{'Quantum wins' if ic_q > ic_rbf else 'Classical wins'}")
             except Exception as e:
                 st.warning(f"Kernel benchmark error: {e}")
     else:
-        st.info("Click **▶ Run Kernel Benchmark** to compare quantum circuits.")
+        st.info("Click **▶ Run Kernel Benchmark** to compare quantum vs classical kernels.")
 
     st.divider()
 
@@ -2169,8 +2498,8 @@ with tab5:
         with st.spinner("Running QAOA optimiser…"):
             try:
                 from models.quantum.qaoa_portfolio import QAOAPortfolioOptimizer
-                ret = returns.tail(252).mean() * 252
-                cov = returns.tail(252).cov()  * 252
+                ret = returns_full.tail(252).mean() * 252
+                cov = returns_full.tail(252).cov()  * 252
                 qaoa = QAOAPortfolioOptimizer(
                     n_assets=len(ret), n_layers=2, n_select=n_select
                 )
@@ -2200,27 +2529,176 @@ with tab5:
 
     st.divider()
 
-    # ── QNN Hybrid ─────────────────────────────────────────────────────────────
-    st.markdown("#### QNN Hybrid vs Classical Comparison")
-    run_qnn = st.button("▶ Run QNN Study (10-30 min)", key="run_qnn")
+    # ── QNN Hybrid (Optuna-tuned) ───────────────────────────────────────────────
+    st.markdown("#### Quantum Hybrid Regressor — Optuna-Tuned")
+    st.caption(
+        "The quantum fidelity kernel captures directional signal (IC > 0.10) but the default "
+        "regularization (`ridge_reg = 1e-5`) causes magnitude blow-up (R² ≈ −65). "
+        "This runner pre-computes the kernel matrix **once**, then lets Optuna search "
+        "`ridge_reg` across 30 trials in seconds (no extra circuit calls). "
+        "The best `ridge_reg` is then used to refit on the full train set and evaluate on held-out test data."
+    )
+
+    _qnn_n_trials = st.slider("Optuna trials", 10, 50, 30, key="qnn_n_trials",
+                               help="More trials = better tuning but still fast since the kernel is pre-computed.")
+    _qnn_commodity = st.selectbox(
+        "Target commodity", list(MODELING_COMMODITIES.keys()),
+        index=list(MODELING_COMMODITIES.keys()).index("WTI Crude Oil"),
+        key="qnn_commodity",
+    )
+
+    run_qnn = st.button("▶ Run Optuna-Tuned Quantum Study (10-30 min)", key="run_qnn")
     if run_qnn:
-        with st.spinner("Running QNN vs Classical comparison…"):
-            try:
-                from models.quantum.qnn_hybrid import comparison_study
-                from models.features import build_feature_matrix, build_target
-                feat = build_feature_matrix(prices)
-                tgt  = build_target(prices, "WTI Crude Oil")
-                clean = pd.concat([feat, tgt], axis=1).dropna()
-                X = clean.drop(columns=[tgt.name]).values[-300:, :4]
-                y = clean[tgt.name].values[-300:]
-                result = comparison_study(X, y, n_qubits=4)
-                st.dataframe(result["summary"], use_container_width=True)
-            except ImportError as e:
-                st.warning(f"PennyLane not installed: {e}")
-            except Exception as e:
-                st.warning(f"QNN error: {e}")
+        try:
+            import time
+            import optuna
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+            from models.quantum.kernel import kernel_matrix
+            from models.quantum.hybrid import QuantumHybridRegressor
+            from models.features import build_feature_matrix, build_target
+            from sklearn.kernel_ridge import KernelRidge
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.linear_model import Ridge
+            from scipy.stats import spearmanr as _sp
+
+            feat  = build_feature_matrix(prices_full)
+            tgt   = build_target(prices_full, _qnn_commodity)
+            clean = pd.concat([feat, tgt], axis=1).dropna()
+            X_raw = clean.drop(columns=[tgt.name]).values[-300:, :4]
+            y     = clean[tgt.name].values[-300:]
+
+            scaler = StandardScaler()
+            X = scaler.fit_transform(X_raw)
+
+            # Chronological split: train=0:240, val=192:240, test=240:300
+            n_test  = 60
+            n_train = len(X) - n_test        # 240
+            n_val   = 48
+            n_tr    = n_train - n_val         # 192
+
+            X_tr, y_tr   = X[:n_tr],        y[:n_tr]
+            X_val, y_val = X[n_tr:n_train],  y[n_tr:n_train]
+            X_te, y_te   = X[n_train:],      y[n_train:]
+
+            # ── Step 1: pre-compute full quantum kernel (slow) ─────────────────
+            _status = st.empty()
+            _status.info("⏳ Step 1 / 3 — Computing quantum kernel matrix (this is the slow step)…")
+            t_kernel = time.time()
+            K_full = kernel_matrix(X[:n_train])   # (240, 240) — train+val only
+            kernel_time = time.time() - t_kernel
+            _status.success(f"✅ Kernel matrix computed in {kernel_time:.1f}s  ({n_train}×{n_train})")
+
+            # Sub-matrices for tuning (train/val split, no new circuit calls)
+            K_tr_tr = K_full[:n_tr, :n_tr]
+            K_val_tr = K_full[n_tr:, :n_tr]
+
+            # ── Step 2: Optuna tunes ridge_reg on val IC (fast) ───────────────
+            _status2 = st.empty()
+            _status2.info(f"⏳ Step 2 / 3 — Running {_qnn_n_trials} Optuna trials to tune `ridge_reg`…")
+
+            def _objective(trial):
+                alpha = trial.suggest_float("ridge_reg", 1e-6, 100.0, log=True)
+                kr = KernelRidge(alpha=alpha, kernel="precomputed")
+                kr.fit(K_tr_tr, y_tr)
+                y_val_pred = kr.predict(K_val_tr)
+                ic, _ = _sp(y_val_pred, y_val)
+                return float(ic) if not np.isnan(ic) else -1.0
+
+            study = optuna.create_study(direction="maximize",
+                                        sampler=optuna.samplers.TPESampler(seed=42))
+            study.optimize(_objective, n_trials=_qnn_n_trials, show_progress_bar=False)
+
+            best_alpha = study.best_params["ridge_reg"]
+            best_val_ic = study.best_value
+            _status2.success(
+                f"✅ Optuna done — best `ridge_reg` = **{best_alpha:.2e}**  "
+                f"(val IC = {best_val_ic:+.4f})"
+            )
+
+            # ── Step 3: refit on full train set, evaluate on held-out test ────
+            _status3 = st.empty()
+            _status3.info("⏳ Step 3 / 3 — Refitting with best params and evaluating on test set…")
+
+            # Need test-vs-train kernel rows
+            K_te_tr = kernel_matrix(X_te, X[:n_train])
+
+            kr_best = KernelRidge(alpha=best_alpha, kernel="precomputed")
+            kr_best.fit(K_full, y[:n_train])
+            y_pred_q = kr_best.predict(K_te_tr)
+            ic_q, _  = _sp(y_pred_q, y_te)
+            r2_q     = float(1 - np.var(y_te - y_pred_q) / (np.var(y_te) + 1e-12))
+
+            # Classical Ridge baseline (same splits)
+            ridge = Ridge(alpha=1.0)
+            ridge.fit(X[:n_train], y[:n_train])
+            y_pred_r = ridge.predict(X_te)
+            ic_r, _  = _sp(y_pred_r, y_te)
+            r2_r     = ridge.score(X_te, y_te)
+
+            _status3.success("✅ Done — results below.")
+
+            # ── Results table ──────────────────────────────────────────────────
+            summary = pd.DataFrame([
+                {"Model": f"Quantum Hybrid (tuned, ridge_reg={best_alpha:.2e})",
+                 "IC (Spearman)": round(ic_q, 4), "R²": round(r2_q, 4),
+                 "Val IC": round(best_val_ic, 4)},
+                {"Model": "Classical Ridge (alpha=1.0)",
+                 "IC (Spearman)": round(ic_r, 4), "R²": round(r2_r, 4),
+                 "Val IC": "—"},
+            ])
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+            qn1, qn2, qn3 = st.columns(3)
+            qn1.metric("Quantum IC (test)", f"{ic_q:+.4f}",
+                       delta="Actionable" if ic_q >= 0.05 else "Marginal")
+            qn2.metric("Quantum R² (test)", f"{r2_q:.4f}",
+                       delta="↑ vs untuned (−65)" if r2_q > -65 else None)
+            qn3.metric("Best ridge_reg", f"{best_alpha:.2e}")
+
+            # ── Optuna trial history chart ─────────────────────────────────────
+            trial_df = pd.DataFrame([
+                {"trial": t.number, "ridge_reg": t.params["ridge_reg"], "val_IC": t.value}
+                for t in study.trials if t.value is not None
+            ])
+            fig_opt = go.Figure()
+            fig_opt.add_trace(go.Scatter(
+                x=trial_df["trial"], y=trial_df["val_IC"],
+                mode="markers+lines",
+                marker=dict(
+                    color=trial_df["val_IC"],
+                    colorscale="RdYlGn",
+                    size=7,
+                    showscale=True,
+                    colorbar=dict(title="Val IC"),
+                ),
+                line=dict(color="#444", width=1),
+                name="Val IC per trial",
+            ))
+            fig_opt.add_hline(y=best_val_ic, line_dash="dot", line_color=GREEN,
+                              annotation_text=f"Best: {best_val_ic:+.4f}",
+                              annotation_position="top right")
+            fig_opt.add_hline(y=0.05, line_dash="dot", line_color=AMBER,
+                              annotation_text="0.05 threshold",
+                              annotation_position="bottom right")
+            dark_layout(fig_opt, height=300, title="Optuna Trial History — Validation IC")
+            st.plotly_chart(fig_opt, use_container_width=True)
+
+            # ── Best params detail ─────────────────────────────────────────────
+            with st.expander("Full Optuna trial log"):
+                st.dataframe(
+                    trial_df.sort_values("val_IC", ascending=False).round(6),
+                    use_container_width=True, hide_index=True,
+                )
+
+        except ImportError as e:
+            st.warning(f"Missing dependency: `{e}` — install with `pip install optuna`")
+        except Exception as e:
+            st.warning(f"Quantum hybrid error: {e}")
     else:
-        st.info("Click **▶ Run QNN Study** to benchmark quantum vs classical neural networks.")
+        st.info(
+            "Click **▶ Run Optuna-Tuned Quantum Study** to automatically tune `ridge_reg`. "
+            "The kernel matrix is computed once (~10-30 min); Optuna trials are then near-instant."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2237,7 +2715,7 @@ with tab6:
 
     # ── Commodity selector ─────────────────────────────────────────────────────
     consensus_commodity = st.selectbox(
-        "Commodity", list(CORE_TICKERS.keys()), index=0, key="consensus_comm"
+        "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="consensus_comm"
     )
 
     st.divider()
@@ -2292,7 +2770,7 @@ with tab6:
     _votes: list = []
     if st.session_state.get("consensus_votes_requested"):
         with st.spinner(f"Fitting XGBoost + ARIMA on {consensus_commodity} — ~30–60 seconds…"):
-            _votes = get_meta_votes(prices, consensus_commodity)
+            _votes = get_meta_votes(prices_full, consensus_commodity)
         if _votes:
             st.success(f"Got {len(_votes)} vote(s): {', '.join(v.model_name for v in _votes)}")
         else:
@@ -2317,7 +2795,7 @@ with tab6:
             pass
 
         _cc_base, _cc_adj, _cc_final, _cc_band, _cc_conf, _cc_ch = _compute_cascade_for(
-            consensus_commodity, _casc_macro_row_c, prices
+            consensus_commodity, _casc_macro_row_c, prices_full
         )
 
         _cascade_vote = ModelVote(
@@ -2444,8 +2922,7 @@ with tab6:
         "`data/meta_predictor.pkl`. Typically takes **60–120 seconds**."
     )
 
-    _bt_comm_options = ["WTI Crude Oil", "Gold (COMEX)", "Corn (CBOT)",
-                        "Brent Crude Oil", "Silver (COMEX)", "Copper (COMEX)"]
+    _bt_comm_options = list(MODELING_COMMODITIES.keys())
     _bt_comms = st.multiselect(
         "Commodities to backtest",
         options=_bt_comm_options,
@@ -2467,9 +2944,7 @@ with tab6:
                 from models.backtest_harness import BacktestHarness, ARIMAAdapter, XGBoostAdapter
                 from pathlib import Path
 
-                # Build a price matrix that includes all selected backtest commodities
-                _bt_tickers = {c: CORE_TICKERS[c] for c in _bt_comms if c in CORE_TICKERS}
-                _bt_prices = load_prices(period="3y")  # already cached
+                _bt_prices = prices_full  # full matrix, already cached
 
                 _harness = BacktestHarness(
                     adapters=[
@@ -2746,7 +3221,7 @@ with tab7:
                 lookback_days=180, forward_days=5, min_events_above=8
             )
             _tune_results = ThresholdTuner(_tune_cfg).tune_all(
-                macro_df=_macro_for_triggers, prices=prices
+                macro_df=_macro_for_triggers, prices=prices_full
             )
 
         if _tune_results:

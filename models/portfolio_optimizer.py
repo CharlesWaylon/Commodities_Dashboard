@@ -37,37 +37,117 @@ from models.quantum.qaoa_portfolio import (
 
 
 # ── Cascade coefficient tables ─────────────────────────────────────────────────
+#
+# SECTOR_DEFAULT_EFFECTS provides automatic fallback coefficients for any
+# commodity that belongs to a sector but isn't listed in COMM_EFFECTS.
+# This means adding a new commodity to MODELING_COMMODITIES / COMMODITY_SECTORS
+# automatically gives it a non-zero macro signal — no manual COMM_EFFECTS update
+# required (though per-commodity overrides below are always preferred).
+#
+SECTOR_DEFAULT_EFFECTS: Dict[str, Dict[str, float]] = {
+    "Energy":     {"real_yields": -0.10, "usd": -0.35, "risk_off": -0.30},
+    "Metals":     {"real_yields": -0.20, "usd": -0.20, "risk_off": -0.10},
+    "Grains":     {"real_yields":  0.00, "usd": -0.27, "risk_off": -0.20},
+    "Livestock":  {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.28},
+    "Digital":    {"real_yields": -0.30, "usd": -0.50, "risk_off": -0.70},
+}
 
 COMM_EFFECTS: Dict[str, Dict[str, float]] = {
+    # ── Energy ────────────────────────────────────────────────────────────────
     "WTI Crude Oil":           {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
     "Brent Crude Oil":         {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
-    "Natural Gas (Henry Hub)": {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
+    "Natural Gas":             {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
     "Gasoline (RBOB)":         {"real_yields": -0.15, "usd": -0.45, "risk_off": -0.35},
     "Heating Oil":             {"real_yields": -0.15, "usd": -0.45, "risk_off": -0.35},
+    "Carbon Credits*":         {"real_yields": -0.05, "usd": -0.15, "risk_off": -0.35},
+    "LNG / Intl Gas*":         {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
+    "Metallurgical Coal*":     {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.40},
+    "Thermal Coal*":           {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.25},
+    "Uranium*":                {"real_yields": -0.10, "usd": -0.15, "risk_off": -0.10},
+    # ── Metals ────────────────────────────────────────────────────────────────
     "Gold (COMEX)":            {"real_yields": -0.60, "usd":  0.30, "risk_off":  0.50},
     "Silver (COMEX)":          {"real_yields": -0.40, "usd": -0.10, "risk_off":  0.25},
     "Copper (COMEX)":          {"real_yields":  0.10, "usd": -0.30, "risk_off": -0.50},
+    "Platinum":                {"real_yields": -0.30, "usd": -0.20, "risk_off":  0.10},
+    "Palladium":               {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.30},
+    "Aluminum (COMEX)":        {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.45},
+    "HRC Steel":               {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.45},
+    "Gold (Physical/London)*": {"real_yields": -0.60, "usd":  0.30, "risk_off":  0.50},
+    "Silver (Physical)*":      {"real_yields": -0.40, "usd": -0.10, "risk_off":  0.25},
+    "Iron Ore / Steel*":       {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.45},
+    "Lithium*":                {"real_yields": -0.15, "usd": -0.30, "risk_off": -0.40},
+    "Rare Earths*":            {"real_yields": -0.10, "usd": -0.20, "risk_off": -0.30},
+    "Zinc & Cobalt*":          {"real_yields":  0.05, "usd": -0.30, "risk_off": -0.45},
+    # ── Agriculture ───────────────────────────────────────────────────────────
     "Corn (CBOT)":             {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
     "Wheat (CBOT SRW)":        {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
+    "Wheat (KC HRW)":          {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
     "Soybeans (CBOT)":         {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Soybean Meal":            {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Soybean Oil":             {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Coffee":                  {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.15},
+    "Cocoa":                   {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.15},
+    "Sugar":                   {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.20},
+    "Cotton":                  {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
+    "Orange Juice (FCOJ-A)":   {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.10},
+    "Oats (CBOT)":             {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
+    "Rough Rice (CBOT)":       {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.15},
+    "Lumber*":                 {"real_yields": -0.40, "usd": -0.20, "risk_off": -0.35},
+    # ── Livestock ─────────────────────────────────────────────────────────────
+    "Live Cattle":             {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.25},
     "Feeder Cattle":           {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
     "Lean Hogs":               {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
+    # ── Digital ───────────────────────────────────────────────────────────────
+    "Bitcoin":                 {"real_yields": -0.30, "usd": -0.50, "risk_off": -0.70},
 }
 
 SECTOR_MAP: Dict[str, str] = {
+    # ── Energy ────────────────────────────────────────────────────────────────
     "WTI Crude Oil":           "Energy",
     "Brent Crude Oil":         "Energy",
-    "Natural Gas (Henry Hub)": "Energy",
+    "Natural Gas":             "Energy",
     "Gasoline (RBOB)":         "Energy",
     "Heating Oil":             "Energy",
+    "Carbon Credits*":         "Energy",
+    "LNG / Intl Gas*":         "Energy",
+    "Metallurgical Coal*":     "Energy",
+    "Thermal Coal*":           "Energy",
+    "Uranium*":                "Energy",
+    # ── Metals ────────────────────────────────────────────────────────────────
     "Gold (COMEX)":            "Metals",
     "Silver (COMEX)":          "Metals",
     "Copper (COMEX)":          "Metals",
+    "Platinum":                "Metals",
+    "Palladium":               "Metals",
+    "Aluminum (COMEX)":        "Metals",
+    "HRC Steel":               "Metals",
+    "Gold (Physical/London)*": "Metals",
+    "Silver (Physical)*":      "Metals",
+    "Iron Ore / Steel*":       "Metals",
+    "Lithium*":                "Metals",
+    "Rare Earths*":            "Metals",
+    "Zinc & Cobalt*":          "Metals",
+    # ── Agriculture ───────────────────────────────────────────────────────────
     "Corn (CBOT)":             "Grains",
     "Wheat (CBOT SRW)":        "Grains",
+    "Wheat (KC HRW)":          "Grains",
     "Soybeans (CBOT)":         "Grains",
+    "Soybean Meal":            "Grains",
+    "Soybean Oil":             "Grains",
+    "Coffee":                  "Grains",
+    "Cocoa":                   "Grains",
+    "Sugar":                   "Grains",
+    "Cotton":                  "Grains",
+    "Orange Juice (FCOJ-A)":   "Grains",
+    "Oats (CBOT)":             "Grains",
+    "Rough Rice (CBOT)":       "Grains",
+    "Lumber*":                 "Grains",
+    # ── Livestock ─────────────────────────────────────────────────────────────
+    "Live Cattle":             "Livestock",
     "Feeder Cattle":           "Livestock",
     "Lean Hogs":               "Livestock",
+    # ── Digital ───────────────────────────────────────────────────────────────
+    "Bitcoin":                 "Digital",
 }
 
 
@@ -151,6 +231,11 @@ def compute_cascade_forecast(
     Compatible with _compute_cascade_for() in pages/4_Models.py.
     """
     effects = COMM_EFFECTS.get(commodity, {})
+    if not effects:
+        # Fallback: sector-level defaults so any newly-added commodity always
+        # produces a non-zero macro signal without a manual COMM_EFFECTS update.
+        sector = SECTOR_MAP.get(commodity, "")
+        effects = SECTOR_DEFAULT_EFFECTS.get(sector, {})
     ry, usd, ro = _macro_signals(macro_row)
 
     base_pct = 0.0

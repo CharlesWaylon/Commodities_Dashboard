@@ -9,7 +9,6 @@ the dashboard (from a script, notebook, or scheduler) without error.
 """
 
 import os
-import sqlite3
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -21,19 +20,15 @@ from models.config import (
     HISTORY_INTERVAL,
 )
 
-# Path to the dashboard's SQLite database
-_DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "data", "commodities.db",
-)
+from database.db import get_engine
+from sqlalchemy import text
 
 
 def load_price_matrix_from_db(
     commodities: Optional[dict] = None,
-    db_path: str = _DB_PATH,
 ) -> pd.DataFrame:
     """
-    Load daily closing prices from the local SQLite database.
+    Load daily closing prices from the local database.
 
     Faster than yfinance and covers all 41 instruments already ingested.
     Falls back to ``load_price_matrix`` (yfinance) for any ticker not found
@@ -47,7 +42,6 @@ def load_price_matrix_from_db(
     if commodities is None:
         commodities = MODELING_COMMODITIES
 
-    conn = sqlite3.connect(db_path)
     ticker_to_name = {v: k for k, v in commodities.items()}
 
     query = """
@@ -59,8 +53,11 @@ def load_price_matrix_from_db(
           AND ph.close IS NOT NULL
         ORDER BY ph.date
     """
-    raw = pd.read_sql(query, conn, parse_dates=["date"])
-    conn.close()
+    engine = get_engine()
+    with engine.connect() as _conn:
+        result = _conn.execute(text(query))
+        raw = pd.DataFrame(result.fetchall(), columns=result.keys())
+    raw["date"] = pd.to_datetime(raw["date"])
 
     # Keep only tickers we asked for
     raw = raw[raw["ticker"].isin(ticker_to_name)]

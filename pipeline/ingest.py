@@ -269,8 +269,18 @@ def run_ingestion(backfill: bool = False):
         run_roll_adjust()
         log.info("Roll adjustment complete.")
 
+        # Rebuild aligned_prices (calendar-aligned forward-filled table).
+        # Must run after roll_adjust so adjusted_close is current before alignment.
+        log.info("Aligning calendar (updating aligned_prices)...")
+        try:
+            from pipeline.align_calendar import run_alignment
+            run_alignment()
+            log.info("Calendar alignment complete.")
+        except Exception as exc:
+            log.warning("Calendar alignment failed (non-fatal): %s", exc)
+
         # Recompute 21-day rolling correlations and persist to correlation_snapshots.
-        # Must run after roll_adjust so aligned_prices is current.
+        # Must run after align_calendar so aligned_prices is current.
         log.info("Storing correlation snapshot...")
         try:
             from models.cross_asset import store_correlation_snapshot
