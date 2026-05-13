@@ -65,9 +65,9 @@ logger = logging.getLogger(__name__)
 
 SECTOR_PARAMS_PATH = Path(__file__).resolve().parents[2] / "data" / "sector_params.json"
 
-_EARLY_STOPPING = 30
-_VAL_FRACTION   = 0.15
-_N_CROSS        = 15        # keep same feature-selection logic as XGBoostForecaster
+_EARLY_STOPPING  = 30
+_VAL_FRACTION    = 0.15
+_N_CROSS_DEFAULT = 15       # default cross-feature count; tunable by Optuna for XGBoost
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -84,6 +84,7 @@ def _xgb_ic_for_commodity(
     feat_df: pd.DataFrame,
     commodity: str,
     target: pd.Series,
+    n_cross: int = _N_CROSS_DEFAULT,
 ) -> float:
     """Fit XGBoost with given params, return Spearman IC on the test split."""
     combined = pd.concat([feat_df, target], axis=1).dropna()
@@ -100,7 +101,7 @@ def _xgb_ic_for_commodity(
         .corrwith(y.iloc[:train_cut])
         .abs()
     )
-    top_cross = cross_corr.nlargest(_N_CROSS).index.tolist()
+    top_cross = cross_corr.nlargest(n_cross).index.tolist()
     X_df = X_df[own_cols + top_cross]
 
     split = int(len(X_df) * (1 - TEST_FRACTION))
@@ -130,16 +131,33 @@ def _xgb_ic_for_commodity(
 def _rf_ic_for_commodity(
     params: dict,
     feat_df: pd.DataFrame,
+    commodity: str,
     target: pd.Series,
+    n_cross: int = _N_CROSS_DEFAULT,
 ) -> float:
     """Fit Random Forest with given params, return Spearman IC on the test split."""
     combined = pd.concat([feat_df, target], axis=1).dropna()
-    X = combined.drop(columns=[target.name]).values
-    y = combined[target.name].values
+    X_df = combined.drop(columns=[target.name])
+    y    = combined[target.name]
 
-    split = int(len(X) * (1 - TEST_FRACTION))
-    X_tr, y_tr = X[:split], y[:split]
-    X_te, y_te = X[split:], y[split:]
+    # Mirror cross-feature selection from CommodityRF.fit()
+    own_prefix = f"{commodity}_"
+    own_cols   = [c for c in X_df.columns if c.startswith(own_prefix)]
+    cross_cols = [c for c in X_df.columns if not c.startswith(own_prefix)]
+    train_cut  = int(len(X_df) * (1 - TEST_FRACTION))
+    cross_corr = (
+        X_df[cross_cols].iloc[:train_cut]
+        .corrwith(y.iloc[:train_cut])
+        .abs()
+    )
+    top_cross = cross_corr.nlargest(n_cross).index.tolist()
+    X_df = X_df[own_cols + top_cross]
+
+    split = int(len(X_df) * (1 - TEST_FRACTION))
+    X_tr = X_df.iloc[:split].values
+    y_tr = y.iloc[:split].values
+    X_te = X_df.iloc[split:].values
+    y_te = y.iloc[split:].values
 
     scaler = StandardScaler()
     X_tr_sc = scaler.fit_transform(X_tr)
@@ -186,6 +204,7 @@ class SectorTuner:
         prices  = self.prices
 
         def objective(trial: optuna.Trial) -> float:
+            n_cross = trial.suggest_int("n_cross_features", 5, 30)
             params = dict(
                 n_estimators      = trial.suggest_int("n_estimators", 300, 1000),
                 learning_rate     = trial.suggest_float("learning_rate", 0.01, 0.10, log=True),
@@ -202,7 +221,7 @@ class SectorTuner:
                     continue
                 try:
                     target = build_target(prices, name)
-                    ic = _xgb_ic_for_commodity(params, feat_df, name, target)
+                    ic = _xgb_ic_for_commodity(params, feat_df, name, target, n_cross=n_cross)
                     ics.append(ic)
                 except Exception:
                     pass
@@ -217,11 +236,13 @@ class SectorTuner:
         prices  = self.prices
 
         def objective(trial: optuna.Trial) -> float:
+            n_cross = trial.suggest_int("n_cross_features", 5, 30)
             params = dict(
-                n_estimators     = trial.suggest_int("n_estimators", 100, 600),
-                max_depth        = trial.suggest_int("max_depth", 3, 10),
-                min_samples_leaf = trial.suggest_int("min_samples_leaf", 5, 30),
-                max_features     = trial.suggest_categorical("max_features", ["sqrt", "log2"]),
+                n_estimators      = trial.suggest_int("n_estimators", 100, 600),
+                max_depth         = trial.suggest_int("max_depth", 3, 10),
+                min_samples_leaf  = trial.suggest_int("min_samples_leaf", 5, 30),
+                min_samples_split = trial.suggest_int("min_samples_split", 2, 20),
+                max_features      = trial.suggest_categorical("max_features", ["sqrt", "log2"]),
             )
             ics = []
             for name in commodities:
@@ -229,7 +250,7 @@ class SectorTuner:
                     continue
                 try:
                     target = build_target(prices, name)
-                    ic = _rf_ic_for_commodity(params, feat_df, target)
+                    ic = _rf_ic_for_commodity(params, feat_df, name, target, n_cross=n_cross)
                     ics.append(ic)
                 except Exception:
                     pass

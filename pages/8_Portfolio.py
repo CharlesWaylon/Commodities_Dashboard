@@ -115,22 +115,63 @@ def _load_prices():
     return load_price_matrix_from_db()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _load_macro() -> pd.DataFrame:
-    """Load macro signals (dxy_zscore63, vix, tlt_mom21) from the DB trigger log."""
-    import sqlite3
-    import os
-    db_path = os.path.join(os.path.dirname(__file__), "..", "data", "commodities.db")
-    db_path = os.path.normpath(db_path)
+    """
+    Fetch DXY (UUP proxy), VIX (^VIX), and TLT from yfinance and compute
+    the three macro signals the cascade engine expects:
+      - dxy_zscore63 : 63-day rolling z-score of UUP (dollar-strength gauge)
+      - vix          : raw VIX close level
+      - tlt_mom21    : TLT 21-day % price momentum (bond trend proxy)
+
+    Returns a date-indexed DataFrame covering ~6 months of history so the
+    backtest section can align macro state to each rebalance date.
+    Returns an empty DataFrame on any failure so the page degrades gracefully.
+    """
     try:
-        with sqlite3.connect(db_path) as con:
-            # Try trigger_log table first (has macro columns populated by detector)
-            df = pd.read_sql_query(
-                "SELECT date, dxy_zscore, vix, tlt_mom21 FROM trigger_log ORDER BY date",
-                con, parse_dates=["date"]
-            )
-            df = df.set_index("date").rename(columns={"dxy_zscore": "dxy_zscore63"})
-            return df
+        import yfinance as yf
+
+        raw = yf.download(
+            ["UUP", "^VIX", "TLT"],
+            period="2y",
+            auto_adjust=True,
+            progress=False,
+        )
+        if raw.empty:
+            return pd.DataFrame()
+
+        # yfinance returns MultiIndex columns when >1 ticker: (field, ticker)
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw["Close"]
+        else:
+            close = raw[["Close"]].rename(columns={"Close": "UUP"})
+
+        dxy = close.get("UUP",  pd.Series(dtype=float)).dropna()
+        vix = close.get("^VIX", pd.Series(dtype=float)).dropna()
+        tlt = close.get("TLT",  pd.Series(dtype=float)).dropna()
+
+        idx = dxy.index.intersection(vix.index).intersection(tlt.index)
+        if idx.empty:
+            return pd.DataFrame()
+
+        dxy = dxy.reindex(idx)
+        vix = vix.reindex(idx)
+        tlt = tlt.reindex(idx)
+
+        roll_mean  = dxy.rolling(63).mean()
+        roll_std   = dxy.rolling(63).std().replace(0, np.nan)
+        dxy_z63    = (dxy - roll_mean) / roll_std
+
+        tlt_mom21  = tlt.pct_change(21) * 100
+
+        macro = pd.DataFrame({
+            "dxy_zscore63": dxy_z63,
+            "vix":          vix,
+            "tlt_mom21":    tlt_mom21,
+        }, index=idx).dropna()
+
+        return macro
+
     except Exception:
         return pd.DataFrame()
 
@@ -189,13 +230,13 @@ else:
         ),
     ))
     cell_px = max(18, min(40, 700 // n))
-    fig_heat.update_layout(
+    fig_heat.update_layout(**{
         **PLOTLY_LAYOUT,
-        height=max(420, n * cell_px + 80),
-        margin=dict(t=20, l=10, r=10, b=10),
-        xaxis=dict(tickfont=dict(size=10, color="#C0CDE0"), side="bottom"),
-        yaxis=dict(tickfont=dict(size=10, color="#C0CDE0"), autorange="reversed"),
-    )
+        "height": max(420, n * cell_px + 80),
+        "margin": dict(t=20, l=10, r=10, b=10),
+        "xaxis": dict(tickfont=dict(size=10, color="#C0CDE0"), side="bottom"),
+        "yaxis": dict(tickfont=dict(size=10, color="#C0CDE0"), autorange="reversed"),
+    })
     st.plotly_chart(fig_heat, use_container_width=True, config={"displayModeBar": False})
     st.caption(f"{n} × {n} matrix · {n} commodities tracked")
 
@@ -258,7 +299,7 @@ if proxy_fcast and not corr_mat.empty:
             return ""
 
         st.dataframe(
-            flags_df.style.applymap(_sev_color, subset=["Severity"]),
+            flags_df.style.map(_sev_color, subset=["Severity"]),
             use_container_width=True,
             hide_index=True,
             height=min(38 * len(flags_df) + 44, 420),
@@ -364,19 +405,19 @@ if "qaoa_result" in st.session_state:
             textposition="outside",
             textfont=dict(color="#E0E0E0", size=11),
         ))
-        fig_bar.update_layout(
+        fig_bar.update_layout(**{
             **PLOTLY_LAYOUT,
-            height=320,
-            margin=dict(t=20, l=10, r=10, b=60),
-            xaxis=dict(tickangle=-30, tickfont=dict(size=11, color="#C0CDE0")),
-            yaxis=dict(
+            "height": 320,
+            "margin": dict(t=20, l=10, r=10, b=60),
+            "xaxis": dict(tickangle=-30, tickfont=dict(size=11, color="#C0CDE0")),
+            "yaxis": dict(
                 tickformat=".0%",
                 tickfont=dict(color="#C0CDE0"),
                 gridcolor=GRID,
                 range=[0, max(alloc_df["weight"]) * 1.3],
             ),
-            showlegend=False,
-        )
+            "showlegend": False,
+        })
         st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar": False})
 
     # ── Weights table ─────────────────────────────────────────────────────────
@@ -401,18 +442,18 @@ if "qaoa_result" in st.session_state:
                 fill="tozeroy",
                 fillcolor="rgba(245,158,11,0.08)",
             ))
-            fig_conv.update_layout(
+            fig_conv.update_layout(**{
                 **PLOTLY_LAYOUT,
-                height=260,
-                margin=dict(t=10, l=10, r=10, b=40),
-                xaxis=dict(title="COBYLA iteration", tickfont=dict(color="#C0CDE0")),
-                yaxis=dict(
+                "height": 260,
+                "margin": dict(t=10, l=10, r=10, b=40),
+                "xaxis": dict(title="COBYLA iteration", tickfont=dict(color="#C0CDE0")),
+                "yaxis": dict(
                     title="⟨H_C⟩",
                     tickfont=dict(color="#C0CDE0"),
                     gridcolor=GRID,
                 ),
-                showlegend=False,
-            )
+                "showlegend": False,
+            })
             st.plotly_chart(
                 fig_conv, use_container_width=True, config={"displayModeBar": False}
             )
@@ -582,19 +623,19 @@ if "casc_result" in st.session_state:
             textposition="outside",
             textfont=dict(color="#E0E0E0", size=10),
         ))
-        _fig_casc.update_layout(
+        _fig_casc.update_layout(**{
             **PLOTLY_LAYOUT,
-            height=340,
-            margin=dict(t=20, l=10, r=10, b=70),
-            xaxis=dict(tickangle=-30, tickfont=dict(size=11, color="#C0CDE0")),
-            yaxis=dict(
+            "height": 340,
+            "margin": dict(t=20, l=10, r=10, b=70),
+            "xaxis": dict(tickangle=-30, tickfont=dict(size=11, color="#C0CDE0")),
+            "yaxis": dict(
                 tickformat=".0%",
                 tickfont=dict(color="#C0CDE0"),
                 gridcolor=GRID,
                 range=[0, max(_casc_alloc["weight"]) * 1.4],
             ),
-            showlegend=False,
-        )
+            "showlegend": False,
+        })
         st.plotly_chart(_fig_casc, use_container_width=True, config={"displayModeBar": False})
 
     with _cr_col:
@@ -632,13 +673,14 @@ if "casc_result" in st.session_state:
                 mode="lines", line=dict(color=TEAL, width=2),
                 fill="tozeroy", fillcolor="rgba(38,198,218,0.08)",
             ))
-            _fig_cc.update_layout(
-                **PLOTLY_LAYOUT, height=220,
-                margin=dict(t=10, l=10, r=10, b=40),
-                xaxis=dict(title="COBYLA iteration", tickfont=dict(color="#C0CDE0")),
-                yaxis=dict(title="⟨H_C⟩", tickfont=dict(color="#C0CDE0"), gridcolor=GRID),
-                showlegend=False,
-            )
+            _fig_cc.update_layout(**{
+                **PLOTLY_LAYOUT,
+                "height": 220,
+                "margin": dict(t=10, l=10, r=10, b=40),
+                "xaxis": dict(title="COBYLA iteration", tickfont=dict(color="#C0CDE0")),
+                "yaxis": dict(title="⟨H_C⟩", tickfont=dict(color="#C0CDE0"), gridcolor=GRID),
+                "showlegend": False,
+            })
             st.plotly_chart(_fig_cc, use_container_width=True, config={"displayModeBar": False})
 
 else:
@@ -737,18 +779,18 @@ if "bt_result" in st.session_state:
             ))
         _fig_bt.add_hline(y=1.0, line_dash="dot", line_color="#718096",
                           annotation_text="Starting value", annotation_position="right")
-        _fig_bt.update_layout(
+        _fig_bt.update_layout(**{
             **PLOTLY_LAYOUT,
-            height=380,
-            margin=dict(t=20, l=10, r=20, b=40),
-            xaxis=dict(title="Date", tickfont=dict(color="#C0CDE0")),
-            yaxis=dict(
+            "height": 380,
+            "margin": dict(t=20, l=10, r=20, b=40),
+            "xaxis": dict(title="Date", tickfont=dict(color="#C0CDE0")),
+            "yaxis": dict(
                 title="Cumulative return (log-scale)",
                 type="log",
                 tickfont=dict(color="#C0CDE0"),
                 gridcolor=GRID,
             ),
-        )
+        })
         _fig_bt.update_layout(legend=dict(
             orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
             font=dict(color="#E0E0E0"),
@@ -790,14 +832,14 @@ if "bt_result" in st.session_state:
                     nbinsx=30,
                     marker_color=_colors_bt.get(_s, "#A0AEC0"),
                 ))
-            _fig_dist.update_layout(
+            _fig_dist.update_layout(**{
                 **PLOTLY_LAYOUT,
-                barmode="overlay",
-                height=280,
-                margin=dict(t=20, l=10, r=10, b=40),
-                xaxis=dict(title="Period log-return (%)", tickfont=dict(color="#C0CDE0")),
-                yaxis=dict(title="Count", tickfont=dict(color="#C0CDE0"), gridcolor=GRID),
-            )
+                "barmode": "overlay",
+                "height": 280,
+                "margin": dict(t=20, l=10, r=10, b=40),
+                "xaxis": dict(title="Period log-return (%)", tickfont=dict(color="#C0CDE0")),
+                "yaxis": dict(title="Count", tickfont=dict(color="#C0CDE0"), gridcolor=GRID),
+            })
             _fig_dist.update_layout(legend=dict(font=dict(color="#E0E0E0")))
             st.plotly_chart(_fig_dist, use_container_width=True,
                             config={"displayModeBar": False})

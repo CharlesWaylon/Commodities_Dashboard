@@ -38,19 +38,18 @@ Entry points
 from __future__ import annotations
 
 import logging
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+from sqlalchemy import text
+from database.db import get_engine
+
 import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
-
-_ROOT      = Path(__file__).resolve().parent.parent
-DEFAULT_DB = _ROOT / "data" / "commodities.db"
 
 # Pearson correlation window — matches config.CORRELATION_WINDOW
 CORRELATION_WINDOW = 21
@@ -81,90 +80,22 @@ _SECTOR_MAP: Dict[str, str] = {
     "Bitcoin": "Digital Assets",
 }
 
-# ── Schema for correlation_snapshots (created here since this module owns it) ──
-
-_CORR_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS correlation_snapshots (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    date        TEXT NOT NULL,
-    commodity_a TEXT NOT NULL,
-    commodity_b TEXT NOT NULL,
-    correlation REAL NOT NULL,
-    window_days INTEGER NOT NULL DEFAULT 21,
-    UNIQUE(date, commodity_a, commodity_b)
-);
-CREATE INDEX IF NOT EXISTS idx_corr_date      ON correlation_snapshots(date);
-CREATE INDEX IF NOT EXISTS idx_corr_pair      ON correlation_snapshots(commodity_a, commodity_b);
-CREATE INDEX IF NOT EXISTS idx_corr_date_pair ON correlation_snapshots(date, commodity_a);
-"""
-
-_COV_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS covariance_snapshots (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    date        TEXT NOT NULL,
-    commodity_a TEXT NOT NULL,
-    commodity_b TEXT NOT NULL,
-    covariance  REAL NOT NULL,
-    window_days INTEGER NOT NULL DEFAULT 21,
-    annualized  INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(date, commodity_a, commodity_b)
-);
-CREATE INDEX IF NOT EXISTS idx_cov_date      ON covariance_snapshots(date);
-CREATE INDEX IF NOT EXISTS idx_cov_pair      ON covariance_snapshots(commodity_a, commodity_b);
-CREATE INDEX IF NOT EXISTS idx_cov_date_pair ON covariance_snapshots(date, commodity_a);
-"""
-
-_FORECAST_LOG_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS forecast_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    forecast_date   TEXT NOT NULL,
-    commodity       TEXT NOT NULL,
-    model_name      TEXT NOT NULL,
-    tier            TEXT NOT NULL,
-    regime          TEXT,
-    forecast_return REAL NOT NULL,
-    actual_return   REAL,
-    error           REAL,
-    confidence      REAL,
-    inserted_at     TEXT NOT NULL,
-    UNIQUE(forecast_date, commodity, model_name)
-);
-CREATE INDEX IF NOT EXISTS idx_fl_date      ON forecast_log(forecast_date);
-CREATE INDEX IF NOT EXISTS idx_fl_commodity ON forecast_log(commodity, forecast_date);
-CREATE INDEX IF NOT EXISTS idx_fl_model     ON forecast_log(model_name, forecast_date);
-CREATE INDEX IF NOT EXISTS idx_fl_regime    ON forecast_log(regime, forecast_date);
-"""
 
 
-# ── Internal helpers ───────────────────────────────────────────────────────────
-
-def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_CORR_SCHEMA_SQL)
-    conn.executescript(_COV_SCHEMA_SQL)
-    conn.executescript(_FORECAST_LOG_SCHEMA_SQL)
-    return conn
-
-
-def _load_aligned_prices(db_path: Optional[Union[str, Path]] = None) -> pd.DataFrame:
+def _load_aligned_prices() -> pd.DataFrame:
     """
     Read aligned_prices joined with commodity names.
     Returns a wide DataFrame: index=date, columns=commodity display names.
     """
-    p = Path(db_path) if db_path else DEFAULT_DB
-    conn = sqlite3.connect(str(p))
-    raw = pd.read_sql_query(
-        """
+    sql = text("""
         SELECT ap.date, c.name, ap.adjusted_close
         FROM   aligned_prices ap
         JOIN   commodities    c  ON c.id = ap.commodity_id
         ORDER  BY ap.date
-        """,
-        conn,
-    )
-    conn.close()
+    """)
+    with get_engine().connect() as _conn:
+        result = _conn.execute(sql)
+        raw = pd.DataFrame(result.fetchall(), columns=result.keys())
     if raw.empty:
         return pd.DataFrame()
     wide = raw.pivot(index="date", columns="name", values="adjusted_close")
@@ -224,7 +155,6 @@ def compute_rolling_correlations(
 
 
 def store_correlation_snapshot(
-    db_path: Optional[Union[str, Path]] = None,
     prices_df: Optional[pd.DataFrame] = None,
     snapshot_date: Optional[date] = None,
     window: int = CORRELATION_WINDOW,
@@ -239,7 +169,7 @@ def store_correlation_snapshot(
     Returns the number of rows inserted.
     """
     if prices_df is None:
-        prices_df = _load_aligned_prices(db_path)
+        prices_df = _load_aligned_prices()
 
     corr_df = compute_rolling_correlations(prices_df, window=window)
     if corr_df.empty:
@@ -250,34 +180,33 @@ def store_correlation_snapshot(
         corr_df = corr_df[corr_df["date"] == snapshot_date]
 
     rows = [
-        (
-            str(r["date"]),
-            r["commodity_a"],
-            r["commodity_b"],
-            r["correlation"],
-            r["window_days"],
-        )
+        {
+            "date":        str(r["date"]),
+            "commodity_a": r["commodity_a"],
+            "commodity_b": r["commodity_b"],
+            "correlation": r["correlation"],
+            "window_days": r["window_days"],
+        }
         for _, r in corr_df.iterrows()
     ]
 
-    conn = _connect(db_path)
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO correlation_snapshots
+    sql = text("""
+        INSERT INTO correlation_snapshots
             (date, commodity_a, commodity_b, correlation, window_days)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    conn.commit()
-    conn.close()
+        VALUES (:date, :commodity_a, :commodity_b, :correlation, :window_days)
+        ON CONFLICT (date, commodity_a, commodity_b) DO UPDATE SET
+            correlation = EXCLUDED.correlation,
+            window_days = EXCLUDED.window_days
+    """)
+    with get_engine().connect() as conn:
+        conn.execute(sql, rows)
+        conn.commit()
     log.info("Stored %d correlation pairs for %s", len(rows),
              corr_df["date"].iloc[0] if not corr_df.empty else "unknown")
     return len(rows)
 
 
 def load_correlation_matrix(
-    db_path: Optional[Union[str, Path]] = None,
     as_of: Optional[date] = None,
 ) -> pd.DataFrame:
     """
@@ -292,26 +221,20 @@ def load_correlation_matrix(
     pd.DataFrame (commodity × commodity), symmetric, diagonal = 1.0.
     Empty DataFrame if no snapshots exist yet.
     """
-    conn = _connect(db_path)
+    engine = get_engine()
     if as_of is not None:
-        rows = pd.read_sql_query(
-            """
-            SELECT commodity_a, commodity_b, correlation
-            FROM   correlation_snapshots
-            WHERE  date = ?
-            """,
-            conn, params=[str(as_of)],
-        )
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT commodity_a, commodity_b, correlation FROM correlation_snapshots WHERE date = :d"),
+                {"d": str(as_of)},
+            )
+            rows = pd.DataFrame(result.fetchall(), columns=result.keys())
     else:
-        rows = pd.read_sql_query(
-            """
-            SELECT commodity_a, commodity_b, correlation
-            FROM   correlation_snapshots
-            WHERE  date = (SELECT MAX(date) FROM correlation_snapshots)
-            """,
-            conn,
-        )
-    conn.close()
+        with engine.connect() as conn:
+            result = conn.execute(text(
+                "SELECT commodity_a, commodity_b, correlation FROM correlation_snapshots WHERE date = (SELECT MAX(date) FROM correlation_snapshots)"
+            ))
+            rows = pd.DataFrame(result.fetchall(), columns=result.keys())
 
     if rows.empty:
         return pd.DataFrame()
@@ -386,7 +309,6 @@ def compute_rolling_covariance(
 
 
 def store_covariance_snapshot(
-    db_path: Optional[Union[str, Path]] = None,
     prices_df: Optional[pd.DataFrame] = None,
     snapshot_date: Optional[date] = None,
     window: int = CORRELATION_WINDOW,
@@ -400,7 +322,7 @@ def store_covariance_snapshot(
     Returns the number of rows inserted.
     """
     if prices_df is None:
-        prices_df = _load_aligned_prices(db_path)
+        prices_df = _load_aligned_prices()
 
     cov_df = compute_rolling_covariance(prices_df, window=window, annualize=annualize)
     if cov_df.empty:
@@ -411,28 +333,29 @@ def store_covariance_snapshot(
         cov_df = cov_df[cov_df["date"] == snapshot_date]
 
     rows = [
-        (
-            str(r["date"]),
-            r["commodity_a"],
-            r["commodity_b"],
-            r["covariance"],
-            r["window_days"],
-            r["annualized"],
-        )
+        {
+            "date":        str(r["date"]),
+            "commodity_a": r["commodity_a"],
+            "commodity_b": r["commodity_b"],
+            "covariance":  r["covariance"],
+            "window_days": r["window_days"],
+            "annualized":  r["annualized"],
+        }
         for _, r in cov_df.iterrows()
     ]
 
-    conn = _connect(db_path)
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO covariance_snapshots
+    sql = text("""
+        INSERT INTO covariance_snapshots
             (date, commodity_a, commodity_b, covariance, window_days, annualized)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    conn.commit()
-    conn.close()
+        VALUES (:date, :commodity_a, :commodity_b, :covariance, :window_days, :annualized)
+        ON CONFLICT (date, commodity_a, commodity_b) DO UPDATE SET
+            covariance  = EXCLUDED.covariance,
+            window_days = EXCLUDED.window_days,
+            annualized  = EXCLUDED.annualized
+    """)
+    with get_engine().connect() as conn:
+        conn.execute(sql, rows)
+        conn.commit()
     log.info(
         "Stored %d covariance entries for %s (annualized=%s)",
         len(rows),
@@ -443,7 +366,6 @@ def store_covariance_snapshot(
 
 
 def load_covariance_matrix(
-    db_path: Optional[Union[str, Path]] = None,
     as_of: Optional[date] = None,
     annualized: bool = True,
 ) -> pd.DataFrame:
@@ -463,30 +385,28 @@ def load_covariance_matrix(
     pd.DataFrame (commodity × commodity), symmetric.
     Empty DataFrame if no snapshots exist yet.
     """
-    conn = _connect(db_path)
     ann_flag = int(annualized)
+    engine = get_engine()
 
     if as_of is not None:
-        rows = pd.read_sql_query(
-            """
-            SELECT commodity_a, commodity_b, covariance
-            FROM   covariance_snapshots
-            WHERE  date = ? AND annualized = ?
-            """,
-            conn, params=[str(as_of), ann_flag],
-        )
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT commodity_a, commodity_b, covariance FROM covariance_snapshots WHERE date = :d AND annualized = :a"),
+                {"d": str(as_of), "a": ann_flag},
+            )
+            rows = pd.DataFrame(result.fetchall(), columns=result.keys())
     else:
-        rows = pd.read_sql_query(
-            """
-            SELECT commodity_a, commodity_b, covariance
-            FROM   covariance_snapshots
-            WHERE  date      = (SELECT MAX(date) FROM covariance_snapshots
-                                WHERE annualized = ?)
-              AND  annualized = ?
-            """,
-            conn, params=[ann_flag, ann_flag],
-        )
-    conn.close()
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("""
+                    SELECT commodity_a, commodity_b, covariance
+                    FROM   covariance_snapshots
+                    WHERE  date = (SELECT MAX(date) FROM covariance_snapshots WHERE annualized = :a)
+                      AND  annualized = :a
+                """),
+                {"a": ann_flag},
+            )
+            rows = pd.DataFrame(result.fetchall(), columns=result.keys())
 
     if rows.empty:
         return pd.DataFrame()
@@ -561,7 +481,6 @@ class RelativeICResult:
 
 
 def relative_ic_comparison(
-    db_path: Optional[Union[str, Path]] = None,
     days: int = 90,
     min_correlation: float = 0.60,
     min_obs: int = 20,
@@ -585,26 +504,26 @@ def relative_ic_comparison(
     Sorted by abs(relative_pct) DESC.  Empty DataFrame if insufficient data.
     """
     # 1. Load latest correlation matrix
-    corr_mat = load_correlation_matrix(db_path)
+    corr_mat = load_correlation_matrix()
     if corr_mat.empty:
         log.info("relative_ic_comparison: no correlation snapshots yet")
         return pd.DataFrame()
 
     # 2. Load IC scores
-    conn = _connect(db_path)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    ic_raw = pd.read_sql_query(
-        """
-        SELECT commodity, tier, regime,
-               AVG(ic_value) AS ic_value,
-               SUM(n_obs)    AS n_obs
-        FROM   ic_log
-        WHERE  computed_at >= ?
-        GROUP  BY commodity, tier, regime
-        """,
-        conn, params=[cutoff],
-    )
-    conn.close()
+    with get_engine().connect() as conn:
+        result = conn.execute(
+            text("""
+                SELECT commodity, tier, regime,
+                       AVG(ic_value) AS ic_value,
+                       SUM(n_obs)    AS n_obs
+                FROM   ic_log
+                WHERE  computed_at >= :cutoff
+                GROUP  BY commodity, tier, regime
+            """),
+            {"cutoff": cutoff},
+        )
+        ic_raw = pd.DataFrame(result.fetchall(), columns=result.keys())
 
     if ic_raw.empty:
         return pd.DataFrame()
@@ -679,7 +598,6 @@ def apply_cross_asset_prior(
     forecasts: Dict[str, float],
     corr_matrix: pd.DataFrame,
     ic_df: Optional[pd.DataFrame] = None,
-    db_path: Optional[Union[str, Path]] = None,
     min_correlation: float = 0.70,
     prior_weight: float = 0.20,
 ) -> Dict[str, float]:
@@ -711,7 +629,7 @@ def apply_cross_asset_prior(
         return forecasts
 
     if ic_df is None or ic_df.empty:
-        ic_df = relative_ic_comparison(db_path=db_path)
+        ic_df = relative_ic_comparison()
 
     adjusted = dict(forecasts)
 
@@ -773,7 +691,6 @@ class ConsistencyFlag:
 def check_forecast_consistency(
     forecasts: Dict[str, float],
     corr_matrix: Optional[pd.DataFrame] = None,
-    db_path: Optional[Union[str, Path]] = None,
     min_correlation: float = 0.70,
     max_magnitude_ratio: float = 3.0,
 ) -> List[ConsistencyFlag]:
@@ -799,7 +716,7 @@ def check_forecast_consistency(
     Empty list if no inconsistencies found.
     """
     if corr_matrix is None or corr_matrix.empty:
-        corr_matrix = load_correlation_matrix(db_path)
+        corr_matrix = load_correlation_matrix()
 
     if corr_matrix.empty or not forecasts:
         return []
@@ -871,7 +788,6 @@ def check_forecast_consistency(
 def log_forecasts(
     forecasts: Dict[str, Dict],
     forecast_date: Optional[date] = None,
-    db_path: Optional[Union[str, Path]] = None,
 ) -> int:
     """
     Persist today's forecasts to forecast_log for future IC analysis.
@@ -888,31 +804,34 @@ def log_forecasts(
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = []
     for commodity, info in forecasts.items():
-        rows.append((
-            str(fd),
-            commodity,
-            info.get("model_name", ""),
-            info.get("tier", ""),
-            info.get("regime") or None,
-            info["forecast_return"],
-            None,    # actual_return — filled next day
-            None,    # error — filled next day
-            info.get("confidence") or None,
-            now_iso,
-        ))
+        rows.append({
+            "forecast_date":   str(fd),
+            "commodity":       commodity,
+            "model_name":      info.get("model_name", ""),
+            "tier":            info.get("tier", ""),
+            "regime":          info.get("regime") or None,
+            "forecast_return": info["forecast_return"],
+            "actual_return":   None,
+            "error":           None,
+            "confidence":      info.get("confidence") or None,
+            "inserted_at":     now_iso,
+        })
 
-    conn = _connect(db_path)
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO forecast_log
+    sql = text("""
+        INSERT INTO forecast_log
             (forecast_date, commodity, model_name, tier, regime,
              forecast_return, actual_return, error, confidence, inserted_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    conn.commit()
-    conn.close()
+        VALUES (:forecast_date, :commodity, :model_name, :tier, :regime,
+                :forecast_return, :actual_return, :error, :confidence, :inserted_at)
+        ON CONFLICT (forecast_date, commodity, model_name) DO UPDATE SET
+            forecast_return = EXCLUDED.forecast_return,
+            regime          = EXCLUDED.regime,
+            confidence      = EXCLUDED.confidence,
+            inserted_at     = EXCLUDED.inserted_at
+    """)
+    with get_engine().connect() as conn:
+        conn.execute(sql, rows)
+        conn.commit()
     log.info("Logged %d forecasts for %s", len(rows), fd)
     return len(rows)
 
@@ -920,7 +839,6 @@ def log_forecasts(
 def realize_forecasts(
     actuals: Dict[str, float],
     forecast_date: Optional[date] = None,
-    db_path: Optional[Union[str, Path]] = None,
 ) -> int:
     """
     Back-fill actual_return and error for the previous day's forecasts.
@@ -937,28 +855,24 @@ def realize_forecasts(
     if forecast_date is None:
         forecast_date = (datetime.now(timezone.utc).date() - timedelta(days=1))
 
-    conn = _connect(db_path)
     updated = 0
-    for commodity, actual in actuals.items():
-        cursor = conn.execute(
-            """
-            UPDATE forecast_log
-            SET    actual_return = ?,
-                   error         = ABS(forecast_return - ?)
-            WHERE  forecast_date = ? AND commodity = ?
-              AND  actual_return IS NULL
-            """,
-            (actual, actual, str(forecast_date), commodity),
-        )
-        updated += cursor.rowcount
-    conn.commit()
-    conn.close()
+    sql = text("""
+        UPDATE forecast_log
+        SET    actual_return = :actual,
+               error         = ABS(forecast_return - :actual)
+        WHERE  forecast_date = :fd AND commodity = :commodity
+          AND  actual_return IS NULL
+    """)
+    with get_engine().connect() as conn:
+        for commodity, actual in actuals.items():
+            result = conn.execute(sql, {"actual": actual, "fd": str(forecast_date), "commodity": commodity})
+            updated += result.rowcount
+        conn.commit()
     log.info("Realized %d forecast rows for %s", updated, forecast_date)
     return updated
 
 
 def regime_ic_table(
-    db_path: Optional[Union[str, Path]] = None,
     days: int = 180,
     min_obs: int = 10,
 ) -> pd.DataFrame:
@@ -975,21 +889,19 @@ def regime_ic_table(
     Sorted by commodity, model_name, regime.
     Empty DataFrame if insufficient realized forecasts exist.
     """
-    conn = _connect(db_path)
-    cutoff = str(
-        datetime.now(timezone.utc).date() - timedelta(days=days)
-    )
-    rows = pd.read_sql_query(
-        """
-        SELECT commodity, model_name, tier, regime,
-               forecast_return, actual_return
-        FROM   forecast_log
-        WHERE  forecast_date >= ?
-          AND  actual_return IS NOT NULL
-        """,
-        conn, params=[cutoff],
-    )
-    conn.close()
+    cutoff = str(datetime.now(timezone.utc).date() - timedelta(days=days))
+    with get_engine().connect() as conn:
+        result = conn.execute(
+            text("""
+                SELECT commodity, model_name, tier, regime,
+                       forecast_return, actual_return
+                FROM   forecast_log
+                WHERE  forecast_date >= :cutoff
+                  AND  actual_return IS NOT NULL
+            """),
+            {"cutoff": cutoff},
+        )
+        rows = pd.DataFrame(result.fetchall(), columns=result.keys())
 
     if rows.empty:
         return pd.DataFrame()

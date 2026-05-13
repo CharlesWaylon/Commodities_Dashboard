@@ -57,7 +57,7 @@ SCHEMA DESIGN:
 
 from sqlalchemy import (
     Column, Integer, String, Float, BigInteger, Boolean,
-    Date, DateTime, UniqueConstraint, ForeignKey, Index
+    Date, DateTime, UniqueConstraint, ForeignKey, Index, Text
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 from datetime import datetime, timezone
@@ -376,3 +376,245 @@ class IngestionLog(Base):
 
     def __repr__(self):
         return f"<IngestionLog {self.ticker} {self.status} @ {self.started_at}>"
+
+
+class TriggerEvent(Base):
+    """
+    One row per (family, trigger_date). Dedup key is UNIQUE(family, trigger_date).
+    Re-firing the same trigger on the same day overwrites the prior row.
+    Written by models/trigger_log.py.
+    """
+    __tablename__ = "trigger_events"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    detected_at          = Column(String(50),  nullable=False)   # ISO 8601 timestamp
+    trigger_date         = Column(String(10),  nullable=False)   # YYYY-MM-DD
+    family               = Column(String(100), nullable=False)   # trigger family name
+    strength             = Column(Float,       nullable=False)   # [0, 1]
+    rationale            = Column(Text,        nullable=True)
+    affected_commodities = Column(Text,        nullable=True)    # JSON array
+    trigger_metadata     = Column("metadata", Text, nullable=True)  # JSON object (col name: metadata)
+    inserted_at          = Column(String(50),  nullable=False)   # UTC ISO 8601
+
+    __table_args__ = (
+        UniqueConstraint("family", "trigger_date", name="uq_trigger_family_date"),
+        Index("ix_trigger_events_family_date", "family", "trigger_date"),
+    )
+
+    def __repr__(self):
+        return f"<TriggerEvent {self.family} {self.trigger_date} strength={self.strength}>"
+
+
+class ICLog(Base):
+    """
+    Spearman IC (Information Coefficient) per (commodity, tier) per run.
+    UNIQUE(computed_at, commodity, tier) — one row per computation timestamp.
+    Written by models/ic_tracker.py.
+    """
+    __tablename__ = "ic_log"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    computed_at  = Column(String(50),  nullable=False)   # UTC ISO timestamp
+    commodity    = Column(String(100), nullable=False)
+    tier         = Column(String(50),  nullable=False)   # "ml", "statistical", "deep", "quantum"
+    ic_value     = Column(Float,       nullable=False)   # Spearman ∈ [−1, +1]
+    n_obs        = Column(Integer,     nullable=False)
+    window_start = Column(String(10),  nullable=True)    # YYYY-MM-DD
+    window_end   = Column(String(10),  nullable=True)    # YYYY-MM-DD
+    regime       = Column(String(30),  nullable=True)    # "bull", "bear", etc.
+    inserted_at  = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("computed_at", "commodity", "tier", name="uq_ic_log_computed_commodity_tier"),
+        Index("ix_ic_log_tier_date",  "tier",      "computed_at"),
+        Index("ix_ic_log_commodity",  "commodity", "computed_at"),
+        Index("ix_ic_log_regime",     "regime",    "computed_at"),
+    )
+
+    def __repr__(self):
+        return f"<ICLog {self.commodity} {self.tier} ic={self.ic_value:.4f} @ {self.computed_at[:10]}>"
+
+
+class ModelTrainingLog(Base):
+    """
+    Append-only audit trail — one row per daily_retrain run.
+    No UNIQUE constraint (every run appends a new row).
+    Written by models/daily_retrain.py.
+    """
+    __tablename__ = "model_training_log"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    retrained_at      = Column(String(50),  nullable=False)
+    n_commodities     = Column(Integer,     nullable=False)
+    n_training_pairs  = Column(Integer,     nullable=False)
+    tier_distribution = Column(Text,        nullable=True)   # JSON {tier: count}
+    tree_n_leaves     = Column(Integer,     nullable=True)
+    top_feature       = Column(String(100), nullable=True)
+    save_path         = Column(String(500), nullable=True)
+    error             = Column(Text,        nullable=True)
+    config_json       = Column(Text,        nullable=True)
+    inserted_at       = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        Index("ix_training_log_retrained_at", "retrained_at"),
+    )
+
+    def __repr__(self):
+        return f"<ModelTrainingLog {self.retrained_at[:10]} n_pairs={self.n_training_pairs}>"
+
+
+class ThresholdConfig(Base):
+    """
+    Append-only threshold tuning results — one row per (family, run).
+    No UNIQUE constraint; load_optimal_thresholds() queries MAX(evaluated_at) per family.
+    Written by models/threshold_tuner.py.
+    """
+    __tablename__ = "threshold_config"
+
+    id                    = Column(Integer, primary_key=True, autoincrement=True)
+    family                = Column(String(100), nullable=False)
+    optimal_threshold     = Column(Float,       nullable=False)
+    best_ic               = Column(Float,       nullable=True)
+    continuous_ic         = Column(Float,       nullable=True)
+    n_events_total        = Column(Integer,     nullable=True)
+    n_events_at_threshold = Column(Integer,     nullable=True)
+    lookback_days         = Column(Integer,     nullable=True)
+    forward_days          = Column(Integer,     nullable=True)
+    grid_results          = Column(Text,        nullable=True)   # JSON {threshold: ic}
+    evaluated_at          = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        Index("ix_threshold_config_family", "family", "evaluated_at"),
+    )
+
+    def __repr__(self):
+        return f"<ThresholdConfig {self.family} opt={self.optimal_threshold} @ {self.evaluated_at[:10]}>"
+
+
+class CascadeValidationLog(Base):
+    """
+    Per-sector detail rows from cascade validation runs.
+    UNIQUE(run_at, shock_date, shock_family, sector).
+    Written by models/cascade_validator.py.
+    """
+    __tablename__ = "cascade_validation_log"
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    run_at           = Column(String(50),  nullable=False)
+    shock_date       = Column(String(10),  nullable=False)
+    shock_family     = Column(String(100), nullable=False)
+    shock_strength   = Column(Float,       nullable=False)
+    sector           = Column(String(50),  nullable=False)
+    cascade_fcast    = Column(Float,       nullable=True)
+    baseline_fcast   = Column(Float,       nullable=True)
+    actual_5d        = Column(Float,       nullable=True)
+    actual_10d       = Column(Float,       nullable=True)
+    cascade_correct  = Column(Integer,     nullable=True)   # 0 or 1
+    baseline_correct = Column(Integer,     nullable=True)   # 0 or 1
+    mae_cascade      = Column(Float,       nullable=True)
+    mae_baseline     = Column(Float,       nullable=True)
+    lift             = Column(Float,       nullable=True)
+    lag_confirmed    = Column(Integer,     nullable=True)   # 0 or 1
+    inserted_at      = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("run_at", "shock_date", "shock_family", "sector",
+                         name="uq_cvl_run_shock_sector"),
+        Index("ix_cvl_run_at", "run_at"),
+        Index("ix_cvl_shock",  "shock_date", "shock_family"),
+        Index("ix_cvl_sector", "sector",     "run_at"),
+    )
+
+    def __repr__(self):
+        return f"<CascadeValidationLog {self.sector} {self.shock_date} correct={self.cascade_correct}>"
+
+
+class CascadeValidationSummary(Base):
+    """
+    One summary row per validation run (UNIQUE on run_at).
+    Written by models/cascade_validator.py alongside CascadeValidationLog rows.
+    """
+    __tablename__ = "cascade_validation_summary"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    run_at               = Column(String(50),  nullable=False, unique=True)
+    shock_window_days    = Column(Integer,     nullable=True)
+    n_shock_events       = Column(Integer,     nullable=True)
+    sector_accuracy_json = Column(Text,        nullable=True)   # JSON {sector: float}
+    sector_lift_json     = Column(Text,        nullable=True)   # JSON {sector: float}
+    lag_confirmed_pct    = Column(Float,       nullable=True)
+    avg_lag1_corr        = Column(Float,       nullable=True)
+    overall_status       = Column(String(50),  nullable=True)   # "healthy"|"degraded"|...
+    flags_json           = Column(Text,        nullable=True)   # JSON list of strings
+    inserted_at          = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        Index("ix_cvs_run_at", "run_at"),
+    )
+
+    def __repr__(self):
+        return f"<CascadeValidationSummary {self.run_at[:10]} status={self.overall_status}>"
+
+
+class CascadeForecast(Base):
+    """
+    Per-commodity cascade forecast rows.
+    UNIQUE(forecast_date, commodity) — one row per commodity per day.
+    Written by models/cascade_orchestrator.py.
+    """
+    __tablename__ = "cascade_forecasts"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    forecast_date       = Column(String(10),  nullable=False)
+    commodity           = Column(String(100), nullable=False)
+    sector              = Column(String(50),  nullable=False)
+    sector_rank         = Column(Integer,     nullable=False)
+    regime              = Column(String(30),  nullable=True)
+    base_forecast       = Column(Float,       nullable=False)
+    macro_adjustment    = Column(Float,       nullable=False, default=0.0)
+    upstream_adjustment = Column(Float,       nullable=False, default=0.0)
+    final_forecast      = Column(Float,       nullable=False)
+    confidence          = Column(Float,       nullable=True)
+    macro_detail        = Column(Text,        nullable=True)    # JSON
+    upstream_detail     = Column(Text,        nullable=True)    # JSON
+    inserted_at         = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("forecast_date", "commodity", name="uq_cascade_date_commodity"),
+        Index("ix_cascade_date",   "forecast_date"),
+        Index("ix_cascade_sector", "sector", "forecast_date"),
+    )
+
+    def __repr__(self):
+        return f"<CascadeForecast {self.commodity} {self.forecast_date} fc={self.final_forecast:.4f}>"
+
+
+class CausalMonitoringLog(Base):
+    """
+    Append-only log of causal architecture health checks (Granger + route shifts
+    + cascade validation). One row per daily_retrain run.
+    No UNIQUE constraint — each run appends.
+    Written by models/daily_retrain.py.
+    """
+    __tablename__ = "causal_monitoring_log"
+
+    id                      = Column(Integer, primary_key=True, autoincrement=True)
+    logged_at               = Column(String(50),  nullable=False)
+    run_type                = Column(String(20),  nullable=False, default="daily")
+    granger_refreshed       = Column(Integer,     nullable=False, default=0)   # 0 or 1
+    granger_summary_json    = Column(Text,        nullable=True)
+    route_coefficients_json = Column(Text,        nullable=True)
+    route_shift_pct_json    = Column(Text,        nullable=True)
+    sector_ic_json          = Column(Text,        nullable=True)
+    cascade_status          = Column(String(50),  nullable=True)
+    cascade_accuracy_json   = Column(Text,        nullable=True)
+    cascade_n_events        = Column(Integer,     nullable=True, default=0)
+    alerts_json             = Column(Text,        nullable=True)
+    n_alerts                = Column(Integer,     nullable=False, default=0)
+
+    __table_args__ = (
+        Index("ix_causal_monitoring_logged_at", "logged_at"),
+    )
+
+    def __repr__(self):
+        return f"<CausalMonitoringLog {self.logged_at[:10]} n_alerts={self.n_alerts}>"

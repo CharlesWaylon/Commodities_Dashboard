@@ -44,7 +44,7 @@ from typing import Optional
 from hmmlearn.hmm import GaussianHMM
 from scipy.stats import spearmanr
 
-from models.config import MODELING_COMMODITIES, ROLLING_VOL_WINDOW
+from models.config import MODELING_COMMODITIES, RANDOM_SEED, ROLLING_VOL_WINDOW, TEST_FRACTION
 
 # Regime label sets indexed by number of states
 _REGIME_LABELS = {
@@ -288,6 +288,85 @@ class HMMRegimeDetector:
         """Returns {date_str: hex_color} for chart annotation."""
         regimes = self.regime_series()
         return {str(d.date()): PALETTE.get(r, "#aaaaaa") for d, r in regimes.items()}
+
+
+# ── Optuna hyperparameter tuner ────────────────────────────────────────────────
+
+def tune_hmm(
+    returns: pd.Series,
+    n_trials: int = 20,
+    seed: int = RANDOM_SEED,
+) -> dict:
+    """
+    Optuna search over HMM structure hyperparameters.
+
+    Objective: normalised log-likelihood on the held-out 20% test window.
+    Maximising test-set log-likelihood selects the model structure that best
+    explains unseen regime dynamics without overfitting the EM solution.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        Daily log-returns for a single commodity. DatetimeIndex.
+    n_trials : int
+        Number of Optuna trials.
+    seed : int
+        Reproducibility seed for TPESampler.
+
+    Returns
+    -------
+    dict
+        best_params, best_log_likelihood_per_obs, n_trials.
+    """
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError:
+        raise ImportError("optuna is required: pip install optuna")
+
+    # Build (return, vol) observation matrix
+    vol = returns.rolling(ROLLING_VOL_WINDOW).std() * np.sqrt(252)
+    obs_df = pd.concat([returns, vol], axis=1).dropna()
+    obs = obs_df.values
+
+    split = int(len(obs) * (1 - TEST_FRACTION))
+    obs_train = obs[:split]
+    obs_test  = obs[split:]
+
+    def objective(trial: "optuna.Trial") -> float:
+        n_states  = trial.suggest_categorical("n_states", [3, 4, 5])
+        cov_type  = trial.suggest_categorical("covariance_type", ["full", "diag"])
+        n_iter    = trial.suggest_int("n_iter", 100, 500)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            hmm = GaussianHMM(
+                n_components=n_states,
+                covariance_type=cov_type,
+                n_iter=n_iter,
+                random_state=RANDOM_SEED,
+            )
+            hmm.fit(obs_train)
+            if len(obs_test) > 0:
+                ll = hmm.score(obs_test) / len(obs_test)
+            else:
+                ll = hmm.score(obs_train) / len(obs_train)
+
+        return float(ll) if not np.isnan(ll) and np.isfinite(ll) else -1e9
+
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    study   = optuna.create_study(
+        direction="maximize",
+        sampler=sampler,
+        study_name="hmm_structure",
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    return {
+        "best_params":                 study.best_params,
+        "best_log_likelihood_per_obs": round(study.best_value, 4),
+        "n_trials":                    n_trials,
+    }
 
 
 # ── Convenience runner ─────────────────────────────────────────────────────────

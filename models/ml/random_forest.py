@@ -50,6 +50,7 @@ from models.features import build_feature_matrix, build_target
 
 ROLLING_FIT_WINDOW = 252
 ROLLING_STEP       = 21
+N_CROSS_FEATURES   = 15   # top cross-commodity features by Pearson correlation
 
 # Global fallback (used only when sector lookup fails)
 RF_PARAMS = dict(
@@ -121,12 +122,35 @@ class CommodityRF:
 
     def __init__(self, commodity: str = "WTI Crude Oil"):
         self.commodity  = commodity
-        self._rf_params = get_rf_params(commodity)
+        params = get_rf_params(commodity)
+        # n_cross_features is tuned by Optuna but is not a sklearn param
+        self._n_cross   = params.pop("n_cross_features", N_CROSS_FEATURES)
+        self._rf_params = params
         self._rf: Optional[RandomForestRegressor] = None
         self._feature_names: Optional[list] = None
         self._scaler: Optional[StandardScaler] = None
 
     # ── private ────────────────────────────────────────────────────────────────
+
+    def _select_features(
+        self,
+        feat_df: pd.DataFrame,
+        target: pd.Series,
+        n_cross: int = N_CROSS_FEATURES,
+    ) -> pd.DataFrame:
+        """Select own-commodity features + top-N cross-commodity features by Pearson correlation."""
+        own_prefix = f"{self.commodity}_"
+        own_cols   = [c for c in feat_df.columns if c.startswith(own_prefix)]
+        cross_cols = [c for c in feat_df.columns if not c.startswith(own_prefix)]
+
+        train_cut = int(len(feat_df) * (1 - TEST_FRACTION))
+        cross_corr = (
+            feat_df[cross_cols].iloc[:train_cut]
+            .corrwith(target.iloc[:train_cut])
+            .abs()
+        )
+        top_cross = cross_corr.nlargest(n_cross).index.tolist()
+        return feat_df[own_cols + top_cross]
 
     def _prepare(
         self,
@@ -145,6 +169,7 @@ class CommodityRF:
         self,
         feat_df: pd.DataFrame,
         target: pd.Series,
+        n_cross: Optional[int] = None,
     ) -> "CommodityRF":
         """
         Fit on the full dataset (train split).
@@ -155,7 +180,11 @@ class CommodityRF:
             Feature matrix from build_feature_matrix().
         target : pd.Series
             Next-day log-return from build_target().
+        n_cross : int, optional
+            Number of cross-commodity features to include (by Pearson correlation).
+            Defaults to the Optuna-tuned value or N_CROSS_FEATURES.
         """
+        feat_df = self._select_features(feat_df, target, n_cross=n_cross if n_cross is not None else self._n_cross)
         X, y, names = self._prepare(feat_df, target)
         split = int(len(X) * (1 - TEST_FRACTION))
         X_train, y_train = X[:split], y[:split]

@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import warnings
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+from sqlalchemy import text
+from database.db import get_engine
 
 import numpy as np
 import pandas as pd
@@ -47,8 +49,7 @@ warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-_ROOT      = Path(__file__).resolve().parent.parent
-DEFAULT_DB = _ROOT / "data" / "commodities.db"
+_ROOT = Path(__file__).resolve().parent.parent
 
 # ── Cascade topology ───────────────────────────────────────────────────────────
 # Order in which sectors are predicted; earlier sectors feed later ones.
@@ -73,31 +74,6 @@ UPSTREAM_MAP: Dict[str, List[str]] = {
 _MACRO_RETURN_COLS = ["dxy_ret", "vix_ret5d", "tlt_ret", "tlt_yield_proxy"]
 
 
-# ── DB schema for cascade forecasts ───────────────────────────────────────────
-_CASCADE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS cascade_forecasts (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    forecast_date       TEXT NOT NULL,
-    commodity           TEXT NOT NULL,
-    sector              TEXT NOT NULL,
-    sector_rank         INTEGER NOT NULL,
-    regime              TEXT,
-    base_forecast       REAL NOT NULL,
-    macro_adjustment    REAL NOT NULL DEFAULT 0,
-    upstream_adjustment REAL NOT NULL DEFAULT 0,
-    final_forecast      REAL NOT NULL,
-    confidence          REAL,
-    macro_detail        TEXT,
-    upstream_detail     TEXT,
-    inserted_at         TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_cascade_date_commodity
-    ON cascade_forecasts (forecast_date, commodity);
-CREATE INDEX IF NOT EXISTS ix_cascade_date
-    ON cascade_forecasts (forecast_date);
-CREATE INDEX IF NOT EXISTS ix_cascade_sector
-    ON cascade_forecasts (sector, forecast_date);
-"""
 
 
 # ── Result containers ──────────────────────────────────────────────────────────
@@ -353,77 +329,73 @@ class CascadeForecaster:
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
-def _connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_CASCADE_SCHEMA)
-    return conn
-
-
 def _write_cascade_forecasts(
     forecasts:     Dict[str, CommodityForecast],
     forecast_date: date,
-    db_path:       Optional[Path] = None,
 ) -> int:
     """
     Upsert cascade forecast rows into cascade_forecasts.
     Returns the number of rows inserted/replaced.
     """
-    conn   = _connect(db_path)
     now    = datetime.now(timezone.utc).isoformat()
     date_s = str(forecast_date)
-    rows   = 0
+    rows_data = []
 
     for cf in forecasts.values():
-        try:
-            conn.execute(
-                """
-                INSERT INTO cascade_forecasts (
-                    forecast_date, commodity, sector, sector_rank, regime,
-                    base_forecast, macro_adjustment, upstream_adjustment,
-                    final_forecast, confidence, macro_detail, upstream_detail,
-                    inserted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (forecast_date, commodity)
-                DO UPDATE SET
-                    base_forecast       = excluded.base_forecast,
-                    macro_adjustment    = excluded.macro_adjustment,
-                    upstream_adjustment = excluded.upstream_adjustment,
-                    final_forecast      = excluded.final_forecast,
-                    confidence          = excluded.confidence,
-                    macro_detail        = excluded.macro_detail,
-                    upstream_detail     = excluded.upstream_detail,
-                    inserted_at         = excluded.inserted_at
-                """,
-                (
-                    date_s,
-                    cf.commodity,
-                    cf.sector,
-                    cf.sector_rank,
-                    cf.regime,
-                    cf.base_forecast,
-                    cf.macro_adjustment,
-                    cf.upstream_adjustment,
-                    cf.final_forecast,
-                    cf.confidence,
-                    json.dumps(cf.macro_detail),
-                    json.dumps(cf.upstream_detail),
-                    now,
-                ),
-            )
-            rows += 1
-        except Exception as exc:
-            log.warning("DB write failed for %s: %s", cf.commodity, exc)
+        rows_data.append({
+            "forecast_date":       date_s,
+            "commodity":           cf.commodity,
+            "sector":              cf.sector,
+            "sector_rank":         cf.sector_rank,
+            "regime":              cf.regime,
+            "base_forecast":       cf.base_forecast,
+            "macro_adjustment":    cf.macro_adjustment,
+            "upstream_adjustment": cf.upstream_adjustment,
+            "final_forecast":      cf.final_forecast,
+            "confidence":          cf.confidence,
+            "macro_detail":        json.dumps(cf.macro_detail),
+            "upstream_detail":     json.dumps(cf.upstream_detail),
+            "inserted_at":         now,
+        })
 
-    conn.commit()
-    conn.close()
-    return rows
+    if not rows_data:
+        return 0
+
+    sql = text("""
+        INSERT INTO cascade_forecasts (
+            forecast_date, commodity, sector, sector_rank, regime,
+            base_forecast, macro_adjustment, upstream_adjustment,
+            final_forecast, confidence, macro_detail, upstream_detail,
+            inserted_at
+        ) VALUES (
+            :forecast_date, :commodity, :sector, :sector_rank, :regime,
+            :base_forecast, :macro_adjustment, :upstream_adjustment,
+            :final_forecast, :confidence, :macro_detail, :upstream_detail,
+            :inserted_at
+        )
+        ON CONFLICT (forecast_date, commodity) DO UPDATE SET
+            base_forecast       = EXCLUDED.base_forecast,
+            macro_adjustment    = EXCLUDED.macro_adjustment,
+            upstream_adjustment = EXCLUDED.upstream_adjustment,
+            final_forecast      = EXCLUDED.final_forecast,
+            confidence          = EXCLUDED.confidence,
+            macro_detail        = EXCLUDED.macro_detail,
+            upstream_detail     = EXCLUDED.upstream_detail,
+            inserted_at         = EXCLUDED.inserted_at
+    """)
+
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(sql, rows_data)
+            conn.commit()
+        return len(rows_data)
+    except Exception as exc:
+        log.warning("cascade_forecasts DB write failed: %s", exc)
+        return 0
 
 
 def load_cascade_forecasts(
     forecast_date: Optional[date] = None,
-    db_path:       Optional[Path] = None,
 ) -> pd.DataFrame:
     """
     Load cascade forecasts from the DB.
@@ -437,22 +409,22 @@ def load_cascade_forecasts(
     pd.DataFrame with columns matching cascade_forecasts schema.
     Empty DataFrame if no rows exist yet.
     """
-    conn = _connect(db_path)
+    engine = get_engine()
     if forecast_date is not None:
-        df = pd.read_sql_query(
-            "SELECT * FROM cascade_forecasts WHERE forecast_date = ? ORDER BY sector_rank, commodity",
-            conn, params=[str(forecast_date)],
-        )
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT * FROM cascade_forecasts WHERE forecast_date = :fd ORDER BY sector_rank, commodity"),
+                {"fd": str(forecast_date)},
+            )
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
     else:
-        df = pd.read_sql_query(
-            """
-            SELECT * FROM cascade_forecasts
-            WHERE  forecast_date = (SELECT MAX(forecast_date) FROM cascade_forecasts)
-            ORDER  BY sector_rank, commodity
-            """,
-            conn,
-        )
-    conn.close()
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT * FROM cascade_forecasts
+                WHERE  forecast_date = (SELECT MAX(forecast_date) FROM cascade_forecasts)
+                ORDER  BY sector_rank, commodity
+            """))
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
     for col in ("macro_detail", "upstream_detail"):
         if col in df.columns:
             df[col] = df[col].apply(lambda v: json.loads(v) if v else {})
@@ -492,7 +464,6 @@ def _load_macro(price_index: Optional[pd.DatetimeIndex] = None) -> pd.DataFrame:
 def run_cascade(
     prices:   Optional[pd.DataFrame] = None,
     macro_df: Optional[pd.DataFrame] = None,
-    db_path:  Optional[Path]         = None,
     dry_run:  bool                   = False,
 ) -> CascadeResult:
     """
@@ -547,7 +518,7 @@ def run_cascade(
 
         # ── Store ──────────────────────────────────────────────────────────────
         if not dry_run and forecasts:
-            n = _write_cascade_forecasts(forecasts, forecast_date, db_path)
+            n = _write_cascade_forecasts(forecasts, forecast_date)
             result.n_written = n
             log.info("Cascade: wrote %d rows to cascade_forecasts (date=%s).", n, forecast_date)
         elif dry_run:

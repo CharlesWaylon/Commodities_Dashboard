@@ -59,14 +59,15 @@ Can also be called standalone from any notebook:
 from __future__ import annotations
 
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from sqlalchemy import text
+
+from database.db import get_engine
 
 log = logging.getLogger(__name__)
 
@@ -134,35 +135,6 @@ COMMODITY_SECTORS: Dict[str, str] = {
 # Convenience set of all known sector names — used for filtering in query helpers
 KNOWN_SECTORS: frozenset = frozenset(COMMODITY_SECTORS.values())
 
-_ROOT       = Path(__file__).resolve().parent.parent
-DEFAULT_DB  = _ROOT / "data" / "commodities.db"
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS ic_log (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    computed_at   TEXT NOT NULL,
-    commodity     TEXT NOT NULL,
-    tier          TEXT NOT NULL,
-    ic_value      REAL NOT NULL,
-    n_obs         INTEGER NOT NULL,
-    window_start  TEXT,
-    window_end    TEXT,
-    regime        TEXT,
-    inserted_at   TEXT NOT NULL,
-    UNIQUE(computed_at, commodity, tier)
-);
-CREATE INDEX IF NOT EXISTS idx_ic_log_tier_date
-    ON ic_log(tier, computed_at);
-CREATE INDEX IF NOT EXISTS idx_ic_log_commodity
-    ON ic_log(commodity, computed_at);
-"""
-
-# Migration: add regime column + its index to existing tables that pre-date this field.
-# Each statement is run individually so we can swallow OperationalError on repeat runs.
-_MIGRATIONS = [
-    "ALTER TABLE ic_log ADD COLUMN regime TEXT;",
-    "CREATE INDEX IF NOT EXISTS idx_ic_log_regime ON ic_log(regime, computed_at);",
-]
 
 
 # ── ICResult dataclass ─────────────────────────────────────────────────────────
@@ -395,25 +367,10 @@ def compute_sector_ic_from_records(
     return results
 
 
-# ── SQLite persistence ─────────────────────────────────────────────────────────
-
-def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
-    p = Path(db_path) if db_path else DEFAULT_DB
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_SCHEMA_SQL)
-    for stmt in _MIGRATIONS:
-        try:
-            conn.execute(stmt)
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # already applied — normal on all runs after the first
-    return conn
-
+# ── SQLAlchemy persistence ─────────────────────────────────────────────────────
 
 def log_ic_scores(
     ic_results: Dict[Tuple[str, str], ICResult],
-    db_path: Optional[Union[str, Path]] = None,
 ) -> int:
     """
     Persist IC results to the ic_log SQLite table.
@@ -431,31 +388,37 @@ def log_ic_scores(
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = []
     for result in ic_results.values():
-        rows.append((
-            result.computed_at,
-            result.commodity,
-            result.tier,
-            result.ic_value,
-            result.n_obs,
-            result.window_start,
-            result.window_end,
-            result.regime or None,
-            now_iso,
-        ))
+        rows.append({
+            "computed_at":  result.computed_at,
+            "commodity":    result.commodity,
+            "tier":         result.tier,
+            "ic_value":     result.ic_value,
+            "n_obs":        result.n_obs,
+            "window_start": result.window_start,
+            "window_end":   result.window_end,
+            "regime":       result.regime or None,
+            "inserted_at":  now_iso,
+        })
 
-    conn = _connect(db_path)
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO ic_log
+    sql = text("""
+        INSERT INTO ic_log
             (computed_at, commodity, tier, ic_value, n_obs,
              window_start, window_end, regime, inserted_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    conn.commit()
-    conn.close()
-    log.info("Persisted %d IC score(s) to %s", len(rows), db_path or DEFAULT_DB)
+        VALUES (:computed_at, :commodity, :tier, :ic_value, :n_obs,
+                :window_start, :window_end, :regime, :inserted_at)
+        ON CONFLICT (computed_at, commodity, tier) DO UPDATE SET
+            ic_value     = EXCLUDED.ic_value,
+            n_obs        = EXCLUDED.n_obs,
+            window_start = EXCLUDED.window_start,
+            window_end   = EXCLUDED.window_end,
+            regime       = EXCLUDED.regime,
+            inserted_at  = EXCLUDED.inserted_at
+    """)
+
+    with get_engine().connect() as conn:
+        conn.execute(sql, rows)
+        conn.commit()
+    log.info("Persisted %d IC score(s)", len(rows))
     return len(rows)
 
 
@@ -465,7 +428,6 @@ def recent_ic_scores(
     days: int = 90,
     commodity: Optional[str] = None,
     tier: Optional[str] = None,
-    db_path: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
     """
     Return IC log entries from the last `days` days.
@@ -480,42 +442,34 @@ def recent_ic_scores(
     Sorted by computed_at DESC.  Empty DataFrame if no data.
     """
     try:
-        conn = _connect(db_path)
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=days)
-        ).isoformat()
-
-        conditions = ["computed_at >= ?"]
-        params: List = [cutoff]
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        params: dict = {"cutoff": cutoff}
+        conditions = ["computed_at >= :cutoff"]
         if commodity:
-            conditions.append("commodity = ?")
-            params.append(commodity)
+            conditions.append("commodity = :commodity")
+            params["commodity"] = commodity
         if tier:
-            conditions.append("tier = ?")
-            params.append(tier)
+            conditions.append("tier = :tier")
+            params["tier"] = tier
 
         where = " AND ".join(conditions)
-        df = pd.read_sql_query(
-            f"""
+        sql = text(f"""
             SELECT computed_at, commodity, tier, ic_value, n_obs,
                    window_start, window_end, regime
             FROM   ic_log
             WHERE  {where}
             ORDER  BY computed_at DESC
-            """,
-            conn,
-            params=params,
-        )
-        conn.close()
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(sql, params)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         return df
     except Exception as exc:
         log.warning("recent_ic_scores failed: %s", exc)
         return pd.DataFrame()
 
 
-def ic_summary(
-    db_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
+def ic_summary() -> pd.DataFrame:
     """
     Latest IC score per (commodity, tier) — one row per pair.
 
@@ -528,9 +482,7 @@ def ic_summary(
     Sorted by tier, then commodity.  Empty DataFrame if no data.
     """
     try:
-        conn = _connect(db_path)
-        df = pd.read_sql_query(
-            """
+        sql = text("""
             SELECT   commodity, tier,
                      ic_value, n_obs, window_end, computed_at
             FROM     ic_log
@@ -540,10 +492,10 @@ def ic_summary(
                          GROUP  BY commodity, tier
                      )
             ORDER    BY tier, commodity
-            """,
-            conn,
-        )
-        conn.close()
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(sql)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         if not df.empty:
             df["signal_strength"] = df["ic_value"].apply(
                 lambda v: "actionable" if v >= IC_THRESHOLD_ACTION
@@ -555,9 +507,7 @@ def ic_summary(
         return pd.DataFrame()
 
 
-def ic_sector_summary(
-    db_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
+def ic_sector_summary() -> pd.DataFrame:
     """
     Latest IC score per (sector, tier) — one row per pair.
 
@@ -575,31 +525,26 @@ def ic_sector_summary(
         computed_at, signal_strength
     Sorted by tier, then sector.  Empty DataFrame if no sector IC logged yet.
     """
-    summary = ic_summary(db_path=db_path)
+    summary = ic_summary()
     if summary.empty:
         return summary
     return summary[summary["commodity"].isin(KNOWN_SECTORS)].copy()
 
 
-def ic_commodity_summary(
-    db_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
+def ic_commodity_summary() -> pd.DataFrame:
     """
     Latest IC per individual commodity (excludes sector-level rows).
 
     Complement to ic_sector_summary() — returns only rows whose commodity
     field is NOT a known sector name, i.e. the per-commodity IC scores.
     """
-    summary = ic_summary(db_path=db_path)
+    summary = ic_summary()
     if summary.empty:
         return summary
     return summary[~summary["commodity"].isin(KNOWN_SECTORS)].copy()
 
 
-def ic_trend(
-    days: int = 180,
-    db_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
+def ic_trend(days: int = 180) -> pd.DataFrame:
     """
     Mean IC per tier over time — averaged across all commodities per timestamp.
 
@@ -610,7 +555,7 @@ def ic_trend(
     Empty DataFrame if no data.
     """
     try:
-        df = recent_ic_scores(days=days, db_path=db_path)
+        df = recent_ic_scores(days=days)
         if df.empty:
             return pd.DataFrame()
         grouped = (

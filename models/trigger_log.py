@@ -31,48 +31,18 @@ backtest harness needs.
 """
 
 import json
-import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import pandas as pd
+from sqlalchemy import text
 
+from database.db import get_engine
 from models.triggers import TriggerEvent
-
-# Default DB path — same SQLite file as the rest of the dashboard
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "commodities.db"
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS trigger_events (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    detected_at          TEXT NOT NULL,
-    trigger_date         TEXT NOT NULL,
-    family               TEXT NOT NULL,
-    strength             REAL NOT NULL,
-    rationale            TEXT,
-    affected_commodities TEXT,
-    metadata             TEXT,
-    inserted_at          TEXT NOT NULL,
-    UNIQUE(family, trigger_date)
-);
-CREATE INDEX IF NOT EXISTS idx_trigger_events_family_date
-    ON trigger_events(family, trigger_date);
-"""
-
-
-def _connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
-    """Open a connection, ensure parent dir + schema exist."""
-    p = Path(db_path) if db_path else DEFAULT_DB_PATH
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.executescript(_SCHEMA_SQL)
-    return conn
 
 
 def log_trigger_events(
     events: List[TriggerEvent],
-    db_path: Optional[Union[str, Path]] = None,
 ) -> int:
     """
     Persist a list of trigger events. Re-firing a (family, trigger_date) pair
@@ -97,26 +67,34 @@ def log_trigger_events(
         except Exception:
             trigger_date = datetime.now(timezone.utc).date().isoformat()
 
-        rows.append((
-            ev.detected_at,
-            trigger_date,
-            ev.family,
-            float(ev.strength),
-            ev.rationale or "",
-            json.dumps(list(ev.affected_commodities or [])),
-            json.dumps(dict(ev.metadata or {})),
-            now_iso,
-        ))
+        rows.append({
+            "detected_at":          ev.detected_at,
+            "trigger_date":         trigger_date,
+            "family":               ev.family,
+            "strength":             float(ev.strength),
+            "rationale":            ev.rationale or "",
+            "affected_commodities": json.dumps(list(ev.affected_commodities or [])),
+            "metadata":             json.dumps(dict(ev.metadata or {})),
+            "inserted_at":          now_iso,
+        })
 
-    sql = """
-    INSERT OR REPLACE INTO trigger_events
+    sql = text("""
+    INSERT INTO trigger_events
         (detected_at, trigger_date, family, strength, rationale,
          affected_commodities, metadata, inserted_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-    """
+    VALUES (:detected_at, :trigger_date, :family, :strength, :rationale,
+            :affected_commodities, :metadata, :inserted_at)
+    ON CONFLICT (family, trigger_date) DO UPDATE SET
+        detected_at          = EXCLUDED.detected_at,
+        strength             = EXCLUDED.strength,
+        rationale            = EXCLUDED.rationale,
+        affected_commodities = EXCLUDED.affected_commodities,
+        metadata             = EXCLUDED.metadata,
+        inserted_at          = EXCLUDED.inserted_at
+    """)
 
-    with _connect(db_path) as conn:
-        conn.executemany(sql, rows)
+    with get_engine().connect() as conn:
+        conn.execute(sql, rows)
         conn.commit()
 
     return len(rows)
@@ -125,7 +103,6 @@ def log_trigger_events(
 def recent_trigger_events(
     days: int = 30,
     family: Optional[str] = None,
-    db_path: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
     """
     Read recent trigger events from the log.
@@ -148,15 +125,16 @@ def recent_trigger_events(
         pd.Timestamp.now(tz="UTC").tz_localize(None) - pd.Timedelta(days=days)
     ).date().isoformat()
 
-    sql = "SELECT * FROM trigger_events WHERE trigger_date >= ?"
-    params: List = [cutoff]
+    params: dict = {"cutoff": cutoff}
+    sql = "SELECT * FROM trigger_events WHERE trigger_date >= :cutoff"
     if family is not None:
-        sql += " AND family = ?"
-        params.append(family)
+        sql += " AND family = :family"
+        params["family"] = family
     sql += " ORDER BY trigger_date DESC, family ASC"
 
-    with _connect(db_path) as conn:
-        df = pd.read_sql_query(sql, conn, params=params)
+    with get_engine().connect() as conn:
+        result = conn.execute(text(sql), params)
+        df = pd.DataFrame(result.fetchall(), columns=result.keys())
 
     if not df.empty:
         df["affected_commodities"] = df["affected_commodities"].apply(
