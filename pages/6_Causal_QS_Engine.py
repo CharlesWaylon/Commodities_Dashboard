@@ -197,15 +197,24 @@ def _build_layer_sparkline(
             fillcolor=_hex_to_rgba(line_color, 0.10),
             hovertemplate="%{x}: %{y:.2f}<extra></extra>",
         ))
-        # Trigger-date vertical line — only when it falls within the x range
+        # Trigger-date vertical line — only when it falls within the x range.
+        # Use add_shape + add_annotation instead of add_vline: Plotly's add_vline
+        # internally calls sum() on the string x-range to place the annotation,
+        # which raises TypeError when the axis uses ISO date strings.
         if x_list[0] <= t_str <= x_list[-1]:
-            fig.add_vline(
-                x=t_str,
-                line_width=1.2, line_dash="dash",
-                line_color=AMBER, opacity=0.80,
-                annotation_text="trigger",
-                annotation_position="top right",
-                annotation_font=dict(size=7, color=AMBER),
+            fig.add_shape(
+                type="line",
+                x0=t_str, x1=t_str, y0=0, y1=1,
+                xref="x", yref="paper",
+                line=dict(color=AMBER, width=1.2, dash="dash"),
+                opacity=0.80,
+            )
+            fig.add_annotation(
+                x=t_str, y=0.98,
+                xref="x", yref="paper",
+                text="trigger", showarrow=False,
+                font=dict(size=7, color=AMBER),
+                xanchor="left", yanchor="top",
             )
         # Optional horizontal reference line (threshold)
         if yline is not None:
