@@ -55,6 +55,33 @@ import numpy as np
 import pandas as pd
 
 from models.triggers import TriggerFamily, TriggerEvent, get_trigger_family
+from utils.macro_narrative import SECTORS as _SECTORS
+
+
+# ── Commodity → sector reverse lookup ─────────────────────────────────────────
+# Built once at import time from the same SECTORS dict used on page 7 and in
+# the macro narrative engine so the mapping is never duplicated.
+
+_COMMODITY_TO_SECTOR: Dict[str, str] = {
+    comm: sector
+    for sector, comms in _SECTORS.items()
+    for comm in comms
+}
+
+
+def _resolve_sector(commodity: str) -> str:
+    """
+    Return the sector name for *commodity*, or "" if not found.
+
+    Tries an exact match first, then strips a trailing exchange-code suffix
+    like " (CL=F)" so that display variants resolve correctly.
+    """
+    import re
+    if commodity in _COMMODITY_TO_SECTOR:
+        return _COMMODITY_TO_SECTOR[commodity]
+    # Strip trailing parenthetical: "WTI Crude Oil (CL=F)" → "WTI Crude Oil"
+    stripped = re.sub(r"\s*\([^)]*\)\s*$", "", commodity).strip()
+    return _COMMODITY_TO_SECTOR.get(stripped, "")
 
 
 # ── Direction enum-like constants ─────────────────────────────────────────────
@@ -132,6 +159,7 @@ class CausalChainResult:
     trigger_strength: float    # [0, 1]
     affected_commodities: List[str]
     commodity: str             # which commodity was traced
+    sector: str = ""           # sector resolved via _COMMODITY_TO_SECTOR lookup
     nodes: List[ChainNode] = field(default_factory=list)
     portfolio_recommendation: str = ""
     portfolio_confidence: float = 0.0
@@ -149,6 +177,7 @@ class CausalChainResult:
             "trigger_strength":         round(self.trigger_strength, 4),
             "affected_commodities":     self.affected_commodities,
             "commodity":                self.commodity,
+            "sector":                   self.sector,
             "nodes":                    [n.to_dict() for n in self.nodes],
             "portfolio_recommendation": self.portfolio_recommendation,
             "portfolio_confidence":     round(self.portfolio_confidence, 4),
@@ -252,6 +281,7 @@ class CausalChain:
             trigger_strength=trigger_strength,
             affected_commodities=affected,
             commodity=commodity,
+            sector=_resolve_sector(commodity),
         )
 
         # ── Layer 1: Trigger node ─────────────────────────────────────────────
@@ -284,9 +314,20 @@ class CausalChain:
         except Exception:
             pass
 
+        # ── Cascade sector forecast (fed into portfolio layer) ────────────────
+        # DB-first: try load_cascade_forecasts(); fall back to a dry-run of
+        # run_cascade() using the already-loaded prices/macro frames if the DB
+        # cache is empty or stale (> 7 days old). Returns None on any failure.
+        _cascade_fc: Optional[dict] = None
+        try:
+            _cascade_fc = self._fetch_cascade_forecast(commodity, prices, macro_df)
+        except Exception:
+            pass
+
         # ── Layer 5: Portfolio recommendation ─────────────────────────────────
         portfolio_node, recommendation, port_confidence = self._build_portfolio_node(
-            result.nodes, trigger_family, trigger_strength, affected, commodity
+            result.nodes, trigger_family, trigger_strength, affected, commodity,
+            cascade_fc=_cascade_fc,
         )
         result.nodes.append(portfolio_node)
         result.portfolio_recommendation = recommendation
@@ -574,20 +615,142 @@ class CausalChain:
             f"trusting **{trusted}** tier ({top_w:.0%} weight)"
         )
 
+        if not mp.is_trained:
+            # Model has never been fit — signal is meaningless; surface a clear warning
+            # rather than emitting a random BULLISH/BEARISH direction that would mislead
+            # downstream layers (portfolio node, narrative, Sankey colours).
+            return ChainNode(
+                layer="ensemble",
+                model_name="MetaPredictor",
+                summary=summary,
+                confidence=0.0,
+                direction=NEUTRAL,
+                metadata={
+                    "trusted_tier":    trusted,
+                    "weights":         decision.weights,
+                    "meta_confidence": decision.meta_confidence,
+                    "is_trained":      False,
+                    "reasoning":       decision.reasoning,
+                    "warning": (
+                        "MetaPredictor not yet trained — "
+                        "run daily_retrain.py to activate"
+                    ),
+                },
+            )
+
         return ChainNode(
             layer="ensemble",
             model_name="MetaPredictor",
             summary=summary,
-            confidence=decision.meta_confidence if mp.is_trained else 0.0,
+            confidence=decision.meta_confidence,
             direction=BULLISH if decision.ensemble_forecast >= 0 else BEARISH,
             metadata={
-                "trusted_tier":      trusted,
-                "weights":           decision.weights,
-                "meta_confidence":   decision.meta_confidence,
-                "is_trained":        mp.is_trained,
-                "reasoning":         decision.reasoning,
+                "trusted_tier":    trusted,
+                "weights":         decision.weights,
+                "meta_confidence": decision.meta_confidence,
+                "is_trained":      True,
+                "reasoning":       decision.reasoning,
             },
         )
+
+    # ── Cascade forecast retrieval ─────────────────────────────────────────────
+
+    _CASCADE_STALE_DAYS = 7   # treat cached rows older than this as stale
+
+    def _fetch_cascade_forecast(
+        self,
+        commodity: str,
+        prices: pd.DataFrame,
+        macro_df: pd.DataFrame,
+    ) -> Optional[dict]:
+        """
+        Retrieve the cascade sector forecast for *commodity*.
+
+        Strategy (in order):
+        1. Read the most recent row from the cascade_forecasts DB table.
+           If found and not stale (≤ _CASCADE_STALE_DAYS old) → return it.
+        2. Call run_cascade(prices, macro_df, dry_run=True) using the
+           already-loaded DataFrames so no additional network round-trips occur.
+           This fits all sector models (~30–60 s); only triggered when the DB
+           cache is absent or stale.
+        3. Return None so the caller falls back to rule-based logic.
+
+        The commodity name is converted from its UI display form (e.g.,
+        "Gold (COMEX)") to the DB canonical name ("Gold") via display_to_db()
+        so it matches what cascade_forecasts stores.
+
+        Returns
+        -------
+        dict with keys: final_forecast, confidence, sector, regime,
+        base_forecast, macro_adjustment, upstream_adjustment,
+        forecast_date, source — or None.
+        """
+        try:
+            from models.cascade_orchestrator import load_cascade_forecasts, run_cascade
+        except ImportError:
+            return None
+
+        # Resolve display → canonical name (e.g. "Gold (COMEX)" → "Gold")
+        try:
+            from services.data_contract import display_to_db
+            db_name = display_to_db(commodity) or commodity
+        except Exception:
+            db_name = commodity
+
+        def _row_to_dict(row: pd.Series, source: str) -> dict:
+            return {
+                "final_forecast":      float(row["final_forecast"]),
+                "confidence":          float(row["confidence"]),
+                "sector":              str(row["sector"]),
+                "regime":              str(row["regime"]),
+                "base_forecast":       float(row["base_forecast"]),
+                "macro_adjustment":    float(row["macro_adjustment"]),
+                "upstream_adjustment": float(row["upstream_adjustment"]),
+                "forecast_date":       str(row.get("forecast_date", "")),
+                "source":              source,
+            }
+
+        # ── Strategy 1: DB cache ───────────────────────────────────────────────
+        try:
+            cached = load_cascade_forecasts()
+            if not cached.empty and "commodity" in cached.columns:
+                match = cached[cached["commodity"] == db_name]
+                if not match.empty:
+                    row = match.iloc[0]
+                    # Staleness check: reject if forecast_date is too old
+                    fc_date_str = str(row.get("forecast_date", ""))
+                    try:
+                        fc_date = pd.Timestamp(fc_date_str)
+                        age_days = (pd.Timestamp.now() - fc_date).days
+                        if age_days <= self._CASCADE_STALE_DAYS:
+                            return _row_to_dict(row, "db_cache")
+                    except Exception:
+                        return _row_to_dict(row, "db_cache")   # can't parse date — use it
+        except Exception:
+            pass
+
+        # ── Strategy 2: Live dry-run with pre-loaded frames ────────────────────
+        # Only attempted when prices are available (they're always passed from trace()).
+        if prices is not None and not prices.empty:
+            try:
+                cr = run_cascade(prices=prices, macro_df=macro_df, dry_run=True)
+                if cr.success and db_name in cr.commodities:
+                    cf = cr.commodities[db_name]
+                    return {
+                        "final_forecast":      cf.final_forecast,
+                        "confidence":          cf.confidence,
+                        "sector":              cf.sector,
+                        "regime":              cf.regime,
+                        "base_forecast":       cf.base_forecast,
+                        "macro_adjustment":    cf.macro_adjustment,
+                        "upstream_adjustment": cf.upstream_adjustment,
+                        "forecast_date":       str(cr.forecast_date or ""),
+                        "source":              "live_cascade",
+                    }
+            except Exception:
+                pass
+
+        return None
 
     def _build_portfolio_node(
         self,
@@ -596,22 +759,32 @@ class CausalChain:
         trigger_strength: float,
         affected: List[str],
         commodity: str,
+        cascade_fc: Optional[dict] = None,
     ) -> Tuple[ChainNode, str, float]:
         """
-        Rule-based portfolio recommendation that synthesizes upstream nodes.
+        Rule-based portfolio recommendation that synthesizes upstream nodes,
+        then cross-checks against cascade sector forecasts.
 
-        Rules (applied in priority order):
-        1. If crisis regime + high trigger strength → reduce position sizing
-        2. If vol spike > 40% post-trigger → widen stops, reduce leverage
-        3. If regime is Risk-Off → underweight trigger-affected commodities
-        4. If trigger is strong (≥0.7) + bullish ensemble → +5% tilt
-        5. If trigger is moderate (0.3–0.7) + neutral → hold / monitor
-        6. Default → no change recommended
+        Rule priority (applied in order):
+        1. Crisis regime + high trigger strength → reduce position sizing
+        2. Vol spike > 40% post-trigger → tighten stops, reduce leverage
+        3. Risk-Off regime + active trigger → underweight
+        4. Strong trigger (≥0.7) + bullish ensemble → +5% tilt
+        5. Moderate trigger (0.3–0.7) → monitor / hold
+        6. Default → no change
+
+        Cascade overlay (applied after rules):
+        • CONFIRM: cascade direction agrees → confidence += 0.10 (capped 0.95).
+        • OVERRIDE: cascade disagrees AND |final_forecast| ≥ 0.5% AND cascade
+          confidence ≥ 0.50 → replace action and direction with cascade signal.
+          Confidence = min(cascade_confidence, 0.75) to reflect the override.
+        • WEAK / NEUTRAL: cascade signal below threshold → noted in metadata only.
+        Falls back to rules-only if cascade_fc is None.
         """
-        # Extract signals from upstream nodes
-        regime_node   = next((n for n in nodes if n.layer == "regime"), None)
+        # ── Extract signals from upstream nodes ───────────────────────────────
+        regime_node   = next((n for n in nodes if n.layer == "regime"),    None)
         stat_node     = next((n for n in nodes if n.layer == "statistical"), None)
-        ensemble_node = next((n for n in nodes if n.layer == "ensemble"), None)
+        ensemble_node = next((n for n in nodes if n.layer == "ensemble"),  None)
 
         regime     = regime_node.metadata.get("regime", "Neutral") if regime_node else "Neutral"
         crisis     = regime_node.metadata.get("crisis", False)      if regime_node else False
@@ -622,7 +795,7 @@ class CausalChain:
         short = [c.split(" (")[0] for c in affected[:2]]
         asset_str = " / ".join(short) if short else commodity.split(" (")[0]
 
-        # Decision tree
+        # ── Rule-based decision tree ──────────────────────────────────────────
         if crisis:
             action = (
                 f"REDUCE {asset_str} exposure — Crisis regime (VIX crisis) "
@@ -674,78 +847,120 @@ class CausalChain:
             confidence = 0.30
             direction  = NEUTRAL
 
+        # ── Cascade overlay ───────────────────────────────────────────────────
+        # Thresholds: signal must exceed 0.5% log-return and 50% model confidence
+        # to be treated as directional; below those values it is noted but ignored.
+        _CASCADE_FC_THRESHOLD   = 0.005   # |log-return| — ≈0.5% expected move
+        _CASCADE_CONF_THRESHOLD = 0.50    # minimum cascade model confidence
+
+        cascade_meta: dict = {"cascade_available": False}
+
+        if cascade_fc is not None:
+            c_final = cascade_fc["final_forecast"]
+            c_conf  = cascade_fc["confidence"]
+            c_src   = cascade_fc["source"]
+            c_date  = cascade_fc["forecast_date"]
+            c_sec   = cascade_fc["sector"]
+            c_pct   = c_final * 100          # for display
+
+            cascade_meta = {
+                "cascade_available":    True,
+                "cascade_source":       c_src,
+                "cascade_date":         c_date,
+                "cascade_sector":       c_sec,
+                "cascade_final":        round(c_final, 6),
+                "cascade_confidence":   round(c_conf, 4),
+                "cascade_base":         round(cascade_fc["base_forecast"], 6),
+                "cascade_macro_adj":    round(cascade_fc["macro_adjustment"], 6),
+                "cascade_upstream_adj": round(cascade_fc["upstream_adjustment"], 6),
+                "cascade_regime":       cascade_fc["regime"],
+                "cascade_action":       "none",   # updated below
+            }
+
+            # Determine cascade direction
+            if c_final >= _CASCADE_FC_THRESHOLD:
+                c_dir = BULLISH
+            elif c_final <= -_CASCADE_FC_THRESHOLD:
+                c_dir = BEARISH
+            else:
+                c_dir = NEUTRAL
+
+            if c_dir == NEUTRAL or c_conf < _CASCADE_CONF_THRESHOLD:
+                # Signal too weak — log it, don't act
+                cascade_meta["cascade_action"] = "weak_signal_ignored"
+
+            elif c_dir == direction or direction in (NEUTRAL, HEIGHTENED_VOL, REDUCED_VOL):
+                # Cascade CONFIRMS the rule-based direction (or rules were neutral)
+                confidence = min(0.95, confidence + 0.10)
+                action = (
+                    action +
+                    f" [Cascade confirms: {c_pct:+.2f}% expected move in "
+                    f"{c_sec} sector — {c_src}, conf {c_conf:.0%}]"
+                )
+                if c_dir != direction and direction in (NEUTRAL, HEIGHTENED_VOL, REDUCED_VOL):
+                    direction = c_dir
+                cascade_meta["cascade_action"] = "confirm"
+
+            else:
+                # Cascade OVERRIDES: directions disagree and signal is strong enough
+                rule_action_saved = action
+                rule_dir_saved    = direction
+                rule_conf_saved   = confidence
+
+                if c_dir == BULLISH:
+                    action = (
+                        f"CASCADE OVERRIDE -- OVERWEIGHT {asset_str}: "
+                        f"{c_sec.capitalize()} sector model forecasts {c_pct:+.2f}% "
+                        f"(conf {c_conf:.0%}, {c_src}) vs rule-based signal "
+                        f"\"{rule_dir_saved}\". "
+                        f"Rule-based action was: {rule_action_saved}"
+                    )
+                    direction = BULLISH
+                else:
+                    action = (
+                        f"CASCADE OVERRIDE -- UNDERWEIGHT {asset_str}: "
+                        f"{c_sec.capitalize()} sector model forecasts {c_pct:+.2f}% "
+                        f"(conf {c_conf:.0%}, {c_src}) vs rule-based signal "
+                        f"\"{rule_dir_saved}\". "
+                        f"Rule-based action was: {rule_action_saved}"
+                    )
+                    direction = BEARISH
+
+                # Haircut cascade confidence since we're overriding rules
+                confidence = min(c_conf, 0.75)
+                cascade_meta["cascade_action"] = "override"
+
+        # ── Build node ────────────────────────────────────────────────────────
+        model_tag = (
+            "Rule-Based + Cascade Orchestrator"
+            if cascade_meta.get("cascade_available")
+            else "Rule-Based Allocator"
+        )
+
         node = ChainNode(
             layer="portfolio",
-            model_name="Rule-Based Allocator",
+            model_name=model_tag,
             summary=action,
             confidence=confidence,
             direction=direction,
             metadata={
-                "regime": regime, "crisis": crisis, "risk_off": risk_off,
-                "vol_change": vol_change, "ensemble_direction": ens_dir,
-                "trigger_strength": trigger_strength,
+                "regime":             regime,
+                "crisis":             crisis,
+                "risk_off":           risk_off,
+                "vol_change":         vol_change,
+                "ensemble_direction": ens_dir,
+                "trigger_strength":   trigger_strength,
+                **cascade_meta,
             },
         )
         return node, action, confidence
 
 
 # ── Narrative builder ─────────────────────────────────────────────────────────
+# Canonical implementation lives in utils.narrative to allow the home page and
+# future pages to call the same engine without importing the full chain model.
 
-def _build_narrative(result: CausalChainResult) -> str:
-    """
-    Compose a 2-3 sentence explanation that walks through the chain in plain
-    English.  Designed to be readable by a non-technical audience.
-    """
-    parts: List[str] = []
-
-    # Sentence 1: trigger
-    fam = get_trigger_family(result.trigger_family)
-    fam_name = fam.description if fam else result.trigger_family.replace("_", " ").title()
-    tier = "strong" if result.trigger_strength >= 0.7 else (
-           "moderate" if result.trigger_strength >= 0.3 else "weak")
-    parts.append(
-        f"On {result.trigger_date}, a {tier} **{fam_name}** signal fired "
-        f"(strength {result.trigger_strength:.0%})."
-    )
-
-    # Sentence 2: statistical + regime combined
-    stat   = next((n for n in result.nodes if n.layer == "statistical"), None)
-    regime = next((n for n in result.nodes if n.layer == "regime"), None)
-    mid: List[str] = []
-
-    if stat and stat.before_value and stat.after_value:
-        chg = stat.change_pct or 0.0
-        mid.append(
-            f"Realized volatility in {result.commodity.split('(')[0].strip()} "
-            f"{'rose' if chg > 0 else 'fell'} "
-            f"from {stat.before_value:.1f}% to {stat.after_value:.1f}% "
-            f"({'+' if chg >= 0 else ''}{chg:.0%})"
-        )
-
-    if regime:
-        r_label = regime.metadata.get("regime", "Neutral")
-        mid.append(f"the macro regime was **{r_label}**")
-
-    if mid:
-        parts.append(". ".join(mid).capitalize() + ".")
-
-    # Sentence 3: ensemble + portfolio
-    ens   = next((n for n in result.nodes if n.layer == "ensemble"), None)
-    port  = next((n for n in result.nodes if n.layer == "portfolio"), None)
-
-    ens_str  = ""
-    if ens:
-        trusted = ens.metadata.get("trusted_tier", "")
-        if ens.metadata.get("is_trained"):
-            ens_str = f"The meta-predictor trusted the **{trusted}** tier. "
-        else:
-            ens_str = "The meta-predictor has not yet been trained (equal weights). "
-
-    port_str = f"Portfolio recommendation: {result.portfolio_recommendation}" if port else ""
-    if ens_str or port_str:
-        parts.append((ens_str + port_str).strip())
-
-    return " ".join(parts)
+from utils.narrative import build_chain_narrative as _build_narrative  # noqa: E402
 
 
 # ── Utility helpers ────────────────────────────────────────────────────────────

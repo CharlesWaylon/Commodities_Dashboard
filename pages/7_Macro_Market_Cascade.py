@@ -21,6 +21,11 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional
 
 from utils.theme import apply_theme, render_topbar, PLOTLY_LAYOUT
+from utils.macro_narrative import (
+    SECTORS, MACRO_EFFECTS, MACRO_EFFECTS_RISK_ON, MACRO_EFFECTS_RISK_OFF,
+    load_macro, get_macro_state, compute_forecasts, build_narrative,
+)
+from models.cascade_validator import validate as _cascade_validate
 
 st.set_page_config(
     page_title="Accendio | Causal Chains",
@@ -93,12 +98,7 @@ def _color_metric_html(label: str, value: str, sub: str, color: str) -> str:
 
 
 # ── Sector / commodity map ─────────────────────────────────────────────────────
-SECTORS: Dict[str, List[str]] = {
-    "Energy":    ["WTI Crude Oil", "Brent Crude Oil", "Natural Gas (Henry Hub)"],
-    "Metals":    ["Gold (COMEX)", "Silver (COMEX)", "Copper (COMEX)"],
-    "Grains":    ["Corn (CBOT)", "Wheat (CBOT SRW)", "Soybeans (CBOT)"],
-    "Livestock": ["Feeder Cattle", "Lean Hogs"],
-}
+# SECTORS and MACRO_EFFECTS are imported from utils.macro_narrative above.
 
 SECTOR_COLORS = {
     "Energy":    AMBER,
@@ -123,29 +123,6 @@ TICKERS = {
     "Lean Hogs":               "HE=F",
 }
 
-# ── Causal relationship matrix ─────────────────────────────────────────────────
-# Effect of each macro channel on 1-week commodity return, per unit of signal.
-# Signals are normalised to [−1, +1]; effects are in percentage points.
-#   real_yields: TLT momentum inverted (rising rates = real yields up)
-#   usd:         DXY z-score (positive = strong dollar)
-#   risk_off:    scaled VIX above 15 (positive = risk-off, flight to safety)
-MACRO_EFFECTS: Dict[str, Dict[str, float]] = {
-    # Energy — hurt by strong dollar; mild risk-off sensitivity
-    "WTI Crude Oil":           {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
-    "Brent Crude Oil":         {"real_yields": -0.20, "usd": -0.50, "risk_off": -0.40},
-    "Natural Gas (Henry Hub)": {"real_yields":  0.00, "usd": -0.20, "risk_off": -0.20},
-    # Metals — gold safe-haven offsets USD headwind; copper cyclical
-    "Gold (COMEX)":            {"real_yields": -0.60, "usd":  0.30, "risk_off":  0.50},
-    "Silver (COMEX)":          {"real_yields": -0.40, "usd": -0.10, "risk_off":  0.25},
-    "Copper (COMEX)":          {"real_yields":  0.10, "usd": -0.30, "risk_off": -0.50},
-    # Grains — USD-sensitive, weak risk-off link
-    "Corn (CBOT)":             {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
-    "Wheat (CBOT SRW)":        {"real_yields":  0.00, "usd": -0.25, "risk_off": -0.20},
-    "Soybeans (CBOT)":         {"real_yields":  0.00, "usd": -0.30, "risk_off": -0.25},
-    # Livestock — demand-led; sensitive to risk-off via feed cost / consumption
-    "Feeder Cattle":           {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
-    "Lean Hogs":               {"real_yields":  0.00, "usd": -0.10, "risk_off": -0.30},
-}
 
 # Cascade sector connections from the three macro channels
 # {macro_channel_idx: {sector_idx: weight}}
@@ -178,89 +155,137 @@ def load_prices(period_days: int = 756) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_macro(period: str = "2y") -> pd.DataFrame:
-    from features.macro_overlays import build_macro_overlay_features
-    try:
-        return build_macro_overlay_features(period=period)
-    except Exception:
-        return pd.DataFrame()
+# load_macro, get_macro_state, compute_forecasts, build_narrative
+# are imported from utils.macro_narrative above.
 
 
-# ── Macro state ────────────────────────────────────────────────────────────────
+# ── Cascade Topology Diagram ───────────────────────────────────────────────────
 
-def get_macro_state(macro_df: pd.DataFrame) -> Dict:
-    """Extract the latest macro state, returning a normalised signal dict."""
-    if macro_df is None or macro_df.empty:
-        return {
-            "dxy_zscore": 0.0, "vix": 18.0, "tlt_mom21": 0.0,
-            "real_yields_signal": 0.0, "usd_signal": 0.0, "risk_off_signal": 0.0,
-            "risk_off": False, "crisis": False,
-            "date": str(date.today()),
-        }
-    row   = macro_df.iloc[-1]
-    dxy_z = float(row.get("dxy_zscore63", 0.0) or 0.0)
-    vix   = float(row.get("vix", 18.0) or 18.0)
-    tlt21 = float(row.get("tlt_mom21", 0.0) or 0.0)
+def build_topology_diagram() -> go.Figure:
+    """
+    Static node-link diagram of the full 9-edge cross-sector causal topology.
 
-    # Normalised signals — positive = headwind direction named by label
-    real_yields_signal = max(-1.0, min(1.0, -tlt21 / 0.05))
-    usd_signal         = max(-1.0, min(1.0,  dxy_z / 2.0))
-    risk_off_signal    = max(0.0,  min(1.0,  (vix - 15.0) / 20.0))
+    Node layout (data coords, x in [0,10], y in [0,6]):
+      Energy(1,3)  Metals(3.5,4.8)  Agriculture(6.5,4.8)  Livestock(9,3)  Digital(5.5,1.2)
 
-    return {
-        "dxy_zscore":          round(dxy_z, 3),
-        "vix":                 round(vix, 1),
-        "tlt_mom21":           round(tlt21, 4),
-        "real_yields_signal":  round(real_yields_signal, 3),
-        "usd_signal":          round(usd_signal, 3),
-        "risk_off_signal":     round(risk_off_signal, 3),
-        "risk_off":            vix >= 20.0,
-        "crisis":              vix >= 30.0,
-        "date": str(macro_df.index[-1].date()),
+    Arrow colour = source sector colour so edge bundles are readable at a glance.
+    Edge labels are rendered in the reference table below the chart (not inline).
+    """
+    nodes = {
+        "Energy":      (1.0, 3.0),
+        "Metals":      (3.5, 4.8),
+        "Agriculture": (6.5, 4.8),
+        "Livestock":   (9.0, 3.0),
+        "Digital":     (5.5, 1.2),
     }
 
+    # (source, target) — mirrors UPSTREAM_MAP in cascade_orchestrator.py
+    edges = [
+        ("Energy",      "Metals"),
+        ("Energy",      "Agriculture"),
+        ("Energy",      "Livestock"),
+        ("Energy",      "Digital"),
+        ("Metals",      "Agriculture"),
+        ("Metals",      "Livestock"),
+        ("Metals",      "Digital"),
+        ("Agriculture", "Livestock"),
+        ("Agriculture", "Digital"),
+    ]
 
-# ── Forecast computation ───────────────────────────────────────────────────────
+    # Source-sector colour map (Digital not a source in UPSTREAM_MAP)
+    _src_color = {
+        "Energy":      AMBER,
+        "Metals":      BLUE,
+        "Agriculture": GREEN,
+    }
 
-def compute_forecasts(prices: pd.DataFrame, macro_state: Dict) -> pd.DataFrame:
-    """
-    Return a DataFrame with one row per commodity:
-      commodity, sector, base_pct, macro_adj_pct, final_pct, uncertainty_band
-    All values are 1-week (5 trading day) forecasts in percentage points.
-    """
-    ry  = macro_state["real_yields_signal"]
-    usd = macro_state["usd_signal"]
-    ro  = macro_state["risk_off_signal"]
+    fig = go.Figure()
 
-    rows = []
-    for sector, comms in SECTORS.items():
-        for comm in comms:
-            if comm in prices.columns and len(prices[comm].dropna()) >= 22:
-                log_ret  = np.log(prices[comm] / prices[comm].shift(1)).dropna()
-                tail21   = log_ret.tail(21)
-                base_pct = float(tail21.mean() * 5 * 100)
-                std21    = float(tail21.std() * np.sqrt(5) * 100)
-            else:
-                base_pct = 0.0
-                std21    = 1.0
+    # Arrows first so node circles sit on top
+    for src, tgt in edges:
+        x0, y0 = nodes[src]
+        x1, y1 = nodes[tgt]
+        fig.add_annotation(
+            x=x1, y=y1, ax=x0, ay=y0,
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True,
+            arrowhead=3, arrowsize=1.1, arrowwidth=1.8,
+            arrowcolor=_hex_rgba(_src_color.get(src, ICE), 0.65),
+            text="",
+        )
 
-            efx = MACRO_EFFECTS.get(comm, {})
-            macro_adj = (
-                efx.get("real_yields", 0.0) * ry  +
-                efx.get("usd",         0.0) * usd +
-                efx.get("risk_off",    0.0) * ro
-            )
-            final = base_pct + macro_adj
-            rows.append({
-                "commodity":        comm,
-                "sector":           sector,
-                "base_pct":         round(base_pct, 3),
-                "macro_adj_pct":    round(macro_adj, 3),
-                "final_pct":        round(final, 3),
-                "uncertainty_band": round(1.65 * std21, 3),
-            })
-    return pd.DataFrame(rows)
+    # Node circles + sector labels
+    _node_sector_colors = {**SECTOR_COLORS, "Digital": TEAL}
+    for sector, (x, y) in nodes.items():
+        color = _node_sector_colors.get(sector, ICE)
+        fig.add_trace(go.Scatter(
+            x=[x], y=[y],
+            mode="markers+text",
+            marker=dict(
+                size=60,
+                color=_hex_rgba(color, 0.12),
+                line=dict(color=color, width=2),
+            ),
+            text=[sector],
+            textposition="middle center",
+            textfont=dict(color=color, size=11),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+
+    fig.update_layout(
+        **PLOTLY_LAYOUT,
+        height=270,
+        xaxis=dict(visible=False, range=[0, 10.5]),
+        yaxis=dict(visible=False, range=[0, 6]),
+        margin=dict(t=10, l=10, r=10, b=10),
+    )
+    return fig
+
+
+# Edge reference table rendered below the topology diagram
+_TOPOLOGY_EDGE_TABLE = [
+    ("Energy",      "Metals",      AMBER, "Mining & smelting electricity; ore processing fuel"),
+    ("Energy",      "Agriculture", AMBER, "Fertilizer production & farm machinery fuel costs"),
+    ("Energy",      "Livestock",   AMBER, "Facility heating/cooling; cold-chain transport fuel"),
+    ("Energy",      "Digital",     AMBER, "Electricity is Bitcoin's dominant variable cost"),
+    ("Metals",      "Agriculture", BLUE,  "Farm equipment steel; irrigation copper; storage capex"),
+    ("Metals",      "Livestock",   BLUE,  "Equipment & barn construction material costs"),
+    ("Metals",      "Digital",     BLUE,  "ASIC hardware metals; data-centre cooling infrastructure"),
+    ("Agriculture", "Livestock",   GREEN, "Feed-grain prices are the primary rearing cost"),
+    ("Agriculture", "Digital",     GREEN, "Food-CPI inflation signal → rate expectations → BTC demand"),
+]
+
+
+def render_topology_edge_table() -> None:
+    """Render a compact styled HTML reference table for all 9 topology edges."""
+    rows_html = ""
+    for src, tgt, color, mechanism in _TOPOLOGY_EDGE_TABLE:
+        rows_html += (
+            f"<tr>"
+            f"<td style='color:{color};font-weight:500;white-space:nowrap;padding:4px 10px'>{src}</td>"
+            f"<td style='color:{_hex_rgba(ICE,0.4)};padding:4px 6px'>→</td>"
+            f"<td style='color:{color};font-weight:500;white-space:nowrap;padding:4px 10px'>{tgt}</td>"
+            f"<td style='color:{_hex_rgba(ICE,0.55)};font-size:11px;padding:4px 12px'>{mechanism}</td>"
+            f"</tr>"
+        )
+    st.markdown(
+        f"""<div style='background:{DEPTH};border:0.5px solid {_hex_rgba(GRID,0.6)};
+        border-radius:8px;padding:10px 4px;margin-top:6px;overflow-x:auto'>
+        <table style='border-collapse:collapse;width:100%;font-size:12px'>
+          <thead><tr>
+            <th style='color:{_hex_rgba(ICE,0.3)};font-size:9px;letter-spacing:.1em;
+                       text-transform:uppercase;padding:4px 10px;text-align:left'>From</th>
+            <th></th>
+            <th style='color:{_hex_rgba(ICE,0.3)};font-size:9px;letter-spacing:.1em;
+                       text-transform:uppercase;padding:4px 10px;text-align:left'>To</th>
+            <th style='color:{_hex_rgba(ICE,0.3)};font-size:9px;letter-spacing:.1em;
+                       text-transform:uppercase;padding:4px 12px;text-align:left'>Economic mechanism</th>
+          </tr></thead>
+          <tbody>{rows_html}</tbody>
+        </table></div>""",
+        unsafe_allow_html=True,
+    )
 
 
 # ── Cascade Sankey ─────────────────────────────────────────────────────────────
@@ -473,117 +498,6 @@ def build_comparison_table(forecasts: pd.DataFrame) -> pd.DataFrame:
     return tbl.reset_index(drop=True)
 
 
-# ── Narrative ──────────────────────────────────────────────────────────────────
-
-def build_narrative(macro_state: Dict, forecasts: pd.DataFrame) -> str:
-    ry   = macro_state["real_yields_signal"]
-    usd  = macro_state["usd_signal"]
-    ro   = macro_state["risk_off_signal"]
-    vix  = macro_state["vix"]
-    dxyz = macro_state["dxy_zscore"]
-    tlt  = macro_state["tlt_mom21"]
-    crisis   = macro_state["crisis"]
-    risk_off = macro_state["risk_off"]
-
-    paras = []
-
-    # Macro regime headline
-    if crisis:
-        regime_lbl = "crisis conditions (VIX ≥ 30)"
-    elif risk_off:
-        regime_lbl = "risk-off conditions (VIX ≥ 20)"
-    else:
-        regime_lbl = "risk-on conditions"
-    paras.append(
-        f"**Macro environment ({macro_state['date']}):** Markets are in {regime_lbl} "
-        f"with VIX at {vix:.1f}. "
-        f"The DXY z-score stands at {dxyz:+.2f} ({'above' if dxyz > 0 else 'below'} "
-        f"its 63-day average) and TLT 21-day momentum is "
-        f"{'positive' if tlt > 0 else 'negative'} at {tlt*100:+.1f}%."
-    )
-
-    # Real yields channel
-    if abs(ry) > 0.15:
-        dir_str = "rising" if ry > 0 else "falling"
-        gold_row = forecasts[forecasts["commodity"] == "Gold (COMEX)"]
-        gold_adj = f"{gold_row.iloc[0]['macro_adj_pct']:+.2f}%" if not gold_row.empty else "N/A"
-        cu_row   = forecasts[forecasts["commodity"] == "Copper (COMEX)"]
-        cu_adj   = f"{cu_row.iloc[0]['macro_adj_pct']:+.2f}%" if not cu_row.empty else "N/A"
-        paras.append(
-            f"**Real yields channel:** Real yields are {dir_str} (TLT 21d momentum "
-            f"{tlt*100:+.1f}%), "
-            + (f"creating a headwind for Gold (macro adjustment: {gold_adj}) "
-               f"as the opportunity cost of holding bullion rises. "
-               f"Industrial Copper is less sensitive to rate changes "
-               f"(macro adjustment: {cu_adj})."
-               if ry > 0.15 else
-               f"acting as a tailwind for Gold (macro adjustment: {gold_adj}) "
-               f"and other precious metals.")
-        )
-
-    # USD channel
-    if abs(usd) > 0.15:
-        dir_str  = "strong" if usd > 0 else "weak"
-        wti_row  = forecasts[forecasts["commodity"] == "WTI Crude Oil"]
-        wti_adj  = f"{wti_row.iloc[0]['macro_adj_pct']:+.2f}%" if not wti_row.empty else "N/A"
-        paras.append(
-            f"**USD channel:** The dollar is {dir_str} (DXY z-score {dxyz:+.2f}). "
-            + (f"As most commodity futures are USD-denominated, "
-               f"non-US buyers face higher costs — WTI receives a macro adjustment of {wti_adj} "
-               f"and most Agricultural prices face similar pressure."
-               if usd > 0.15 else
-               f"A weak dollar provides broad support for USD-denominated commodity prices; "
-               f"WTI macro adjustment: {wti_adj}.")
-        )
-
-    # Risk sentiment channel
-    if ro > 0.15:
-        cu_row  = forecasts[forecasts["commodity"] == "Copper (COMEX)"]
-        cu_adj  = f"{cu_row.iloc[0]['macro_adj_pct']:+.2f}%" if not cu_row.empty else "N/A"
-        gld_row = forecasts[forecasts["commodity"] == "Gold (COMEX)"]
-        gld_adj = f"{gld_row.iloc[0]['macro_adj_pct']:+.2f}%" if not gld_row.empty else "N/A"
-        paras.append(
-            f"**Risk sentiment:** VIX at {vix:.1f} signals risk-off positioning. "
-            f"Industrial commodities face demand destruction headwinds — "
-            f"Copper macro adjustment: {cu_adj}. "
-            f"Gold benefits from safe-haven flows (macro adjustment: {gld_adj})."
-        )
-
-    # Sector-level summaries
-    sector_summaries = []
-    for sector in SECTORS:
-        df_s     = forecasts[forecasts["sector"] == sector]
-        if df_s.empty:
-            continue
-        avg_final = df_s["final_pct"].mean()
-        avg_base  = df_s["base_pct"].mean()
-        adj       = avg_final - avg_base
-        dir_word  = "adds" if adj > 0 else "subtracts"
-        sector_summaries.append(
-            f"{sector} ({dir_word} {abs(adj):.2f}pp → {avg_final:+.2f}%)"
-        )
-    if sector_summaries:
-        paras.append(
-            f"**Sector-level macro overlay:** " + "; ".join(sector_summaries) + "."
-        )
-
-    # Overall conclusion
-    sector_avgs = forecasts.groupby("sector")["final_pct"].mean()
-    if not sector_avgs.empty:
-        best  = sector_avgs.idxmax()
-        worst = sector_avgs.idxmin()
-        paras.append(
-            f"**Overall:** Under current macro conditions, **{best}** is the "
-            f"most favoured sector (avg 1-wk forecast: {sector_avgs[best]:+.2f}%). "
-            f"**{worst}** faces the greatest headwinds "
-            f"(avg forecast: {sector_avgs[worst]:+.2f}%). "
-            f"These are model-generated outlooks; macro signal quality depends on "
-            f"the freshness of DXY, VIX, and TLT data."
-        )
-
-    return "\n\n".join(paras)
-
-
 # ── Historical accuracy ────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=7200, show_spinner=False)
@@ -769,6 +683,135 @@ with _status_col:
     )
 
 
+# ── Cascade Health Badge ──────────────────────────────────────────────────────
+try:
+    _vr = _cascade_validate(_forecasts)
+except Exception as _ve:
+    from models.cascade_validator import ValidationResult as _VR
+    _vr = _VR(
+        status="no_data", sector_accuracy={}, sector_lift={},
+        lag_confirmed_pct=float("nan"), flags=[f"Validator error: {_ve}"],
+        last_run=None, n_shock_events=0,
+    )
+
+# Badge colour and label
+if _vr.status == "healthy" and not _vr.flags:
+    _badge_col   = GREEN
+    _badge_label = "Cascade Healthy"
+elif _vr.status == "no_data":
+    _badge_col   = AMBER
+    _badge_label = "No Validation Data"
+elif _vr.status in ("degraded", "stale_coefficients") or _vr.flags:
+    _badge_col   = AMBER
+    _badge_label = "Cascade Degraded"
+else:
+    _badge_col   = RED
+    _badge_label = "Cascade Failed"
+
+_last_run_str = (
+    f"Last run: {_vr.last_run[:19].replace('T', ' ')} UTC"
+    if _vr.last_run else "Never run"
+)
+_events_str = f" · {_vr.n_shock_events} shock events" if _vr.n_shock_events else ""
+
+st.markdown(
+    f"""
+<div style="
+  background:{_hex_rgba(_badge_col, 0.08)};
+  border:0.5px solid {_hex_rgba(_badge_col, 0.35)};
+  border-left:3px solid {_badge_col};
+  border-radius:8px;padding:10px 18px;margin-bottom:8px;
+  display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+">
+  <div style="
+    background:{_hex_rgba(_badge_col, 0.15)};
+    border:1px solid {_hex_rgba(_badge_col, 0.45)};
+    border-radius:20px;padding:3px 13px;
+    font-size:11px;font-weight:600;color:{_badge_col};
+    letter-spacing:.09em;text-transform:uppercase;white-space:nowrap;
+  ">● {_badge_label}</div>
+  <div style="font-size:11px;color:{_hex_rgba(ICE, 0.45)}">
+    {_last_run_str}{_events_str}
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+with st.expander("🔍 Cascade validator details", expanded=(_vr.status not in ("healthy", "no_data"))):
+    if _vr.status == "no_data":
+        st.info(
+            "No backtest runs found. The validator reads from `cascade_validation_summary` — "
+            "run `BacktestHarness.validate_causal_chains()` (or `daily_retrain.py`) "
+            "to populate it.",
+            icon="📋",
+        )
+    else:
+        # Flags
+        if _vr.flags:
+            for _f in _vr.flags:
+                st.markdown(
+                    f"<div style='background:{_hex_rgba(AMBER,0.08)};border-left:3px solid {AMBER};"
+                    f"border-radius:4px;padding:6px 12px;font-size:12px;"
+                    f"color:{_hex_rgba(ICE,0.80)};margin-bottom:4px'>⚠ {_f}</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.markdown(
+                f"<div style='color:{GREEN};font-size:12px;margin-bottom:6px'>"
+                f"✓ No flags — all chains within healthy thresholds.</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Sector accuracy table
+        if _vr.sector_accuracy:
+            _acc_rows = []
+            for _sec in ("Energy", "Metals", "Grains", "Livestock"):
+                _acc = _vr.sector_accuracy.get(_sec, float("nan"))
+                _lift = _vr.sector_lift.get(_sec, float("nan"))
+                _ok = (not math.isnan(_acc)) and _acc >= 0.50
+                _acc_rows.append({
+                    "Sector":              _sec,
+                    "Dir. Accuracy":       f"{_acc*100:.1f}%" if not math.isnan(_acc) else "—",
+                    "vs. Baseline":        "✅ Beats baseline" if _ok else "❌ Below floor (50%)",
+                    "Avg MAE Lift (pp)":   f"{_lift:+.3f}" if not math.isnan(_lift) else "—",
+                })
+            st.dataframe(
+                pd.DataFrame(_acc_rows),
+                use_container_width=True, hide_index=True,
+                height=min(len(_acc_rows) * 38 + 44, 220),
+            )
+
+        # Lag structure
+        _lag_pct = _vr.lag_confirmed_pct
+        if not math.isnan(_lag_pct):
+            _lag_color = GREEN if _lag_pct >= 0.5 else AMBER
+            st.markdown(
+                f"<div style='font-size:12px;color:{_hex_rgba(ICE, 0.60)};margin-top:6px'>"
+                f"Energy → Metals lag confirmed in "
+                f"<span style='color:{_lag_color};font-weight:600'>"
+                f"{_lag_pct*100:.0f}%</span> of shock events.</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        f"Status: {_vr.status.upper()} · {_last_run_str}{_events_str} · "
+        "Powered by cascade_validation_summary table."
+    )
+
+
+# ── SECTION 0: Cascade Topology ──────────────────────────────────────────────
+st.subheader("⓪ Cascade Topology")
+st.caption(
+    "Static causal dependency map — how price shocks propagate across commodity sectors "
+    "before any macro channel overlay is applied."
+)
+st.plotly_chart(build_topology_diagram(), use_container_width=True,
+                config={"displayModeBar": False})
+render_topology_edge_table()
+st.divider()
+
+
 # ── SECTION 1: Macro State ────────────────────────────────────────────────────
 st.subheader("① Current Macro State")
 st.caption(
@@ -858,6 +901,205 @@ with m4:
             comp_color,
         ),
         unsafe_allow_html=True,
+    )
+
+# ── Regime coefficient badge + comparison ─────────────────────────────────────
+_is_risk_off  = _macro_state.get("risk_off", False)
+_active_table = MACRO_EFFECTS_RISK_OFF if _is_risk_off else MACRO_EFFECTS_RISK_ON
+_regime_color = RED if _is_risk_off else GREEN
+_regime_label = "RISK-OFF  ·  VIX ≥ 20" if _is_risk_off else "RISK-ON  ·  VIX < 20"
+_regime_desc  = (
+    "Regime-conditional coefficients active: safe-haven amplification for Gold/Silver, "
+    "deepened demand-destruction discount for Copper and Energy."
+    if _is_risk_off else
+    "Regime-conditional coefficients active: standard inverse macro sensitivities, "
+    "safe-haven demand for Gold muted."
+)
+
+st.markdown(
+    f"""
+<div style="
+  background:{DEPTH};border:0.5px solid {_hex_rgba(_regime_color, 0.4)};
+  border-left:3px solid {_regime_color};border-radius:8px;
+  padding:10px 18px;margin-bottom:6px;
+  display:flex;align-items:center;gap:16px;
+">
+  <div>
+    <div style="font-size:9px;color:{_hex_rgba(ICE, 0.35)};letter-spacing:.12em;
+                text-transform:uppercase;margin-bottom:3px">Active macro-effect table</div>
+    <div style="font-size:1rem;font-weight:600;color:{_regime_color}">{_regime_label}</div>
+  </div>
+  <div style="font-size:11px;color:{_hex_rgba(ICE, 0.55)};line-height:1.5">
+    {_regime_desc}
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+with st.expander("🔢 Causal weight matrix", expanded=False):
+    # Column header definitions — shown as subtext inside the header cells
+    _COL_DEFS = {
+        "real_yields": (
+            "real_yields",
+            "Real-rate signal (−TLT 21d momentum, normalised to [−1,1]). "
+            "Positive signal = rates rising = headwind for most commodities via carry cost.",
+        ),
+        "usd": (
+            "usd",
+            "Dollar-strength signal (DXY 63d z-score, normalised to [−1,1]). "
+            "Positive = stronger USD = lower USD-priced commodity returns.",
+        ),
+        "risk_off": (
+            "risk_off",
+            "Risk-sentiment signal (VIX − 15, normalised to [0,1]). "
+            "Positive = risk-off; lifts safe havens (Gold), crushes industrial demand.",
+        ),
+    }
+
+    # Build rows: commodities in SECTORS order, with sector group labels
+    def _short(name: str) -> str:
+        return (
+            name.replace(" (COMEX)", "").replace(" (CBOT)", "")
+                .replace(" (Henry Hub)", "").replace(" (CBOT SRW)", "")
+        )
+
+    def _cell_color(v: float) -> str:
+        if v > 0.01:
+            return GREEN
+        if v < -0.01:
+            return RED
+        return _hex_rgba(ICE, 0.35)
+
+    # Header row HTML
+    _th_style = (
+        f"padding:8px 14px;text-align:right;font-size:11px;font-weight:600;"
+        f"color:{_hex_rgba(ICE, 0.75)};border-bottom:1px solid {_hex_rgba(GRID, 0.8)};"
+        f"white-space:nowrap;vertical-align:bottom"
+    )
+    _th_left = (
+        f"padding:8px 14px;text-align:left;font-size:11px;font-weight:600;"
+        f"color:{_hex_rgba(ICE, 0.75)};border-bottom:1px solid {_hex_rgba(GRID, 0.8)};"
+        f"vertical-align:bottom"
+    )
+    _def_style = (
+        f"display:block;font-size:9px;font-weight:400;color:{_hex_rgba(ICE, 0.38)};"
+        f"line-height:1.4;max-width:160px;white-space:normal;margin-top:3px"
+    )
+
+    _header_html = (
+        f"<tr>"
+        f"<th style='{_th_left}'>Sector</th>"
+        f"<th style='{_th_left}'>Commodity</th>"
+    )
+    for _key, (_label, _def) in _COL_DEFS.items():
+        _header_html += (
+            f"<th style='{_th_style}'>{_label}"
+            f"<span style='{_def_style}'>{_def}</span></th>"
+        )
+    _header_html += "</tr>"
+
+    # Data rows
+    _td_base = f"padding:7px 14px;font-size:12px;border-bottom:1px solid {_hex_rgba(GRID, 0.25)}"
+    _rows_html = ""
+    _prev_sector = None
+    for _sector, _comms in SECTORS.items():
+        for _comm in _comms:
+            _efx = _active_table.get(_comm, {})
+            _is_new_sector = _sector != _prev_sector
+            _prev_sector   = _sector
+            _sec_color     = SECTOR_COLORS.get(_sector, ICE)
+
+            _rows_html += "<tr>"
+            # Sector cell — only show label on the first commodity in each group
+            if _is_new_sector:
+                _rows_html += (
+                    f"<td style='{_td_base};color:{_sec_color};"
+                    f"font-weight:600;font-size:10px;letter-spacing:.07em;"
+                    f"text-transform:uppercase'>{_sector}</td>"
+                )
+            else:
+                _rows_html += f"<td style='{_td_base}'></td>"
+
+            # Commodity name
+            _rows_html += (
+                f"<td style='{_td_base};color:{_hex_rgba(ICE, 0.75)}'>"
+                f"{_short(_comm)}</td>"
+            )
+
+            # Coefficient cells
+            for _key in ("real_yields", "usd", "risk_off"):
+                _v = _efx.get(_key, 0.0)
+                _c = _cell_color(_v)
+                _rows_html += (
+                    f"<td style='{_td_base};text-align:right;"
+                    f"color:{_c};font-weight:500;font-variant-numeric:tabular-nums'>"
+                    f"{_v:+.2f}</td>"
+                )
+            _rows_html += "</tr>"
+
+    st.markdown(
+        f"""
+<div style="overflow-x:auto;margin-bottom:4px">
+<table style="border-collapse:collapse;width:100%;font-family:monospace">
+  <thead>{_header_html}</thead>
+  <tbody>{_rows_html}</tbody>
+</table>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Active table: {_regime_label}. "
+        "Coefficients multiply normalised signals to produce the macro adjustment in percentage points "
+        "(e.g. coefficient −0.50 × usd_signal 0.80 = −0.40 pp adjustment). "
+        "Sources: Baur & Lucey (2010), Reboredo (2013), Hamilton (2009), IMF WEO Apr-2012."
+    )
+
+with st.expander("📊 Compare risk-on vs risk-off coefficient tables", expanded=False):
+    st.markdown(
+        f"""
+<div style="font-size:11px;color:{_hex_rgba(ICE, 0.45)};margin-bottom:8px;line-height:1.6">
+  Coefficients are multiplied by normalised signals (real_yields ∈ [−1,1],
+  usd ∈ [−1,1], risk_off ∈ [0,1]) to produce the macro adjustment in percentage points.
+  The <b style="color:{_regime_color}">{_regime_label}</b> table is currently active.
+  Sources: Baur &amp; Lucey (2010), Hood &amp; Malik (2013), Erb &amp; Harvey (2013),
+  Hamilton (2009), IMF WEO Apr-2012.
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    _cmp_rows = []
+    for sector, comms in SECTORS.items():
+        for comm in comms:
+            ron = MACRO_EFFECTS_RISK_ON.get(comm, {})
+            rof = MACRO_EFFECTS_RISK_OFF.get(comm, {})
+            short = comm.replace(" (COMEX)", "").replace(" (CBOT)", "") \
+                        .replace(" (Henry Hub)", "").replace(" (CBOT SRW)", "")
+            _cmp_rows.append({
+                "Sector":                 sector,
+                "Commodity":              short,
+                "RiskOn · real_yields":  f"{ron.get('real_yields', 0):+.2f}",
+                "RiskOff · real_yields": f"{rof.get('real_yields', 0):+.2f}",
+                "RiskOn · usd":          f"{ron.get('usd', 0):+.2f}",
+                "RiskOff · usd":         f"{rof.get('usd', 0):+.2f}",
+                "RiskOn · risk_off":     f"{ron.get('risk_off', 0):+.2f}",
+                "RiskOff · risk_off":    f"{rof.get('risk_off', 0):+.2f}",
+            })
+
+    _cmp_df = pd.DataFrame(_cmp_rows)
+    st.dataframe(
+        _cmp_df,
+        use_container_width=True,
+        hide_index=True,
+        height=min(len(_cmp_df) * 38 + 44, 450),
+    )
+    st.caption(
+        "Highlighted cells: Gold risk_off +0.30 (risk-on) → +0.80 (risk-off); "
+        "Copper risk_off −0.40 → −0.70; WTI/Brent risk_off −0.30 → −0.60. "
+        "Gold's usd coefficient also flips from −0.20 to +0.15 in risk-off, "
+        "reflecting simultaneous dollar/gold safe-haven rallies (Reboredo 2013)."
     )
 
 st.divider()

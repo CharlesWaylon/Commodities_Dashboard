@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone, timedelta
 
 from services.price_data import fetch_current_prices
+from utils.macro_narrative import load_macro, get_macro_state, compute_forecasts, build_narrative
 from utils.theme import (
     apply_theme, render_topbar, panel_header, PLOTLY_LAYOUT,
     VOID, ABYSS, DEPTH, SIGNAL, ICE, ICE_MID,
@@ -91,29 +92,73 @@ def _load_correlations():
     return corr.rename(index=label_map, columns=label_map)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_brief_prices() -> pd.DataFrame:
+    """Price matrix (date-indexed, commodity-name columns) for the narrative engine."""
+    from services.data_contract import fetch_price_matrix
+    from utils.macro_narrative import SECTORS
+    all_comms = [c for comms in SECTORS.values() for c in comms]
+    try:
+        df = fetch_price_matrix(names=all_comms, days=756)
+        if not df.empty:
+            cols = [c for c in all_comms if c in df.columns]
+            return df[cols].ffill().dropna(how="all")
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
 def _build_brief(df: pd.DataFrame) -> str:
-    """Build the HTML for Today's Intelligence Brief from live price data."""
-    best   = df.loc[df["Pct_Change"].idxmax()]
-    worst  = df.loc[df["Pct_Change"].idxmin()]
-    sp     = df.groupby("Sector")["Pct_Change"].mean().sort_values(ascending=False)
+    """Build the HTML for Today's Intelligence Brief.
+
+    The macro paragraph comes from the narrative engine (build_narrative).
+    The top-signals cards below it are driven by live Pct_Change ranks.
+    Falls back to the old sector-rank sentence if macro data is unavailable.
+    """
     top3   = df.sort_values("Pct_Change", key=abs, ascending=False).head(3)
     ts_str = datetime.now(timezone.utc).strftime("%b %d, %Y · %H:%M UTC")
 
     def _c(v): return ASCEND if v >= 0 else DESCEND
 
+    # ── Macro narrative paragraph ──────────────────────────────────────────────
+    try:
+        _macro_df    = load_macro(period="2y")
+        _macro_state = get_macro_state(_macro_df)
+        _prices      = _load_brief_prices()
+        _forecasts   = compute_forecasts(_prices, _macro_state)
+        narrative_md = build_narrative(_macro_state, _forecasts)
+        # Convert markdown bold (**text**) to HTML <b> for inline rendering
+        import re
+        narrative_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", narrative_md)
+        # Separate paragraphs with a line break
+        narrative_html = narrative_html.replace("\n\n", "<br><br>")
+        macro_para = (
+            f'<p style="font-size:12.5px;line-height:1.75;'
+            f'color:rgba(238,242,255,0.72);margin-bottom:14px">'
+            f"{narrative_html}</p>"
+        )
+    except Exception:
+        sp = df.groupby("Sector")["Pct_Change"].mean().sort_values(ascending=False)
+        best  = df.loc[df["Pct_Change"].idxmax()]
+        worst = df.loc[df["Pct_Change"].idxmin()]
+        macro_para = (
+            f'<p style="font-size:12.5px;line-height:1.75;'
+            f'color:rgba(238,242,255,0.72);margin-bottom:14px">'
+            f'<b style="color:{ICE}">{sp.index[0]}</b> leads today at an avg '
+            f'<span style="color:{_c(sp.iloc[0])}">{sp.iloc[0]:+.2f}%</span>, '
+            f'while <b style="color:{ICE}">{sp.index[-1]}</b> trails at '
+            f'<span style="color:{_c(sp.iloc[-1])}">{sp.iloc[-1]:+.2f}%</span>. '
+            f'Top performer: <b style="color:{ICE}">{best["Name"].split("(")[0].strip()}</b> '
+            f'<span style="color:{ASCEND}">{best["Pct_Change"]:+.2f}%</span>. '
+            f'Biggest decline: <b style="color:{ICE}">{worst["Name"].split("(")[0].strip()}</b> '
+            f'<span style="color:{DESCEND}">{worst["Pct_Change"]:+.2f}%</span>.'
+            f"</p>"
+        )
+
     brief = f"""
 <div style="background:{DEPTH};border:0.5px solid {BORDER};border-radius:8px;padding:16px 18px;height:100%">
   <div style="font-size:10px;color:rgba(238,242,255,0.28);letter-spacing:.1em;margin-bottom:10px">{ts_str}</div>
-  <p style="font-size:13px;line-height:1.7;color:rgba(238,242,255,0.72);margin-bottom:14px">
-    <b style="color:{ICE}">{sp.index[0]}</b> leads today at an avg
-    <span style="color:{_c(sp.iloc[0])}">{sp.iloc[0]:+.2f}%</span>,
-    while <b style="color:{ICE}">{sp.index[-1]}</b> trails at
-    <span style="color:{_c(sp.iloc[-1])}">{sp.iloc[-1]:+.2f}%</span>.
-    Top performer: <b style="color:{ICE}">{best["Name"].split("(")[0].strip()}</b>
-    <span style="color:{ASCEND}">{best["Pct_Change"]:+.2f}%</span>.
-    Biggest decline: <b style="color:{ICE}">{worst["Name"].split("(")[0].strip()}</b>
-    <span style="color:{DESCEND}">{worst["Pct_Change"]:+.2f}%</span>.
-  </p>
+  {macro_para}
   <div style="font-size:10px;color:rgba(238,242,255,0.3);letter-spacing:.12em;margin-bottom:8px">TOP SIGNALS</div>
   <div style="display:flex;flex-direction:column;gap:6px">
 """
@@ -435,22 +480,83 @@ border-radius:6px;margin-bottom:5px">
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WATCHLIST / ALERTS (stubs — wired in later)
+# WATCHLIST / ALERTS — roadmap wireframe cards
 # ─────────────────────────────────────────────────────────────────────────────
+def _roadmap_card(icon: str, title: str, description: str, features: list) -> str:
+    bullet_html = "".join(
+        f'<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">'
+        f'<span style="color:{AMBER};margin-top:1px">◆</span>'
+        f'<span style="color:rgba(238,242,255,0.55);font-size:12.5px;line-height:1.5">{f}</span>'
+        f'</div>'
+        for f in features
+    )
+    return f"""
+<div style="
+    max-width:560px;margin:3rem auto 0;
+    background:{DEPTH};
+    border:0.5px solid rgba(245,158,11,0.25);
+    border-top:2px solid {AMBER};
+    border-radius:10px;
+    padding:28px 32px;
+">
+  <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px">
+    <span style="font-size:2rem;line-height:1">{icon}</span>
+    <div>
+      <div style="font-size:15px;font-weight:600;color:rgba(238,242,255,0.9);
+                  letter-spacing:.04em">{title}</div>
+      <div style="
+          display:inline-block;margin-top:4px;
+          font-size:9px;font-weight:700;letter-spacing:.12em;
+          color:{AMBER};background:rgba(245,158,11,0.12);
+          border:0.5px solid rgba(245,158,11,0.35);
+          border-radius:3px;padding:2px 7px;
+      ">ON THE ROADMAP</div>
+    </div>
+  </div>
+  <p style="font-size:13px;line-height:1.7;color:rgba(238,242,255,0.60);margin-bottom:18px">
+    {description}
+  </p>
+  {bullet_html}
+</div>
+"""
+
+
 with tab_watch:
     st.markdown(
-        f'<div style="margin-top:3.5rem;text-align:center">'
-        f'<p style="color:rgba(238,242,255,0.18);font-size:12px;letter-spacing:.1em">WATCHLIST</p>'
-        f'<p style="color:rgba(238,242,255,0.12);font-size:11px">Custom commodity watchlists with threshold alerts — coming soon</p>'
-        f'</div>',
+        _roadmap_card(
+            icon="📋",
+            title="Custom Watchlists",
+            description=(
+                "Build named watchlists of commodities and set per-instrument "
+                "price or move thresholds. The dashboard will highlight breaches "
+                "the moment they appear in live data."
+            ),
+            features=[
+                "Save multiple named lists (e.g. Energy desk, Grains rotation)",
+                "Set ± % move thresholds per instrument",
+                "Colour-coded breach indicators on the live heatmap",
+                "Export watchlist snapshot to CSV",
+            ],
+        ),
         unsafe_allow_html=True,
     )
 
 with tab_alerts:
     st.markdown(
-        f'<div style="margin-top:3.5rem;text-align:center">'
-        f'<p style="color:rgba(238,242,255,0.18);font-size:12px;letter-spacing:.1em">ALERTS</p>'
-        f'<p style="color:rgba(238,242,255,0.12);font-size:11px">Signal and regime-change alert configuration — coming soon</p>'
-        f'</div>',
+        _roadmap_card(
+            icon="🔔",
+            title="Signal & Regime Alerts",
+            description=(
+                "Configure rule-based alerts that fire when a macro regime "
+                "changes, a causal chain exceeds a confidence threshold, or an "
+                "ensemble model flips direction — so you never miss a structural shift."
+            ),
+            features=[
+                "Regime-change alert (VIX crossing 20 / 30, DXY z-score ± 2)",
+                "Causal QS Engine: fire when portfolio confidence > X %",
+                "Ensemble direction flip for any commodity",
+                "In-app notification badge + optional email digest",
+            ],
+        ),
         unsafe_allow_html=True,
     )
