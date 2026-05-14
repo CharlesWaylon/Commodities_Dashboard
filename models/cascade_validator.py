@@ -479,6 +479,83 @@ def detect_macro_shocks(
     return sorted(events, key=lambda e: e["date"])
 
 
+# ── Lightweight health check (public API) ──────────────────────────────────────
+
+@dataclass
+class ValidationResult:
+    """Lightweight summary of the most recent stored cascade validation run."""
+    status: str                         # "healthy" | "degraded" | "no_data"
+    sector_accuracy: Dict[str, float]   # sector → directional hit rate [0, 1]
+    sector_lift: Dict[str, float]       # sector → avg MAE lift (pp)
+    lag_confirmed_pct: float            # fraction of shocks with E→M lag confirmed
+    flags: List[str]                    # human-readable warnings
+    last_run: Optional[str]             # ISO timestamp of last backtest run
+    n_shock_events: int                 # shock events analysed in last run
+
+
+def validate(forecasts_df: Optional[pd.DataFrame] = None) -> "ValidationResult":
+    """
+    Load the most recent ValidationReport from the DB and return a
+    ValidationResult suitable for rendering a health badge.
+
+    Parameters
+    ----------
+    forecasts_df : pd.DataFrame, optional
+        Current-session forecasts from compute_forecasts(). When provided, an
+        additional consistency check verifies that at least one sector has a
+        non-zero macro adjustment — flags if all adjustments are near-zero.
+
+    Returns
+    -------
+    ValidationResult with status "healthy", "degraded", or "no_data".
+    """
+    _no_data = ValidationResult(
+        status="no_data",
+        sector_accuracy={},
+        sector_lift={},
+        lag_confirmed_pct=float("nan"),
+        flags=["No backtest runs in DB — run backtest_harness or daily_retrain.py to populate."],
+        last_run=None,
+        n_shock_events=0,
+    )
+
+    df = recent_validation_reports(n=1)
+    if df.empty:
+        return _no_data
+
+    row = df.iloc[0]
+    flags: List[str] = list(row.get("flags_json", []) or [])
+
+    # Staleness check — flag if last run was more than 7 days ago
+    try:
+        last_dt = datetime.fromisoformat(str(row["run_at"]))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - last_dt).days
+        if age_days > 7:
+            flags.append(
+                f"Validation data is {age_days}d old — re-run backtest_harness to refresh."
+            )
+    except Exception:
+        pass
+
+    # Forecast consistency check — all adjustments near-zero implies macro overlay is flat
+    if forecasts_df is not None and not forecasts_df.empty:
+        if "macro_adj_pct" in forecasts_df.columns:
+            if (forecasts_df["macro_adj_pct"].abs() < 0.001).all():
+                flags.append("All macro adjustments are near-zero — check macro overlay inputs.")
+
+    return ValidationResult(
+        status=str(row.get("overall_status", "no_data")),
+        sector_accuracy=dict(row.get("sector_accuracy_json", {}) or {}),
+        sector_lift=dict(row.get("sector_lift_json", {}) or {}),
+        lag_confirmed_pct=float(row.get("lag_confirmed_pct") or float("nan")),
+        flags=flags,
+        last_run=str(row["run_at"]),
+        n_shock_events=int(row.get("n_shock_events", 0) or 0),
+    )
+
+
 # ── Core computation helpers ───────────────────────────────────────────────────
 
 def _macro_signals_at(macro_df: pd.DataFrame, dt: pd.Timestamp) -> Dict[str, float]:

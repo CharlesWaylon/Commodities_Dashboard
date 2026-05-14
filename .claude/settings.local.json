@@ -53,7 +53,8 @@
       "Bash(mdfind -name \"python3\")",
       "Bash(grep -E \"bin/python3$\")",
       "Bash(python3 -c \"import statsmodels, scipy; print\\('ok'\\)\")",
-      "Bash(/opt/anaconda3/bin/python3 -c ' *)"
+      "Bash(/opt/anaconda3/bin/python3 -c ' *)",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('pages/6_Causal_QS_Engine.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

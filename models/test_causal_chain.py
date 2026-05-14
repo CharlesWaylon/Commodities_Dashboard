@@ -111,7 +111,7 @@ def test_chain_result_to_dict_and_json():
         res = CausalChainResult(
             trigger_family="opec_action", trigger_date="2026-04-15",
             trigger_strength=0.8, affected_commodities=["WTI Crude Oil"],
-            commodity="WTI Crude Oil", nodes=[node],
+            commodity="WTI Crude Oil", sector="Energy", nodes=[node],
             portfolio_recommendation="OVERWEIGHT WTI", portfolio_confidence=0.65,
             narrative="OPEC cut, vol up, go long.",
         )

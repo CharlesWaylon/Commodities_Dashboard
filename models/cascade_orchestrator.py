@@ -62,12 +62,13 @@ SECTOR_ORDER: List[str] = [
 ]
 
 # Maps each sector to the set of upstream sectors whose forecasts it receives.
+# Order within each list must respect SECTOR_ORDER (no backward edges).
 UPSTREAM_MAP: Dict[str, List[str]] = {
-    "energy":       [],                          # macro only
-    "metals":       ["energy"],                  # energy prices drive mining costs
-    "agriculture":  ["energy"],                  # energy = fertilizer + fuel cost
-    "livestock":    ["agriculture"],             # feed-grain prices are the primary input
-    "digital":      [],                          # macro-driven, not physical-chain-driven
+    "energy":       [],                                    # macro only
+    "metals":       ["energy"],                            # energy drives mining & smelting costs
+    "agriculture":  ["energy", "metals"],                  # energy = fertilizer+fuel; metals = equipment & irrigation
+    "livestock":    ["agriculture", "energy"],             # feed-grain prices primary; energy for facilities & transport
+    "digital":      ["energy", "metals", "agriculture"],   # electricity cost; hardware metals; food-CPI inflation signal
 }
 
 # ── Macro variable column names in macro_df ───────────────────────────────────
