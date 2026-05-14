@@ -16,12 +16,29 @@ import plotly.graph_objects as go
 from datetime import datetime, timezone, timedelta
 
 from services.price_data import fetch_current_prices
+from services.macro_ingestion import MacroIngestionService
+from services.trigger_config import REGISTRY as _TRIGGER_REGISTRY
 from utils.macro_narrative import load_macro, get_macro_state, compute_forecasts, build_narrative
 from utils.theme import (
     apply_theme, render_topbar, panel_header, PLOTLY_LAYOUT,
     VOID, ABYSS, DEPTH, SIGNAL, ICE, ICE_MID,
     ASCEND, DESCEND, AMBER, BORDER,
 )
+
+
+@st.cache_resource(show_spinner=False)
+def _start_macro_service() -> MacroIngestionService:
+    """
+    Start the macro ingestion service exactly once for the lifetime of the
+    Streamlit process. cache_resource persists across reruns and page
+    navigations — the background threads keep running silently.
+    """
+    svc = MacroIngestionService.from_env()
+    svc.start()
+    return svc
+
+
+_macro_svc = _start_macro_service()
 
 st.set_page_config(
     page_title="Accendio",
@@ -207,6 +224,49 @@ with st.sidebar:
     st.page_link("pages/8_Portfolio.py",             label="Portfolio")
     st.page_link("pages/9_Scenarios.py",             label="Scenarios")
     st.divider()
+
+    # ── Macro feed status ─────────────────────────────────────────────────────
+    _running = _macro_svc.is_running()
+    _dot     = f'<span style="color:{"#4ADE80" if _running else "#F87171"}">●</span>'
+    _label   = "LIVE" if _running else "OFFLINE"
+    _n_queued = _macro_svc.queue.qsize()
+    _no_keys  = not _running and not any([
+        __import__("os").getenv("FRED_API_KEY"),
+        __import__("os").getenv("ALPHA_VANTAGE_KEY"),
+    ])
+    _sub = (
+        "Set FRED_API_KEY / ALPHA_VANTAGE_KEY in .env"
+        if _no_keys
+        else f"{_n_queued} events queued"
+    )
+    st.markdown(
+        f'<div style="padding:8px 10px;background:{DEPTH};border:0.5px solid {BORDER};'
+        f'border-radius:6px;margin-bottom:8px">'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.1em;'
+        f'margin-bottom:3px">MACRO FEED</div>'
+        f'<div style="font-size:12px;color:rgba(238,242,255,0.75)">'
+        f'{_dot}&nbsp;{_label}</div>'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.3);margin-top:2px">{_sub}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Trigger registry status ───────────────────────────────────────────────
+    _n_triggers = len(_TRIGGER_REGISTRY)
+    _p1_count   = len(_TRIGGER_REGISTRY.by_priority(max_priority=1))
+    st.markdown(
+        f'<div style="padding:8px 10px;background:{DEPTH};border:0.5px solid {BORDER};'
+        f'border-radius:6px;margin-bottom:8px">'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.1em;'
+        f'margin-bottom:3px">TRIGGER REGISTRY</div>'
+        f'<div style="font-size:12px;color:rgba(238,242,255,0.75)">'
+        f'<span style="color:#4ADE80">●</span>&nbsp;{_n_triggers} configs loaded</div>'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.3);margin-top:2px">'
+        f'{_p1_count} priority-1 triggers active</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
     st.caption(f"Last refresh · {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
     if st.button("↻  Refresh", use_container_width=True):
         st.cache_data.clear()

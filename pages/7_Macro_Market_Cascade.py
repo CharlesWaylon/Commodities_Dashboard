@@ -233,13 +233,9 @@ def build_topology_diagram() -> go.Figure:
             hoverinfo="skip",
         ))
 
-    fig.update_layout(
-        **PLOTLY_LAYOUT,
-        height=270,
-        xaxis=dict(visible=False, range=[0, 10.5]),
-        yaxis=dict(visible=False, range=[0, 6]),
-        margin=dict(t=10, l=10, r=10, b=10),
-    )
+    fig.update_layout(**PLOTLY_LAYOUT, height=270, margin=dict(t=10, l=10, r=10, b=10))
+    fig.update_xaxes(visible=False, range=[0, 10.5])
+    fig.update_yaxes(visible=False, range=[0, 6])
     return fig
 
 

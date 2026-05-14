@@ -88,17 +88,21 @@ REGIME_ALL    = "all"    # sentinel for regime-agnostic fit
 # ── Macro variables ────────────────────────────────────────────────────────────
 # Keys must match column names produced by features.macro_overlays.macro_features()
 MACRO_VARS: Dict[str, str] = {
-    "dxy_ret":         "DXY daily log-return   (dollar strength shock)",
-    "vix_ret5d":       "VIX 5-day log-return   (fear gauge spike)",
-    "tlt_ret":         "TLT daily log-return   (bond price / rate proxy)",
-    "tlt_yield_proxy": "−TLT return            (rising-rates proxy)",
+    "dxy_ret":            "DXY daily log-return       (dollar strength shock)",
+    "vix_ret5d":          "VIX 5-day log-return       (fear gauge spike)",
+    "tlt_ret":            "TLT daily log-return       (bond price / rate proxy)",
+    "tlt_yield_proxy":    "−TLT return                (rising-rates proxy)",
+    "breakeven_infl_chg": "T10YIE daily change        (inflation-expectations shock)",
+    "hy_spread_chg":      "HY spread daily change     (credit-stress shock; BAMLH0A0HYM2)",
 }
 
 # Convenience aliases used in the routing_matrix output
 ROUTING_ALIASES = {
-    "dxy_spike":  "dxy_ret",
-    "vix_spike":  "vix_ret5d",
-    "tlt_drop":   "tlt_yield_proxy",   # TLT falling = rates rising
+    "dxy_spike":       "dxy_ret",
+    "vix_spike":       "vix_ret5d",
+    "tlt_drop":        "tlt_yield_proxy",      # TLT falling = rates rising
+    "breakeven_spike": "breakeven_infl_chg",   # breakeven inflation rising
+    "hy_spike":        "hy_spread_chg",        # credit spreads widening
 }
 
 # ── Domain-knowledge validation checks ────────────────────────────────────────
@@ -119,6 +123,18 @@ VALIDATION_CHECKS: List[Tuple[str, str, int, str]] = [
     # Rate spike (TLT ↓) → storage costs rise → slight commodity headwind
     ("tlt_yield_proxy", "energy",       -1, "Rising rates → Energy↓  (inventory cost, USD strength)"),
     ("tlt_yield_proxy", "agriculture",  -1, "Rising rates → Grains↓  (storage cost headwind)"),
+    # Breakeven inflation ↑ → Gold ↑ (inflation-hedge demand; primary Gold driver)
+    # Sources: Erb & Harvey (2013) FAJ; World Gold Council inflation-hedge studies
+    ("breakeven_infl_chg", "metals",  +1, "Breakeven↑ → Metals↑  (Gold inflation-hedge demand)"),
+    # Breakeven inflation ↑ → Energy ↑ (energy costs drive CPI expectations; mild)
+    ("breakeven_infl_chg", "energy",  +1, "Breakeven↑ → Energy↑  (energy embeds in CPI expectations)"),
+    # HY spread ↑ (credit stress) → Metals ↓ (risk-off; Copper demand-destruction)
+    # Source: IMF (2012) Global Financial Stability Report — credit/commodity linkages
+    ("hy_spread_chg", "metals",      -1, "HY↑ → Metals↓  (credit stress → Copper demand destruction)"),
+    # HY spread ↑ → Energy ↓ (credit tightening reduces capex and drilling activity)
+    ("hy_spread_chg", "energy",      -1, "HY↑ → Energy↓  (credit tightening → capex/production cuts)"),
+    # HY spread ↑ → Agriculture ≈ 0 (supply-driven; credit channel weak for grains)
+    ("hy_spread_chg", "agriculture",  0, "HY↑ → Grains≈0  (weak credit channel for agricultural supply)"),
 ]
 
 # Zero-tolerance margin: checks with expected_sign==0 pass if |slope| < this
@@ -272,6 +288,18 @@ class MacroRouter:
             regimes[low_vix_mask & (mom63 < WTI_MOM_BEAR)] = "bear"
             regimes[low_vix_mask & (mom63 > WTI_MOM_BULL)] = "bull"
 
+        # ── NBER recession override (USREC from macro_df) ─────────────────────
+        # When NBER officially declares a recession, downgrade bull/neutral → bear.
+        # Note: USREC is published with a multi-month lag, so this primarily
+        # improves historical backtest accuracy rather than live signal quality.
+        if "recession_flag" in macro_df.columns:
+            rec = macro_df["recession_flag"].reindex(idx).ffill(limit=90)
+            in_recession = rec == 1
+            regimes[in_recession & regimes.isin(["bull", "neutral"])] = "bear"
+            n_rec = int(in_recession.sum())
+            if n_rec:
+                log.debug("Regime override: %d days forced to 'bear' via USREC flag", n_rec)
+
         return regimes
 
     # ── Sector return index ───────────────────────────────────────────────────
@@ -400,7 +428,8 @@ class MacroRouter:
         if macro_vars_df.empty:
             raise RuntimeError(
                 "No macro variable columns found in macro_df. "
-                "Expected: dxy_ret, vix_ret5d, tlt_ret, tlt_yield_proxy"
+                "Expected: dxy_ret, vix_ret5d, tlt_ret, tlt_yield_proxy, "
+                "breakeven_infl_chg (last one optional if T10YIE unavailable)"
             )
 
         # ── 5. Align on common date index ─────────────────────────────────────

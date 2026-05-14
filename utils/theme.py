@@ -259,6 +259,38 @@ hr { border-color: rgba(123,156,255,0.1) !important; margin: 0.6rem 0 !important
   border-top-color: var(--ac-signal) !important;
 }
 
+/* Busy indicator — cycling emojis, top-right, auto-shown when any spinner is active */
+@keyframes _ac_busy_cycle {
+  0%,   20% { opacity: 1;  transform: scale(1.12) translateY(-1px); }
+  28%, 100% { opacity: 0;  transform: scale(0.82) translateY(0px);  }
+}
+#_ac_busy_bar {
+  position: fixed;
+  top: 0;
+  right: 16px;
+  height: 44px;
+  width: 24px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000000;
+  pointer-events: none;
+}
+body:has([data-testid="stSpinner"]) #_ac_busy_bar {
+  display: flex !important;
+}
+._ac_busy_e {
+  font-size: 15px;
+  line-height: 1;
+  opacity: 0;
+  position: absolute;
+  animation: _ac_busy_cycle 3.2s ease-in-out infinite;
+}
+._ac_busy_e:nth-child(1) { animation-delay: 0.0s; }
+._ac_busy_e:nth-child(2) { animation-delay: 0.8s; }
+._ac_busy_e:nth-child(3) { animation-delay: 1.6s; }
+._ac_busy_e:nth-child(4) { animation-delay: 2.4s; }
+
 /* Multiselect / radio / checkbox */
 [data-testid="stRadio"] label,
 [data-testid="stCheckbox"] label {
@@ -354,6 +386,12 @@ def render_topbar(df=None):
   <div style="flex-shrink:0">
     <span style="font-size:10px;color:rgba(238,242,255,0.22);letter-spacing:.06em;font-family:'Courier New',monospace">{ts}</span>
   </div>
+</div>
+<div id="_ac_busy_bar">
+  <span class="_ac_busy_e">📈</span>
+  <span class="_ac_busy_e">🧮</span>
+  <span class="_ac_busy_e">🔬</span>
+  <span class="_ac_busy_e">📊</span>
 </div>
 """, unsafe_allow_html=True)
 

@@ -1,0 +1,244 @@
+{
+  "version": "1.1",
+  "_comment": "Every trigger type spans the full commodity universe — all five clusters. Macro events propagate through the interconnected web at different speeds and attenuations; the classifier and models handle magnitude/decay, not scope restriction. The affected_commodities field is left empty and resolved entirely from affected_clusters at load time.",
+  "triggers": [
+    {
+      "trigger_type": "FOMC_RATE_DECISION",
+      "family_name": "fomc_rate_decision",
+      "display_name": "FOMC Rate Decision",
+      "source": "calendar",
+      "description": "Federal Open Market Committee rate hike, cut, or hold. Primary shock: USD complex, rates-sensitive metals, credit spreads. Secondary transmission: energy (USD-denominated), agriculture (financing costs, EM demand), livestock (feed financing), digital (risk-off flows).",
+      "thresholds": {
+        "mild":     { "min": 0.20, "max": 0.45, "label": "In-line with market pricing (< 10 bps surprise)" },
+        "moderate": { "min": 0.45, "max": 0.70, "label": "Moderate surprise (10–25 bps from futures)" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "Policy shock (> 25 bps surprise or hawkish pivot)" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 1,
+      "decay_window_minutes": 5760,
+      "model_targets": ["macro_router", "xgboost", "random_forest", "meta_predictor"]
+    },
+    {
+      "trigger_type": "CPI_RELEASE",
+      "family_name": "cpi_release",
+      "display_name": "CPI Inflation Release",
+      "source": "fred",
+      "description": "BLS monthly Consumer Price Index release. Primary shock: metals (real-rate repricing), energy (inflation expectations). Secondary transmission: agriculture (input cost inflation), livestock (feed + transport costs), digital (inflation hedge flows vs risk-off).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "Within ±0.1 pp of consensus" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "±0.1 – 0.3 pp surprise" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "> 0.3 pp deviation from consensus" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 1,
+      "decay_window_minutes": 2880,
+      "model_targets": ["macro_router", "xgboost", "random_forest", "meta_predictor"]
+    },
+    {
+      "trigger_type": "NONFARM_PAYROLLS",
+      "family_name": "nonfarm_payrolls",
+      "display_name": "Non-Farm Payrolls Report",
+      "source": "calendar",
+      "description": "BLS monthly employment situation. Primary shock: metals (USD/rate expectations). Secondary transmission: energy (demand outlook), agriculture (consumer spending on food), livestock (protein demand), digital (risk sentiment).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "< 50k jobs from consensus" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "50–150k surprise" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "> 150k surprise or unemployment rate shock" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 2,
+      "decay_window_minutes": 1440,
+      "model_targets": ["macro_router", "xgboost", "meta_predictor"]
+    },
+    {
+      "trigger_type": "OPEC_PRODUCTION_DECISION",
+      "family_name": "opec_action",
+      "display_name": "OPEC+ Production Decision",
+      "source": "calendar",
+      "description": "OPEC+ ministerial meeting output. Primary shock: energy complex. Secondary transmission: metals (smelting/mining energy costs), agriculture (fertilizer = natural gas, machinery = diesel), livestock (transport + heating energy), digital (energy-intensive mining cost).",
+      "thresholds": {
+        "mild":     { "min": 0.20, "max": 0.45, "label": "Production rollover (market anticipated)" },
+        "moderate": { "min": 0.45, "max": 0.70, "label": "Cut or increase within expected range" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "Surprise cut > 1 mb/d or emergency meeting" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 1,
+      "decay_window_minutes": 10080,
+      "model_targets": ["macro_router", "xgboost", "random_forest", "meta_predictor"]
+    },
+    {
+      "trigger_type": "EIA_CRUDE_INVENTORY",
+      "family_name": "eia_crude_inventory",
+      "display_name": "EIA Weekly Crude Inventory Report",
+      "source": "calendar",
+      "description": "EIA Petroleum Status Report. Primary shock: crude and products. Secondary transmission: metals (industrial activity proxy), agriculture (diesel/fertilizer cost signal), livestock (transport), digital (minor macro sentiment).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "|surprise_z| < 1.0" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "|surprise_z| 1.0 – 2.0" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "|surprise_z| > 2.0" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 2,
+      "decay_window_minutes": 720,
+      "model_targets": ["xgboost", "random_forest", "macro_router"]
+    },
+    {
+      "trigger_type": "EIA_GAS_STORAGE",
+      "family_name": "eia_gas_storage",
+      "display_name": "EIA Weekly Natural Gas Storage Report",
+      "source": "calendar",
+      "description": "EIA natural gas storage weekly change. Primary shock: Henry Hub and power/heating complex. Secondary transmission: agriculture (ammonia/fertilizer), metals (smelting costs), livestock (heating), digital (minor).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "< 10 bcf from consensus" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "10–30 bcf surprise" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "> 30 bcf or storage deficit > 15%" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 3,
+      "decay_window_minutes": 480,
+      "model_targets": ["xgboost", "macro_router"]
+    },
+    {
+      "trigger_type": "USDA_WASDE_REPORT",
+      "family_name": "usda_wasde_report",
+      "display_name": "USDA WASDE Crop Report",
+      "source": "calendar",
+      "description": "USDA World Agricultural Supply and Demand Estimates. Primary shock: grains and oilseeds. Secondary transmission: livestock (feed costs), energy (ethanol/biofuel demand from corn/soy), metals (agricultural equipment demand), digital (macro sentiment via food-CPI).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "Ending stocks within ±2% of pre-report estimates" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "2–5% revision vs estimates" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "> 5% surprise or major yield revision" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 2,
+      "decay_window_minutes": 2880,
+      "model_targets": ["xgboost", "random_forest", "macro_router", "meta_predictor"]
+    },
+    {
+      "trigger_type": "FED_CHAIR_SPEECH",
+      "family_name": "fed_chair_speech",
+      "display_name": "Fed Chair Speech / Press Conference",
+      "source": "calendar",
+      "description": "FOMC press conference, Jackson Hole, or unscheduled Fed communication. Primary shock: metals (gold/silver safe-haven repricing). Secondary transmission: energy (USD effect), agriculture (EM FX/financing), livestock (credit costs), digital (risk-on/off).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "Reaffirms prior guidance" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "Nuanced pivot language or new forward guidance" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "Explicit pivot signal or emergency communication" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 2,
+      "decay_window_minutes": 1440,
+      "model_targets": ["macro_router", "xgboost", "meta_predictor"]
+    },
+    {
+      "trigger_type": "DOLLAR_SHOCK",
+      "family_name": "fed_tightening",
+      "display_name": "USD Dollar Index Shock (DXY)",
+      "source": "market",
+      "description": "DXY z-score spike. All physically-settled USD-denominated commodities reprice inversely. Primary shock: metals and energy. Secondary transmission: agriculture (export competitiveness, EM purchasing power), livestock (export demand), digital (USD alternative flows).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "DXY z-score 1.5–2.0 for 3+ days" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "DXY z-score 2.0–2.5" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "DXY z-score > 2.5 (multi-decade breakout)" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 2,
+      "decay_window_minutes": 2880,
+      "model_targets": ["macro_router", "xgboost", "random_forest", "meta_predictor"]
+    },
+    {
+      "trigger_type": "GEOPOLITICAL_SHOCK",
+      "family_name": "geopolitical_shock",
+      "display_name": "Geopolitical Supply Shock",
+      "source": "research",
+      "description": "Sanctions, conflict escalation, or supply-route disruption. Primary shock: energy and metals (strategic resources). Secondary transmission: agriculture (Black Sea wheat, fertilizer supply), livestock (feed grain disruption), digital (safe-haven demand, mining region risk).",
+      "thresholds": {
+        "mild":     { "min": 0.20, "max": 0.45, "label": "Tail risk elevated; no confirmed supply loss" },
+        "moderate": { "min": 0.45, "max": 0.70, "label": "Confirmed partial supply disruption (< 1 mb/d WTI-eq)" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "Major route closure or multi-country sanctions" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 1,
+      "decay_window_minutes": 20160,
+      "model_targets": ["macro_router", "xgboost", "random_forest", "meta_predictor", "all"]
+    },
+    {
+      "trigger_type": "RECESSION_FLAG",
+      "family_name": "recession_flag",
+      "display_name": "NBER Recession Indicator (USREC)",
+      "source": "fred",
+      "description": "FRED USREC=1 regime override. Demand destruction propagates through the entire commodity web: energy demand collapses first, metals follow (industrial slowdown), agriculture softens (consumer retrenchment), livestock contracts (protein demand elasticity), digital correlates with broad risk-off.",
+      "thresholds": {
+        "mild":     { "min": 0.10, "max": 0.35, "label": "Pre-recession contraction signals (not yet USREC=1)" },
+        "moderate": { "min": 0.35, "max": 0.65, "label": "USREC=1 — early-cycle recession" },
+        "severe":   { "min": 0.65, "max": 1.00, "label": "USREC=1 — deep recession (GDP < -2% QoQ)" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 1,
+      "decay_window_minutes": 129600,
+      "model_targets": ["macro_router", "xgboost", "random_forest", "meta_predictor", "all"]
+    },
+    {
+      "trigger_type": "WEATHER_SHOCK",
+      "family_name": "weather_shock",
+      "display_name": "Weather / ENSO Climate Shock",
+      "source": "market",
+      "description": "ENSO MEI threshold breach. Primary shock: agriculture (crop yield disruption) and energy (heating/cooling demand). Secondary transmission: livestock (feed grain prices), metals (hydroelectric power for smelting, mining access), digital (energy-cost impact on crypto mining).",
+      "thresholds": {
+        "mild":     { "min": 0.10, "max": 0.35, "label": "|MEI| 1.0–1.5 (moderate El Niño/La Niña onset)" },
+        "moderate": { "min": 0.35, "max": 0.65, "label": "|MEI| 1.5–2.5 (established phase)" },
+        "severe":   { "min": 0.65, "max": 1.00, "label": "|MEI| > 2.5 (strong event + HDD anomaly)" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 2,
+      "decay_window_minutes": 20160,
+      "model_targets": ["xgboost", "random_forest", "macro_router", "meta_predictor"]
+    },
+    {
+      "trigger_type": "ENERGY_TRANSITION_SIGNAL",
+      "family_name": "energy_transition",
+      "display_name": "Energy Transition / Battery Metals Signal",
+      "source": "market",
+      "description": "Composite battery-metals / ETS / uranium signal. Primary shock: metals (EV demand) and energy (carbon pricing). Secondary transmission: agriculture (electrification of farm equipment, biofuel competition with EVs), livestock (cold-chain electrification), digital (energy cost structure shift).",
+      "thresholds": {
+        "mild":     { "min": 0.05, "max": 0.30, "label": "One sub-signal marginally active" },
+        "moderate": { "min": 0.30, "max": 0.60, "label": "Two sub-signals active or one strongly elevated" },
+        "severe":   { "min": 0.60, "max": 1.00, "label": "All three sub-signals elevated simultaneously" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 3,
+      "decay_window_minutes": 10080,
+      "model_targets": ["macro_router", "xgboost", "meta_predictor"]
+    },
+    {
+      "trigger_type": "PPI_RELEASE",
+      "family_name": "ppi_release",
+      "display_name": "PPI Producer Price Index Release",
+      "source": "fred",
+      "description": "BLS Producer Price Index monthly release. Leading indicator for input cost pressure across all sectors. Primary shock: energy and metals. Secondary transmission: agriculture (input costs), livestock (feed + processing costs), digital (hardware/infrastructure cost signal via metals component).",
+      "thresholds": {
+        "mild":     { "min": 0.15, "max": 0.40, "label": "Within ±0.2 pp of prior trend" },
+        "moderate": { "min": 0.40, "max": 0.70, "label": "0.2 – 0.5 pp acceleration/deceleration" },
+        "severe":   { "min": 0.70, "max": 1.00, "label": "> 0.5 pp print or YoY inflection reversal" }
+      },
+      "affected_clusters": ["energy", "metals", "agriculture", "livestock", "digital"],
+      "affected_commodities": [],
+      "cascade_priority": 3,
+      "decay_window_minutes": 1440,
+      "model_targets": ["macro_router", "xgboost", "meta_predictor"]
+    }
+  ]
+}

@@ -1,19 +1,31 @@
 """
 Macro overlay features and commodity calendar event dummies.
 
-DXY / VIX / TLT
-  Three instruments, all free via yfinance, that proxy for three distinct
-  macro regimes:
-    DXY (^DXY) — dollar strength. Most commodity futures are USD-priced, so
-      a strong dollar depresses commodity demand from non-USD buyers.
-      Gold and oil are particularly sensitive; agricultural commodities slightly
-      less so (driven more by local weather and supply).
-    VIX (^VIX) — implied equity volatility (fear gauge). Above 20 = risk-off;
-      above 30 = crisis. In risk-off regimes, commodity correlations converge
-      and momentum signals weaken — this is when most systematic strategies fail.
-    TLT — iShares 20+ Year Treasury ETF. TLT price inversely tracks long-term
-      US interest rates. Rising rates = falling TLT = commodity headwind (higher
-      discount rate on inventories, stronger USD carry, competition from fixed income).
+DXY / VIX / Rates / Breakeven Inflation
+  Four macro series, sourced from FRED where available (higher quality than
+  yfinance proxies) with yfinance fallback:
+
+    DXY — dollar strength.  Primary: FRED DTWEXBGS (Federal Reserve's own
+      Trade-Weighted Broad Dollar Index — 26 currencies, more representative
+      than the ICE DXY basket of 6).  Fallback: DX-Y.NYB via yfinance.
+      Most commodity futures are USD-priced, so a strong dollar depresses
+      demand from non-US buyers.  Gold and oil are the most sensitive.
+
+    VIX (^VIX) — implied equity volatility (fear gauge).  Sourced from
+      yfinance; FRED VIX carries a 1-day publication lag so we keep the
+      real-time yfinance feed.  Above 20 = risk-off; above 30 = crisis.
+
+    10Y Treasury Yield — interest rates.  Primary: FRED DGS10 (Federal
+      Reserve / Treasury, daily).  Converted to a synthetic bond-price series
+      (price = 100 × exp(−8.5 × yield/100), duration ≈ 8.5 yr) so all
+      downstream formulas using tlt_ret and tlt_yield_proxy work unchanged.
+      Fallback: TLT ETF via yfinance.  Raw yield stored as column `dgs10`.
+
+    10Y Breakeven Inflation — FRED T10YIE (10-Year Treasury Inflation-Indexed
+      Security, Break-Even).  Measures market-implied inflation expectations.
+      Rising breakeven → Gold inflation-hedge demand ↑.  Stored as columns
+      breakeven_infl, breakeven_infl_chg, breakeven_infl_mom21,
+      breakeven_infl_zscore63.  Not available if FRED key is missing.
 
 WASDE calendar dummy
   The USDA World Agricultural Supply and Demand Estimates report is published
@@ -34,28 +46,95 @@ Usage
 -----
     from features.macro_overlays import build_macro_overlay_features
 
-    df = build_macro_overlay_features(start="2022-01-01", end="2026-04-25")
-    # Columns: dxy_*, vix_*, tlt_*, days_to_wasde, is_wasde_week, wasde_post5,
-    #          days_to_opec, is_opec_week, opec_post10
+    df = build_macro_overlay_features(period="2y")
+    # Columns: dxy_*, vix_*, tlt_*, dgs10, breakeven_infl*,
+    #          days_to_wasde, is_wasde_week, wasde_post5,
+    #          days_to_opec, is_opec_window, opec_post10
 """
 
+import os
 import warnings
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 from datetime import datetime, date, timedelta
 from typing import Optional
 
-# ── Macro tickers ──────────────────────────────────────────────────────────────
-_MACRO_TICKERS = {
-    "dxy": "DX-Y.NYB",   # US Dollar Index (ICE, free via Yahoo)
-    "vix": "^VIX",        # CBOE Volatility Index
-    "tlt": "TLT",         # iShares 20+ Year Treasury ETF
-}
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# ── FRED REST endpoint ─────────────────────────────────────────────────────────
+_FRED_REST_URL = "https://api.stlouisfed.org/fred/series/observations"
+
+# Approximate modified duration for a 10-year Treasury bond (years).
+# Used to convert DGS10 yield levels into synthetic TLT-like price levels so
+# all downstream formulas (tlt_ret, tlt_yield_proxy, tlt_mom21) work unchanged.
+_APPROX_DURATION = 8.5
+
+# yfinance fallback tickers (used when FRED is unavailable)
+_YF_DXY = "DX-Y.NYB"
+_YF_VIX = "^VIX"
+_YF_TLT = "TLT"
 
 # VIX regime thresholds (annualised basis points of expected S&P 500 vol)
 VIX_RISK_OFF = 20.0
 VIX_CRISIS   = 30.0
+
+
+# ── FRED helpers ───────────────────────────────────────────────────────────────
+
+def _period_to_start_date(period: str) -> str:
+    """Convert a yfinance-style period string to an ISO-8601 start date."""
+    mapping = {
+        "1d": 1,   "5d": 5,    "1mo": 30,  "3mo": 91,
+        "6mo": 182, "1y": 365,  "2y": 730,  "3y": 1095,
+        "5y": 1825, "10y": 3650,
+    }
+    days = mapping.get(period, 730)
+    return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _fetch_fred_series(series_id: str, start: str) -> pd.Series:
+    """
+    Fetch a FRED series as a daily pd.Series indexed by date.
+
+    Uses FRED_API_KEY from the environment. Returns an empty Series (dtype=float)
+    on any error — callers must handle the empty case and fall back gracefully.
+    """
+    api_key = os.getenv("FRED_API_KEY", "")
+    if not api_key:
+        return pd.Series(dtype=float)
+    try:
+        resp = requests.get(
+            _FRED_REST_URL,
+            params={
+                "series_id":        series_id,
+                "api_key":          api_key,
+                "file_type":        "json",
+                "observation_start": start,
+                "sort_order":       "asc",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        obs = resp.json().get("observations", [])
+        valid = {
+            o["date"]: float(o["value"])
+            for o in obs
+            if o.get("value") not in (".", "")
+        }
+        if not valid:
+            return pd.Series(dtype=float)
+        s = pd.Series(valid)
+        s.index = pd.to_datetime(s.index)
+        return s.sort_index().astype(float)
+    except Exception as exc:
+        warnings.warn(f"FRED {series_id} fetch failed: {exc}")
+        return pd.Series(dtype=float)
 
 # WASDE rolling window features
 _WASDE_PRE_WINDOW  = 7    # days before release to flag
@@ -154,42 +233,148 @@ def _opec_dates_range(start: date, end: date) -> list:
 
 # ── Macro price features ───────────────────────────────────────────────────────
 
+def _yf_close(ticker: str, start: str) -> pd.Series:
+    """Download a single ticker's adjusted Close from yfinance, tz-stripped."""
+    try:
+        raw = yf.download(ticker, start=start, interval="1d",
+                          progress=False, auto_adjust=True)
+        if raw.empty:
+            return pd.Series(dtype=float)
+        close = raw["Close"] if "Close" in raw.columns else raw.iloc[:, 0]
+        if isinstance(close, pd.DataFrame):
+            close = close.squeeze()
+        close.index = pd.to_datetime(close.index).tz_localize(None)
+        return close.astype(float)
+    except Exception:
+        return pd.Series(dtype=float)
+
+
 def fetch_macro_prices(period: str = "2y") -> pd.DataFrame:
     """
-    Download DXY, VIX, and TLT from yfinance.
+    Fetch DXY, VIX, 10Y Treasury yield, and breakeven inflation.
+
+    Sources (with yfinance fallback for DXY and rates):
+      dxy    — FRED DTWEXBGS (Fed broad trade-weighted dollar index, 26 currencies)
+               Fallback: DX-Y.NYB via yfinance.
+      vix    — ^VIX via yfinance (FRED VIX carries a 1-day lag).
+      tlt    — Synthetic bond price derived from FRED DGS10 (10Y Treasury yield)
+               using price = 100 × exp(−8.5 × yield/100).  Fallback: TLT ETF.
+      dgs10  — Raw FRED DGS10 10Y yield in % pa (NaN if FRED unavailable).
+      t10yie — FRED T10YIE 10Y breakeven inflation in % pa (NaN if unavailable).
 
     Returns
     -------
     pd.DataFrame
-        Columns: dxy, vix, tlt. DatetimeIndex.
+        Columns: dxy, vix, tlt, dgs10, t10yie.  DatetimeIndex, business-day
+        frequency, forward-filled up to 3 days for non-trading gaps.
     """
-    tickers = list(_MACRO_TICKERS.values())
-    try:
-        data = yf.download(tickers, period=period, interval="1d",
-                           progress=False, auto_adjust=True)
-        if data.empty:
-            raise RuntimeError("No data returned")
-        close = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data
-        close.index = pd.to_datetime(close.index).tz_localize(None)
-        ticker_to_name = {v: k for k, v in _MACRO_TICKERS.items()}
-        close = close.rename(columns=ticker_to_name)
-        return close[["dxy", "vix", "tlt"]].ffill(limit=3)
-    except Exception as e:
-        warnings.warn(f"Macro price fetch failed: {e}")
+    start = _period_to_start_date(period)
+    series: dict = {}
+
+    # ── DXY: FRED DTWEXBGS → yfinance fallback ────────────────────────────────
+    fred_dxy = _fetch_fred_series("DTWEXBGS", start)
+    if not fred_dxy.empty:
+        series["dxy"] = fred_dxy
+    else:
+        yf_dxy = _yf_close(_YF_DXY, start)
+        if not yf_dxy.empty:
+            series["dxy"] = yf_dxy
+        else:
+            warnings.warn("DXY unavailable from both FRED and yfinance.")
+
+    # ── VIX: yfinance only (FRED lags by 1 day) ───────────────────────────────
+    yf_vix = _yf_close(_YF_VIX, start)
+    if not yf_vix.empty:
+        series["vix"] = yf_vix
+    else:
+        warnings.warn("VIX unavailable from yfinance.")
+
+    # ── Rates: FRED DGS10 → synthetic TLT price → yfinance TLT fallback ──────
+    fred_dgs10 = _fetch_fred_series("DGS10", start)
+    if not fred_dgs10.empty:
+        series["dgs10"] = fred_dgs10
+        # Synthetic bond price: higher when rates fall, lower when rates rise.
+        # Returns from this series match TLT ETF returns in direction and order
+        # of magnitude (duration ≈ 8.5 yr).
+        series["tlt"] = 100.0 * np.exp(-_APPROX_DURATION * fred_dgs10 / 100.0)
+    else:
+        series["dgs10"] = pd.Series(dtype=float)   # NaN column — FRED unavailable
+        yf_tlt = _yf_close(_YF_TLT, start)
+        if not yf_tlt.empty:
+            series["tlt"] = yf_tlt
+        else:
+            warnings.warn("TLT unavailable from both FRED and yfinance.")
+
+    # ── Breakeven inflation: FRED T10YIE ──────────────────────────────────────
+    fred_t10yie = _fetch_fred_series("T10YIE", start)
+    series["t10yie"] = fred_t10yie if not fred_t10yie.empty else pd.Series(dtype=float)
+
+    # ── Credit stress: FRED BAMLH0A0HYM2 (ICE BofA US HY spread, daily) ──────
+    fred_hy = _fetch_fred_series("BAMLH0A0HYM2", start)
+    series["hy_spread"] = fred_hy if not fred_hy.empty else pd.Series(dtype=float)
+
+    # ── CPI: FRED CPIAUCSL (BLS index level, monthly) ─────────────────────────
+    # We fetch the level and compute YoY % change in macro_features().
+    # CPIAUCSL is the BLS standard — fresher and more widely used than OECD series.
+    fred_cpi = _fetch_fred_series("CPIAUCSL", start)
+    series["cpi_index"] = fred_cpi if not fred_cpi.empty else pd.Series(dtype=float)
+
+    # ── NBER recession flag: FRED USREC (monthly, binary 0/1) ─────────────────
+    fred_rec = _fetch_fred_series("USREC", start)
+    series["recession_flag"] = fred_rec if not fred_rec.empty else pd.Series(dtype=float)
+
+    # ── Retail gasoline: FRED GASREGCOVW (weekly, $/gal) ──────────────────────
+    fred_gas = _fetch_fred_series("GASREGCOVW", start)
+    series["gasoline_retail"] = fred_gas if not fred_gas.empty else pd.Series(dtype=float)
+
+    # ── IMF non-fuel commodities index: FRED PNRGINDEXM (monthly) ─────────────
+    fred_imf = _fetch_fred_series("PNRGINDEXM", start)
+    series["imf_nonfuel_idx"] = fred_imf if not fred_imf.empty else pd.Series(dtype=float)
+
+    if not series:
         return pd.DataFrame()
+
+    # Combine on a union date index; frequency varies (daily/weekly/monthly),
+    # so ffill brings all series to the same daily grid.
+    _all_cols = ["dxy", "vix", "tlt", "dgs10", "t10yie",
+                 "hy_spread", "cpi_index", "recession_flag",
+                 "gasoline_retail", "imf_nonfuel_idx"]
+    df = pd.DataFrame(series).sort_index()
+    for col in _all_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+    # Daily/HY data: ffill 3 days. Monthly/weekly data: ffill up to 31 days.
+    df[["dxy", "vix", "tlt", "dgs10", "t10yie", "hy_spread"]] = (
+        df[["dxy", "vix", "tlt", "dgs10", "t10yie", "hy_spread"]].ffill(limit=3)
+    )
+    df[["cpi_index", "recession_flag", "gasoline_retail", "imf_nonfuel_idx"]] = (
+        df[["cpi_index", "recession_flag", "gasoline_retail", "imf_nonfuel_idx"]].ffill(limit=31)
+    )
+    return df[_all_cols]
 
 
 def macro_features(period: str = "2y") -> pd.DataFrame:
     """
-    Compute feature columns from DXY, VIX, TLT price history.
+    Compute feature columns from macro price history.
+
+    Sources: FRED DTWEXBGS (DXY), ^VIX yfinance, FRED DGS10 (rates/TLT),
+    FRED T10YIE (breakeven inflation).  yfinance fallbacks apply automatically.
 
     Returns
     -------
     pd.DataFrame
         Columns:
           dxy, dxy_ret, dxy_zscore63, dxy_mom5, dxy_mom21
-          vix, vix_ret5d, vix_risk_off, vix_crisis
+          vix, vix_ret5d, vix_risk_off, vix_crisis, vix_level_z
           tlt, tlt_ret, tlt_yield_proxy, tlt_mom21
+          dgs10                                            raw 10Y yield %
+          breakeven_infl, breakeven_infl_chg,
+            breakeven_infl_mom21, breakeven_infl_zscore63  (T10YIE; NaN if unavailable)
+          hy_spread, hy_spread_chg, hy_spread_zscore63     (BAMLH0A0HYM2)
+          cpi_yoy                                          (CPIAUCSL 12-month % chg)
+          recession_flag                                   (USREC, 0/1, monthly)
+          gasoline_retail, gasoline_retail_chg             (GASREGCOVW, weekly)
+          imf_nonfuel_idx, imf_nonfuel_ret                 (PNRGINDEXM, monthly)
     """
     prices = fetch_macro_prices(period=period)
     if prices.empty:
@@ -197,21 +382,21 @@ def macro_features(period: str = "2y") -> pd.DataFrame:
 
     result = pd.DataFrame(index=prices.index)
 
-    # ── DXY ──
+    # ── DXY ───────────────────────────────────────────────────────────────────
     dxy = prices["dxy"]
     dxy_ret = np.log(dxy / dxy.shift(1))
     dxy_mu  = dxy.rolling(63).mean()
     dxy_sig = dxy.rolling(63).std().clip(lower=1e-9)
-    result["dxy"]         = dxy
-    result["dxy_ret"]     = dxy_ret
+    result["dxy"]          = dxy
+    result["dxy_ret"]      = dxy_ret
     result["dxy_zscore63"] = (dxy - dxy_mu) / dxy_sig
-    result["dxy_mom5"]    = dxy_ret.rolling(5).sum()
-    result["dxy_mom21"]   = dxy_ret.rolling(21).sum()
+    result["dxy_mom5"]     = dxy_ret.rolling(5).sum()
+    result["dxy_mom21"]    = dxy_ret.rolling(21).sum()
 
-    # ── VIX ──
+    # ── VIX ───────────────────────────────────────────────────────────────────
     vix = prices["vix"]
-    result["vix"]         = vix
-    result["vix_ret5d"]   = np.log(vix / vix.shift(5))
+    result["vix"]          = vix
+    result["vix_ret5d"]    = np.log(vix / vix.shift(5))
     result["vix_risk_off"] = (vix >= VIX_RISK_OFF).astype(float)
     result["vix_crisis"]   = (vix >= VIX_CRISIS).astype(float)
     result["vix_level_z"]  = (
@@ -219,13 +404,75 @@ def macro_features(period: str = "2y") -> pd.DataFrame:
         vix.rolling(252).std().clip(lower=1e-9)
     )
 
-    # ── TLT ──
+    # ── TLT / Rates ───────────────────────────────────────────────────────────
+    # `tlt` is either a synthetic bond price from DGS10 or the actual TLT ETF.
+    # Either way the same log-return formula gives the correct direction.
     tlt = prices["tlt"]
     tlt_ret = np.log(tlt / tlt.shift(1))
     result["tlt"]             = tlt
     result["tlt_ret"]         = tlt_ret
-    result["tlt_yield_proxy"] = -tlt_ret   # bond price ↓ → yield ↑ → rates rising
+    result["tlt_yield_proxy"] = -tlt_ret    # bond price ↓ → yield ↑ → rates rising
     result["tlt_mom21"]       = tlt_ret.rolling(21).sum()
+    result["dgs10"]           = prices["dgs10"]   # raw 10Y yield % (NaN if FRED down)
+
+    # ── 10Y Breakeven Inflation (T10YIE) ──────────────────────────────────────
+    t10yie = prices["t10yie"]
+    if t10yie.notna().sum() >= 5:
+        bi_chg  = t10yie.diff()
+        bi_mu   = t10yie.rolling(63).mean()
+        bi_sig  = t10yie.rolling(63).std().clip(lower=1e-9)
+        result["breakeven_infl"]          = t10yie
+        result["breakeven_infl_chg"]      = bi_chg
+        result["breakeven_infl_mom21"]    = bi_chg.rolling(21).sum()
+        result["breakeven_infl_zscore63"] = (t10yie - bi_mu) / bi_sig
+    else:
+        for col in ("breakeven_infl", "breakeven_infl_chg",
+                    "breakeven_infl_mom21", "breakeven_infl_zscore63"):
+            result[col] = np.nan
+
+    # ── High-Yield Credit Spread (BAMLH0A0HYM2, daily, % pa) ─────────────────
+    # Rising spread = credit stress = risk-off signal upstream of metals/energy.
+    hy = prices["hy_spread"]
+    if hy.notna().sum() >= 5:
+        hy_mu  = hy.rolling(63).mean()
+        hy_sig = hy.rolling(63).std().clip(lower=1e-9)
+        result["hy_spread"]        = hy
+        result["hy_spread_chg"]    = hy.diff()
+        result["hy_spread_zscore63"] = (hy - hy_mu) / hy_sig
+    else:
+        result["hy_spread"] = result["hy_spread_chg"] = result["hy_spread_zscore63"] = np.nan
+
+    # ── CPI Inflation YoY (CPIAUCSL, BLS index → 12-month % change) ──────────
+    # Deflates nominal commodity returns to real returns downstream.
+    # Need 13+ months of CPI data to compute YoY; use a wider internal window.
+    cpi_idx = prices["cpi_index"]
+    if cpi_idx.notna().sum() >= 13:
+        result["cpi_yoy"] = cpi_idx.pct_change(12) * 100.0
+    else:
+        result["cpi_yoy"] = np.nan
+
+    # ── NBER Recession Flag (USREC, monthly binary, ffilled) ──────────────────
+    # 1 = NBER-defined recession; 0 = expansion. Published with months of lag.
+    # Used by macro_router._classify_regimes() to force "bear" regime in recessions.
+    result["recession_flag"] = prices["recession_flag"]
+
+    # ── Retail Gasoline Price (GASREGCOVW, weekly $/gal, ffilled) ─────────────
+    # Consumer-side energy confirmation: rising retail gas → demand-destruction risk.
+    gas = prices["gasoline_retail"]
+    if gas.notna().sum() >= 2:
+        result["gasoline_retail"]     = gas
+        result["gasoline_retail_chg"] = gas.diff()
+    else:
+        result["gasoline_retail"] = result["gasoline_retail_chg"] = np.nan
+
+    # ── IMF Non-Fuel Commodities Index (PNRGINDEXM, monthly, ffilled) ─────────
+    # Broad commodity regime signal: trend in non-energy commodities globally.
+    imf = prices["imf_nonfuel_idx"]
+    if imf.notna().sum() >= 3:
+        result["imf_nonfuel_idx"] = imf
+        result["imf_nonfuel_ret"] = np.log(imf / imf.shift(1))
+    else:
+        result["imf_nonfuel_idx"] = result["imf_nonfuel_ret"] = np.nan
 
     return result
 

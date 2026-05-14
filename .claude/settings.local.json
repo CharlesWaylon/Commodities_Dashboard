@@ -54,7 +54,10 @@
       "Bash(grep -E \"bin/python3$\")",
       "Bash(python3 -c \"import statsmodels, scipy; print\\('ok'\\)\")",
       "Bash(/opt/anaconda3/bin/python3 -c ' *)",
-      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('pages/6_Causal_QS_Engine.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('pages/6_Causal_QS_Engine.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Bash(grep -v \"^$\")",
+      "Bash(grep -v \"^\\\\s*$\")"
     ]
   }
 }

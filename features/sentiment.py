@@ -67,6 +67,12 @@ try:
 except ImportError:
     _TRANSFORMERS_AVAILABLE = False
 
+try:
+    from features.av_news_sentiment import AVSentimentClient, combine_with_finbert
+    _AV_AVAILABLE = True
+except ImportError:
+    _AV_AVAILABLE = False
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 FINBERT_MODEL       = "ProsusAI/finbert"
 SENTIMENT_CACHE_PATH = Path("data/sentiment_cache.parquet")
@@ -383,8 +389,9 @@ class SentimentFeatures:
         eia_key: Optional[str] = None,
         cache_path: Path = SENTIMENT_CACHE_PATH,
     ):
-        self._eia_key = eia_key or os.environ.get("EIA_API_KEY")
-        self._cache   = SentimentCache(cache_path)
+        self._eia_key  = eia_key or os.environ.get("EIA_API_KEY")
+        self._cache    = SentimentCache(cache_path)
+        self._av_client = AVSentimentClient() if _AV_AVAILABLE else None
 
     def update_sentiment(self, headlines_df: pd.DataFrame) -> pd.DataFrame:
         """Score new headlines and update the cache. Returns full cache."""
@@ -436,6 +443,26 @@ class SentimentFeatures:
         if not sentiment.empty:
             parts.append(sentiment)
 
+        # ── Alpha Vantage news sentiment ──────────────────────────────────────
+        av_df = pd.DataFrame()
+        if self._av_client is not None:
+            try:
+                av_df = self._av_client.update()
+            except Exception as _exc:
+                warnings.warn(f"AV sentiment update failed: {_exc}")
+
+        if not av_df.empty:
+            parts.append(av_df)
+
+        # ── FinBERT + AV ensemble ─────────────────────────────────────────────
+        if not sentiment.empty and not av_df.empty and _AV_AVAILABLE:
+            try:
+                combined_sentiment = combine_with_finbert(av_df, sentiment)
+                if not combined_sentiment.empty:
+                    parts.append(combined_sentiment)
+            except Exception as _exc:
+                warnings.warn(f"FinBERT+AV combine failed: {_exc}")
+
         if not eia_df.empty:
             # Resample weekly EIA data to daily (forward fill through week)
             eia_daily = eia_df[["surprise", "surprise_z"]].rename(columns={
@@ -449,8 +476,8 @@ class SentimentFeatures:
         if not parts:
             return pd.DataFrame()
 
-        combined = parts[0]
+        result = parts[0]
         for df in parts[1:]:
-            combined = combined.join(df, how="outer")
+            result = result.join(df, how="outer")
 
-        return combined.sort_index()
+        return result.sort_index()
