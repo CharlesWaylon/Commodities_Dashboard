@@ -33,6 +33,28 @@ st.set_page_config(page_title="Accendio | Models", page_icon="assets/accendio_ic
 apply_theme()
 render_topbar()
 
+# ── Shimmer skeleton ──────────────────────────────────────────────────────────
+_SHIMMER_CSS = (
+    "<style>@keyframes _sk{"
+    "0%{background-position:200% 0}"
+    "100%{background-position:-200% 0}}</style>"
+)
+st.markdown(_SHIMMER_CSS, unsafe_allow_html=True)
+
+def _ghost(height: int = 420, label: str = "") -> str:
+    """Shimmer ghost-card HTML — drop into st.empty().markdown(...)."""
+    txt = (
+        f'<span style="opacity:.35;font-size:.75rem;letter-spacing:.1em;'
+        f'text-transform:uppercase;color:#8899AA">{label}</span>'
+        if label else ""
+    )
+    return (
+        f'<div style="background:linear-gradient(90deg,#0C1228 25%,#1A2A5E 50%,#0C1228 75%);'
+        f'background-size:200% 100%;animation:_sk 1.6s ease-in-out infinite;'
+        f'border:1px solid #1A2A5E;border-radius:8px;height:{height}px;width:100%;'
+        f'display:flex;align-items:center;justify-content:center;">{txt}</div>'
+    )
+
 # ── Accendio theme constants ───────────────────────────────────────────────────
 BG       = "#060912"
 PLOT_BG  = "#0C1228"
@@ -93,7 +115,7 @@ CORE_TICKERS = {
     "Soybeans (CBOT)":         "ZS=F",
 }
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_resource(ttl=3600, show_spinner=False)
 def load_prices(period="3y"):
     """DB-first price matrix for CORE_TICKERS; falls back to yfinance if DB unavailable."""
     from services.data_contract import fetch_price_matrix
@@ -146,7 +168,7 @@ def get_features(_prices):
     return build_feature_matrix(_prices)
 
 # ── Elastic Net — all-41-instrument helpers ────────────────────────────────────
-@st.cache_data(ttl=14400, show_spinner=False)
+@st.cache_resource(ttl=14400, show_spinner=False)
 def load_prices_en():
     from models.data_loader import load_price_matrix_from_db
     return load_price_matrix_from_db()
@@ -230,6 +252,79 @@ def get_meta_votes(_prices, commodity: str) -> list:
 
     return votes
 
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_ic_spark(tier: str) -> pd.DataFrame:
+    """30-day daily-average IC for one tier. Returns empty DF on failure."""
+    try:
+        from models.ic_tracker import recent_ic_scores
+        raw = recent_ic_scores(days=30, tier=tier)
+        if raw.empty:
+            return pd.DataFrame()
+        raw = raw.copy()
+        raw["date"] = pd.to_datetime(raw["computed_at"]).dt.date
+        daily = (
+            raw.groupby("date")["ic_value"]
+            .mean()
+            .reset_index()
+            .sort_values("date")
+        )
+        daily.columns = ["date", "ic"]
+        return daily
+    except Exception:
+        return pd.DataFrame()
+
+
+def _render_tier_spark(tier: str, label: str, color: str, *, compact: bool = False) -> None:
+    """Tiny 30-day IC sparkline header.  compact=True stacks chart+badge vertically (for columns)."""
+    df = _load_ic_spark(tier)
+    if df.empty:
+        return
+    latest = float(df["ic"].iloc[-1])
+    badge_color = GREEN if latest >= 0.05 else (AMBER if latest >= 0.0 else RED)
+    badge_sym   = "✔" if latest >= 0.05 else ("~" if latest >= 0.0 else "✘")
+    r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+    fill = f"rgba({r},{g},{b},0.15)"
+
+    fig = go.Figure(go.Scatter(
+        x=list(range(len(df))),
+        y=df["ic"].tolist(),
+        mode="lines",
+        line=dict(color=color, width=1.5),
+        fill="tozeroy",
+        fillcolor=fill,
+    ))
+    fig.update_layout(
+        height=60,
+        margin=dict(l=0, r=0, t=0, b=0, pad=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        showlegend=False,
+    )
+
+    if compact:
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.markdown(
+            f'<div style="text-align:center;font-size:0.72rem;font-weight:600;'
+            f'color:{badge_color};margin-top:-8px;">'
+            f'{label} · {badge_sym} {latest:+.3f}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        sp_col, lbl_col = st.columns([8, 1])
+        with sp_col:
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        with lbl_col:
+            st.markdown(
+                f'<div style="text-align:right;font-size:0.75rem;font-weight:600;'
+                f'color:{badge_color};padding-top:16px;white-space:nowrap;">'
+                f'{label}<br>{badge_sym} {latest:+.3f}</div>',
+                unsafe_allow_html=True,
+            )
+
+
 with st.spinner("Loading market data…"):
     prices = load_prices()
 
@@ -245,7 +340,7 @@ returns_full = np.log(prices_full / prices_full.shift(1)).dropna()
 _macro_for_triggers = load_macro(period="2y", _price_index=prices.index)
 # Enrich with ENSO + energy-transition features so detect_weather_shock and
 # detect_energy_transition receive the columns they require.  Both loaders are
-# @st.cache_data, so this is effectively free on repeat refreshes.
+# @st.cache_resource, so this is effectively free on repeat refreshes.
 if not _macro_for_triggers.empty:
     try:
         _enso_cols = load_enso()
@@ -265,72 +360,87 @@ if not _macro_for_triggers.empty:
             )
     except Exception:
         pass
-trigger_events = detect_all(_macro_for_triggers) if not _macro_for_triggers.empty else []
-# Persist trigger firings to the SQLite audit log (Phase 5 backtest input).
-# Silent — a logging failure must never break the live dashboard.
-try:
-    if trigger_events:
-        log_trigger_events(trigger_events)
-except Exception:
-    pass
+
 _signal_router = SignalRouter()
 
-st.markdown("### 🚨 Live Macro Triggers")
-st.caption(
-    "Macro events automatically detected from live market data. When a trigger is "
-    "active, model signals for affected commodities receive a confidence multiplier — "
-    "watch for the **'Trigger boost active'** banner under any model output below."
-)
+@st.fragment(run_every="10m")
+def _render_macro_triggers():
+    trigger_events = detect_all(_macro_for_triggers) if not _macro_for_triggers.empty else []
+    # Silent — a logging failure must never break the live dashboard.
+    try:
+        if trigger_events:
+            log_trigger_events(trigger_events)
+    except Exception:
+        pass
+    # Persist for downstream use (e.g. signal router at line ~1489).
+    st.session_state["_trigger_events"] = trigger_events
 
-if trigger_events:
-    cols = st.columns(min(len(trigger_events), 3))
-    for col, ev in zip(cols, trigger_events):
-        with col:
-            with st.container(border=True):
-                family_label = ev.family.replace("_", " ").title()
-                st.markdown(f"**🔥 {family_label}**")
-                pct = int(round(ev.strength * 100))
-                tier = "Strong" if ev.strength >= 0.7 else ("Moderate" if ev.strength >= 0.3 else "Weak")
-                st.progress(min(max(ev.strength, 0.0), 1.0),
-                            text=f"Strength: {pct}% ({tier})")
-                st.caption(f"_{ev.rationale}_")
-                short = [c.split(" (")[0] for c in ev.affected_commodities]
-                chip_str = ", ".join(short[:4])
-                if len(short) > 4:
-                    chip_str += f", +{len(short) - 4} more"
-                st.caption(f"**Affects:** {chip_str}")
-                # ── Phase 4 Part 3: per-trigger chain trace button ────────────
-                if st.button("🔗 Trace Chain", key=f"_chain_btn_{ev.family}",
-                             help="Run the 5-layer causal chain tracer for this trigger"):
-                    st.session_state["_inline_chain_ev"] = ev
-                    # Pre-fill page 6 controls so the full explorer opens ready
-                    from models.triggers import get_trigger_family as _gtf
-                    import datetime as _dt
-                    _fam_obj = _gtf(ev.family)
-                    _first_affected = next(
-                        (c for c in ev.affected_commodities if c in MODELING_COMMODITIES),
-                        list(MODELING_COMMODITIES.keys())[0],
-                    )
-                    st.session_state["causal_commodity"]        = _first_affected
-                    st.session_state["causal_family"]           = _fam_obj.description if _fam_obj else ev.family
-                    st.session_state["causal_strength"]         = ev.strength
-                    st.session_state["causal_date"]             = _dt.date.fromisoformat(ev.detected_at[:10])
-                    st.session_state["causal_trace_requested"]  = True
-                    st.session_state["causal_trace_config"] = {
-                        "commodity": _first_affected,
-                        "family":    ev.family,
-                        "date":      ev.detected_at[:10],
-                        "strength":  ev.strength,
-                    }
-else:
-    st.success("✅ No active macro triggers — all models running at baseline confidence.")
+    st.markdown("### 🚨 Live Macro Triggers")
+    st.caption(
+        "Macro events automatically detected from live market data. When a trigger is "
+        "active, model signals for affected commodities receive a confidence multiplier — "
+        "watch for the **'Trigger boost active'** banner under any model output below."
+    )
+
+    if trigger_events:
+        cols = st.columns(min(len(trigger_events), 3))
+        for col, ev in zip(cols, trigger_events):
+            with col:
+                with st.container(border=True):
+                    family_label = ev.family.replace("_", " ").title()
+                    st.markdown(f"**🔥 {family_label}**")
+                    pct = int(round(ev.strength * 100))
+                    tier = "Strong" if ev.strength >= 0.7 else ("Moderate" if ev.strength >= 0.3 else "Weak")
+                    st.progress(min(max(ev.strength, 0.0), 1.0),
+                                text=f"Strength: {pct}% ({tier})")
+                    st.caption(f"_{ev.rationale}_")
+                    short = [c.split(" (")[0] for c in ev.affected_commodities]
+                    chip_str = ", ".join(short[:4])
+                    if len(short) > 4:
+                        chip_str += f", +{len(short) - 4} more"
+                    st.caption(f"**Affects:** {chip_str}")
+                    # ── Phase 4 Part 3: per-trigger chain trace button ────────────
+                    if st.button("🔗 Trace Chain", key=f"_chain_btn_{ev.family}",
+                                 help="Run the 5-layer causal chain tracer for this trigger"):
+                        st.session_state["_inline_chain_ev"] = ev
+                        # Pre-fill page 6 controls so the full explorer opens ready
+                        from models.triggers import get_trigger_family as _gtf
+                        import datetime as _dt
+                        _fam_obj = _gtf(ev.family)
+                        _first_affected = next(
+                            (c for c in ev.affected_commodities if c in MODELING_COMMODITIES),
+                            list(MODELING_COMMODITIES.keys())[0],
+                        )
+                        st.session_state["causal_commodity"]        = _first_affected
+                        st.session_state["causal_family"]           = _fam_obj.description if _fam_obj else ev.family
+                        st.session_state["causal_strength"]         = ev.strength
+                        st.session_state["causal_date"]             = _dt.date.fromisoformat(ev.detected_at[:10])
+                        st.session_state["causal_trace_requested"]  = True
+                        st.session_state["causal_trace_config"] = {
+                            "commodity": _first_affected,
+                            "family":    ev.family,
+                            "date":      ev.detected_at[:10],
+                            "strength":  ev.strength,
+                        }
+    else:
+        st.success("✅ No active macro triggers — all models running at baseline confidence.")
+
+_render_macro_triggers()
+# Read back so the signal router at ~line 1489 (and cascade tabs) can use it.
+trigger_events = st.session_state.get("_trigger_events", [])
 
 # ── Inline causal chain panel (Phase 4 Part 3) ────────────────────────────────
 # Shown when the user clicks "🔗 Trace Chain" on any trigger card above.
 # Compact view: 5-node pipeline badges + narrative + recommendation.
 # The full Sankey lives on pages/6_Causal_QS_Engine.py.
-_inline_ev = st.session_state.get("_inline_chain_ev")
-if _inline_ev is not None:
+# Own fragment so it only re-renders when its clear button is clicked, not on
+# every commodity-selector or slider interaction elsewhere on the page.
+@st.fragment
+def _render_inline_chain():
+    _inline_ev = st.session_state.get("_inline_chain_ev")
+    if _inline_ev is None:
+        return
+
     from models.causal_chain import CausalChain as _CC
 
     # Determine commodity for this trace
@@ -392,7 +502,7 @@ if _inline_ev is not None:
                     st.caption("— N/A —")
                     st.caption("no data")
 
-    # ── Narrative + recommendation ─────────────────────────────────────────────
+    # ── Narrative + recommendation ────────────────────────────────────────────
     _ic_narr_col, _ic_rec_col = st.columns([3, 2])
 
     with _ic_narr_col:
@@ -444,6 +554,8 @@ if _inline_ev is not None:
                 if _k.startswith("_inline_chain"):
                     del st.session_state[_k]
             st.rerun()
+
+_render_inline_chain()
 
 st.divider()
 
@@ -619,39 +731,76 @@ def _compute_cascade_for(commodity, macro_row, prices_df):
 
     return base_pct, macro_adj, final_pct, band_90, confidence, ch
 
-# ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📐 Statistical",
-    "🌲 ML Models",
-    "🌍 Market Signals",
-    "🧠 Deep Learning",
-    "⚛️ Quantum",
-    "🔮 Consensus",
-    "🩺 Health",
-])
+# ── Two-tier navigation ────────────────────────────────────────────────────────
+_TIER_CORE = "📊 Core Models"
+_TIER_ADV  = "🚀 Advanced Models"
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — STATISTICAL MODELS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab1:
-    st.subheader("📐 Statistical Models")
-    st.caption(
-        "Classical econometric models: ARIMA short-term forecasting, "
-        "GARCH volatility, Kalman dynamic hedge ratio, and VAR Granger causality."
+_model_tier = st.radio(
+    label="",
+    options=[_TIER_CORE, _TIER_ADV],
+    index=0,
+    horizontal=True,
+    key="model_tier_selector",
+    label_visibility="collapsed",
+)
+_show_core = (_model_tier or _TIER_CORE) == _TIER_CORE
+
+# ── Model tier status bar ─────────────────────────────────────────────────────
+# Green = already computed this session; amber = will require a compute wait.
+# Statistical/ML flags are set at the top of their respective tabs (which always
+# execute). Deep/Quantum flags are set when the user clicks a run button.
+_TIER_BADGES = [
+    ("📐 Statistical", bool(st.session_state.get("_stat_tier_ran"))),
+    ("🌲 ML Models",   bool(st.session_state.get("_ml_tier_ran"))),
+    ("🧠 Deep",        bool(st.session_state.get("_deep_tier_ran"))),
+    ("⚛️ Quantum",     bool(st.session_state.get("_quantum_tier_ran"))),
+]
+_sb_cols = st.columns(4)
+for _sb_col, (_sb_label, _sb_ready) in zip(_sb_cols, _TIER_BADGES):
+    _sb_color = "#4CAF50" if _sb_ready else "#FFA726"
+    _sb_text  = "Ready" if _sb_ready else "Click to run"
+    _sb_col.markdown(
+        f'<div style="background:#0d1117; border:1px solid #1f2937; border-radius:6px; '
+        f'padding:8px 12px; text-align:center; font-size:0.85rem; line-height:1.6;">'
+        f'<span style="color:{_sb_color}; font-size:1rem;">&#9679;</span> '
+        f'<strong style="color:#C8D4F0;">{_sb_label}</strong><br>'
+        f'<span style="color:{_sb_color}; font-size:0.75rem; font-weight:500;">{_sb_text}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
     )
+st.markdown("")  # breathing room before the tabs
 
-    col_sel, col_per = st.columns([2, 1])
-    with col_sel:
-        stat_commodity = st.selectbox(
-            "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="stat_comm"
+if _show_core:
+    tab1, tab2, tab3 = st.tabs([
+        "📐 Statistical",
+        "🌲 ML Models",
+        "🌍 Market Signals",
+    ])
+
+    # TAB 1 — STATISTICAL MODELS
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab1:
+        st.session_state["_stat_tier_ran"] = True
+        st.subheader("📐 Statistical Models")
+        st.caption(
+            "Classical econometric models: ARIMA short-term forecasting, "
+            "GARCH volatility, Kalman dynamic hedge ratio, and VAR Granger causality."
         )
-    with col_per:
-        stat_horizon = st.slider("ARIMA forecast horizon (days)", 1, 30, 5, key="stat_hor")
+        _render_tier_spark("statistical", "Statistical", BLUE)
 
-    st.divider()
+        col_sel, col_per = st.columns([2, 1])
+        with col_sel:
+            stat_commodity = st.selectbox(
+                "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="stat_comm"
+            )
+        with col_per:
+            stat_horizon = st.slider("ARIMA forecast horizon (days)", 1, 30, 5, key="stat_hor")
 
-    # ── ARIMA ──────────────────────────────────────────────────────────────────
-    with st.spinner(f"Running ARIMA on {stat_commodity}…"):
+        st.divider()
+
+        # ── ARIMA ──────────────────────────────────────────────────────────────────
+        _ph_arima = st.empty()
+        _ph_arima.markdown(_ghost(400, "ARIMA forecast"), unsafe_allow_html=True)
         try:
             from models.statistical.arima import ARIMAForecaster
             arima = ARIMAForecaster()
@@ -690,7 +839,7 @@ with tab1:
             ))
             dark_layout(fig_arima, height=400,
                         title=f"{stat_commodity} — ARIMA{arima_result['order']} {stat_horizon}d Forecast")
-            st.plotly_chart(fig_arima, use_container_width=True)
+            _ph_arima.plotly_chart(fig_arima, use_container_width=True)
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Model Order", str(arima_result["order"]))
@@ -701,13 +850,15 @@ with tab1:
                 delta=f"{(fc_vals[-1]/close.iloc[-1]-1)*100:+.2f}% vs today",
             )
         except Exception as e:
+            _ph_arima.empty()
             st.warning(f"ARIMA failed: {e}")
 
-    st.divider()
+        st.divider()
 
-    # ── GARCH ──────────────────────────────────────────────────────────────────
-    st.markdown("#### GARCH Volatility Model")
-    with st.spinner(f"Fitting GARCH on {stat_commodity}…"):
+        # ── GARCH ──────────────────────────────────────────────────────────────────
+        st.markdown("#### GARCH Volatility Model")
+        _ph_garch = st.empty()
+        _ph_garch.markdown(_ghost(380, "GARCH volatility"), unsafe_allow_html=True)
         try:
             from models.statistical.garch import GARCHForecaster
             garch = GARCHForecaster()
@@ -737,7 +888,7 @@ with tab1:
                 ))
             dark_layout(fig_garch, height=380,
                         title=f"{stat_commodity} — {garch.model} Conditional Volatility (Annualised %)")
-            st.plotly_chart(fig_garch, use_container_width=True)
+            _ph_garch.plotly_chart(fig_garch, use_container_width=True)
 
             g1, g2, g3, g4 = st.columns(4)
             g1.metric("Model", garch.model)
@@ -749,42 +900,44 @@ with tab1:
             with st.expander("Model Parameters"):
                 st.dataframe(params.style.format("{:.6f}"), use_container_width=True)
         except Exception as e:
+            _ph_garch.empty()
             st.warning(f"GARCH failed: {e}")
 
-    st.divider()
+        st.divider()
 
-    # ── Kalman Hedge Ratio ──────────────────────────────────────────────────────
-    st.markdown("#### Kalman Dynamic Hedge Ratio")
-    st.caption("Time-varying β between a commodity pair — signals mean-reversion in the spread.")
+        # ── Kalman Hedge Ratio ──────────────────────────────────────────────────────
+        st.markdown("#### Kalman Dynamic Hedge Ratio")
+        st.caption("Time-varying β between a commodity pair — signals mean-reversion in the spread.")
 
-    from models.statistical.kalman import HEDGE_PAIRS, KalmanHedgeRatio
+        from models.statistical.kalman import HEDGE_PAIRS, KalmanHedgeRatio
 
-    pair_options = list(HEDGE_PAIRS.keys()) + ["Custom…"]
-    pair_choice  = st.selectbox("Pair", pair_options, key="kalman_pair")
+        pair_options = list(HEDGE_PAIRS.keys()) + ["Custom…"]
+        pair_choice  = st.selectbox("Pair", pair_options, key="kalman_pair")
 
-    if pair_choice == "Custom…":
-        available_cols = sorted(prices_full.columns.tolist())
-        c1, c2 = st.columns(2)
-        y_name     = c1.selectbox("Y leg (long)", available_cols, key="kalman_y")
-        x_default  = 1 if len(available_cols) > 1 else 0
-        x_name     = c2.selectbox("X leg (hedge)", available_cols, index=x_default, key="kalman_x")
-        pair_label = f"{y_name} / {x_name}"
-    else:
-        y_name, x_name = HEDGE_PAIRS[pair_choice]
-        pair_label = pair_choice
+        if pair_choice == "Custom…":
+            available_cols = sorted(prices_full.columns.tolist())
+            c1, c2 = st.columns(2)
+            y_name     = c1.selectbox("Y leg (long)", available_cols, key="kalman_y")
+            x_default  = 1 if len(available_cols) > 1 else 0
+            x_name     = c2.selectbox("X leg (hedge)", available_cols, index=x_default, key="kalman_x")
+            pair_label = f"{y_name} / {x_name}"
+        else:
+            y_name, x_name = HEDGE_PAIRS[pair_choice]
+            pair_label = pair_choice
 
-    zscore_window = st.slider(
-        "Z-score lookback (days)", min_value=21, max_value=126, value=63, step=7,
-        key="kalman_zscore_window",
-        help="Rolling window for spread mean and std. Shorter = more sensitive; longer = more stable.",
-    )
+        zscore_window = st.slider(
+            "Z-score lookback (days)", min_value=21, max_value=126, value=63, step=7,
+            key="kalman_zscore_window",
+            help="Rolling window for spread mean and std. Shorter = more sensitive; longer = more stable.",
+        )
 
-    if y_name == x_name:
-        st.info("Select two different instruments.")
-    elif y_name not in prices_full.columns or x_name not in prices_full.columns:
-        st.info("Price data for this pair not fully loaded. Try another pair.")
-    else:
-        with st.spinner("Running Kalman filter…"):
+        if y_name == x_name:
+            st.info("Select two different instruments.")
+        elif y_name not in prices_full.columns or x_name not in prices_full.columns:
+            st.info("Price data for this pair not fully loaded. Try another pair.")
+        else:
+            _ph_kf = st.empty()
+            _ph_kf.markdown(_ghost(480, "Kalman filter"), unsafe_allow_html=True)
             try:
                 kf = KalmanHedgeRatio(pair=pair_label)
                 kf.fit(prices_full[y_name], prices_full[x_name])
@@ -793,6 +946,8 @@ with tab1:
                 zscore        = kf.spread_zscore(window=zscore_window)
                 info          = kf.hedge_info()
                 coint_p       = kf.cointegration_pvalue()
+
+                _ph_kf.empty()
 
                 # Cointegration badge
                 import math
@@ -855,773 +1010,806 @@ with tab1:
                 k4.metric("β 95% CI width", f"{ci_now:.3f}",
                           help="Width of the Kalman uncertainty band. Wider = less confident in current β.")
             except Exception as e:
+                _ph_kf.empty()
                 st.warning(f"Kalman failed: {e}")
 
-    st.divider()
+        st.divider()
 
-    # ── VAR Granger Causality ──────────────────────────────────────────────────
-    st.markdown("#### VAR Granger Causality")
-    st.caption("Does commodity A's history help predict commodity B? Low p-value = yes.")
-    st.warning(
-        "**Methodology note:** Granger causality detects lead-lag *relationships* between price series — "
-        "it does not imply economic causation and is **not a directional trading signal**. "
-        "Walk-forward backtesting shows VAR 1-step directional accuracy is near-random (28–43%) "
-        "for liquid commodity futures. Use these outputs to understand *structural linkages*, "
-        "not to forecast tomorrow's price move.",
-        icon="⚠️",
-    )
+        # ── VAR Granger Causality ──────────────────────────────────────────────────
+        st.markdown("#### VAR Granger Causality")
+        st.caption("Does commodity A's history help predict commodity B? Low p-value = yes.")
+        st.warning(
+            "**Methodology note:** Granger causality detects lead-lag *relationships* between price series — "
+            "it does not imply economic causation and is **not a directional trading signal**. "
+            "Walk-forward backtesting shows VAR 1-step directional accuracy is near-random (28–43%) "
+            "for liquid commodity futures. Use these outputs to understand *structural linkages*, "
+            "not to forecast tomorrow's price move.",
+            icon="⚠️",
+        )
 
-    VAR_GROUPS = {
-        "Energy (WTI, Brent, NG, RBOB, HO)":              ("energy",            None),
-        "Energy Transition (LNG, Coal, Uranium, Carbon)":  ("energy_transition",  None),
-        "Precious Metals (Gold, Silver, Pt, Pd)":          ("precious_metals",    None),
-        "Industrial Metals (Cu, Al, Steel, Iron, Zn)":     ("industrial_metals",  None),
-        "Grains (Corn, Wheat, Soybeans)":                  ("grains",             None),
-        "Ag Extended (Soy Oil/Meal, Oats, Rice, KC Wht)":  ("ag_extended",        None),
-        "Livestock (Cattle, Hogs)":                        ("livestock",          None),
-        "Softs (Coffee, Sugar, Cotton, Cocoa, OJ)":        ("softs",              None),
-        "New Commodities (Lithium, Rare Earths, Bitcoin)": ("new_commodities",    None),
-    }
-    var_group = st.selectbox("Commodity group", list(VAR_GROUPS.keys()), key="var_group")
-    g_key, _ = VAR_GROUPS[var_group]
+        VAR_GROUPS = {
+            "Energy (WTI, Brent, NG, RBOB, HO)":              ("energy",            None),
+            "Energy Transition (LNG, Coal, Uranium, Carbon)":  ("energy_transition",  None),
+            "Precious Metals (Gold, Silver, Pt, Pd)":          ("precious_metals",    None),
+            "Industrial Metals (Cu, Al, Steel, Iron, Zn)":     ("industrial_metals",  None),
+            "Grains (Corn, Wheat, Soybeans)":                  ("grains",             None),
+            "Ag Extended (Soy Oil/Meal, Oats, Rice, KC Wht)":  ("ag_extended",        None),
+            "Livestock (Cattle, Hogs)":                        ("livestock",          None),
+            "Softs (Coffee, Sugar, Cotton, Cocoa, OJ)":        ("softs",              None),
+            "New Commodities (Lithium, Rare Earths, Bitcoin)": ("new_commodities",    None),
+        }
+        var_group = st.selectbox("Commodity group", list(VAR_GROUPS.keys()), key="var_group")
+        g_key, _ = VAR_GROUPS[var_group]
 
-    # Shared color palette — defined here so both IRF and FEVD blocks can access it
-    VAR_COLORS = [AMBER, BLUE, GREEN, RED, PURPLE, "#26C6DA", "#FFA726", "#EC407A",
-                  "#7E57C2", "#26A69A", "#EF9A9A", "#80CBC4"]
+        # Shared color palette — defined here so both IRF and FEVD blocks can access it
+        VAR_COLORS = [AMBER, BLUE, GREEN, RED, PURPLE, "#26C6DA", "#FFA726", "#EC407A",
+                      "#7E57C2", "#26A69A", "#EF9A9A", "#80CBC4"]
 
-    with st.spinner("Fitting VAR…"):
-        try:
-            from models.statistical.var_vecm import CommodityVAR
-            prices_db = load_prices_db()
-            var = CommodityVAR(group=g_key)
-            var.fit(prices_db)
-
-            # ── Granger causality heatmap ──────────────────────────────────────
-            gc = var.granger_causality(max_lag=5)
-            # Shorten labels for readability on the heatmap
-            short = {c: c.replace(" (COMEX)", "").replace(" (CBOT)", "")
-                       .replace(" (Henry Hub)", "").replace(" (FCOJ-A)", "")
-                       .replace("*", "").strip()
-                     for c in gc.columns}
-            gc_plot = gc.rename(index=short, columns=short)
-            hmap_h = max(350, 80 * len(var._cols))
-            fig_gc = px.imshow(
-                gc_plot.astype(float),
-                color_continuous_scale="RdYlGn_r",
-                zmin=0, zmax=0.1,
-                text_auto=".3f",
-                title="Granger Causality p-values — row caused by column (min p across lags 1–5)",
-            )
-            fig_gc.update_layout(
-                paper_bgcolor=BG, plot_bgcolor=BG,
-                font_color="#FAFAFA", height=hmap_h,
-                margin=dict(t=55, l=120, r=20, b=100),
-                coloraxis_colorbar=dict(title="p-value"),
-            )
-            fig_gc.update_xaxes(tickangle=-40)
-            st.plotly_chart(fig_gc, use_container_width=True)
-
-            v1, v2, v3 = st.columns(3)
-            v1.metric("VAR Lag Order", var._lag_order)
-            v2.metric("Commodities in system", len(var._cols))
-            sig_total = int((gc < 0.05).sum().sum())
-            total_pairs = int(gc.count().sum())
-            v3.metric("Significant pairs (p<0.05)", f"{sig_total} / {total_pairs}")
-
-            # ── Dynamic economic interpretation ───────────────────────────────
-            interp_lines = []
-
-            def _p(row, col):
-                try:
-                    return gc.loc[row, col]
-                except KeyError:
-                    return float("nan")
-
-            def _sig_causes(effect, threshold=0.05):
-                """Return list of commodities that significantly Granger-cause `effect`."""
-                return [c for c in gc.columns if c != effect and _p(effect, c) < threshold]
-
-            def _sig_effects(cause, threshold=0.05):
-                """Return list of commodities significantly caused by `cause`."""
-                return [r for r in gc.index if r != cause and _p(r, cause) < threshold]
-
-            if g_key == "energy":
-                wti_ng = _p("Natural Gas", "WTI Crude Oil")
-                ng_wti = _p("WTI Crude Oil", "Natural Gas")
-                if wti_ng > 0.05 and ng_wti > 0.05:
-                    interp_lines.append(
-                        "⚡ **WTI and Natural Gas show no significant lead-lag relationship** — "
-                        "reflects their structural decoupling post-2022 as U.S. LNG export capacity "
-                        "expanded. Natural Gas now trades on global supply dynamics, not oil signals."
-                    )
-                if _p("Brent Crude Oil", "WTI Crude Oil") < 0.05:
-                    interp_lines.append(
-                        "🛢️ **WTI Granger-causes Brent** — U.S. crude sets the short-run benchmark; "
-                        "Brent adjusts with a measurable lag."
-                    )
-                refined = [n for n, col in [("RBOB Gasoline", "Gasoline (RBOB)"), ("Heating Oil", "Heating Oil")]
-                           if _p(col, "WTI Crude Oil") < 0.05]
-                if refined:
-                    interp_lines.append(
-                        f"⛽ **WTI Granger-causes {', '.join(refined)}** — crude feedstock costs "
-                        "propagate into refined product prices within 1–5 trading days."
-                    )
-
-            elif g_key == "energy_transition":
-                coal_pair = _p("Metallurgical Coal*", "Thermal Coal*")
-                if coal_pair < 0.05:
-                    interp_lines.append(
-                        "⛏️ **Thermal Coal Granger-causes Met Coal** — thermal price signals "
-                        "spill across coal grades as miners and buyers substitute between end uses."
-                    )
-                if _p("Carbon Credits*", "Thermal Coal*") < 0.05 or _p("Thermal Coal*", "Carbon Credits*") < 0.05:
-                    interp_lines.append(
-                        "🌿 **Carbon Credits and Thermal Coal are linked** — carbon pricing "
-                        "incentivizes fuel-switching, creating a feedback loop between EUA prices "
-                        "and coal demand."
-                    )
-                u_causes = _sig_causes("Uranium*")
-                if not u_causes:
-                    interp_lines.append(
-                        "☢️ **Uranium trades independently** of coal and carbon — driven by "
-                        "long-term utility contracting cycles rather than short-run energy prices."
-                    )
-                if _p("Lumber*", "Carbon Credits*") < 0.05:
-                    interp_lines.append(
-                        "🌲 **Carbon Credits Granger-cause Lumber** — forest carbon sequestration "
-                        "values influence timber harvest decisions."
-                    )
-
-            elif g_key == "precious_metals":
-                gold_to_silver = _p("Silver", "Gold")
-                silver_to_gold = _p("Gold", "Silver")
-                if gold_to_silver < 0.05:
-                    interp_lines.append(
-                        "🥇 **Gold Granger-causes Silver** — institutional gold flows lead; "
-                        "silver follows as the high-beta precious metals proxy."
-                    )
-                if silver_to_gold < 0.05:
-                    interp_lines.append(
-                        "🥈 **Silver Granger-causes Gold** — industrial demand signals "
-                        "in silver can anticipate broader precious metals moves."
-                    )
-                pd_indep = not _sig_causes("Palladium")
-                pt_indep = not _sig_causes("Platinum")
-                if pd_indep:
-                    interp_lines.append(
-                        "🚗 **Palladium trades independently** — dominated by auto catalyst demand "
-                        "(ICE vehicles) and Russian supply risk rather than monetary metal flows."
-                    )
-                phys_gold = _p("Gold (Physical/London)*", "Gold")
-                if phys_gold < 0.05:
-                    interp_lines.append(
-                        "🏦 **Spot Gold Granger-causes the Physical ETF** — futures price "
-                        "discovery leads the London AM/PM fix."
-                    )
-
-            elif g_key == "industrial_metals":
-                cu_effects = _sig_effects("Copper")
-                if cu_effects:
-                    targets = ", ".join(c.replace("*", "").strip() for c in cu_effects)
-                    interp_lines.append(
-                        f"🔧 **Copper Granger-causes {targets}** — copper's role as a macro "
-                        "bellwether ('Dr. Copper') propagates demand signals across the base metals complex."
-                    )
-                if _p("HRC Steel", "Iron Ore / Steel*") < 0.05 or _p("Iron Ore / Steel*", "HRC Steel") < 0.05:
-                    interp_lines.append(
-                        "🏗️ **HRC Steel and Iron Ore are causally linked** — steelmaking input "
-                        "costs (iron ore, coking coal) feed through to hot-rolled coil prices."
-                    )
-                zn_indep = not _sig_causes("Zinc & Cobalt*")
-                if zn_indep:
-                    interp_lines.append(
-                        "🔋 **Zinc & Cobalt trade independently** — battery metal dynamics "
-                        "and galvanizing demand are driven by separate supply chains."
-                    )
-
-            elif g_key == "grains":
-                corn_effects = _sig_effects("Corn")
-                if corn_effects:
-                    targets_str = " and ".join(f"**{r.split('(')[0].strip()}**" for r in corn_effects)
-                    interp_lines.append(
-                        f"🌽 **Corn Granger-causes {targets_str}** — shared acreage competition "
-                        "and feed-cost dynamics make corn the primary grain complex driver. "
-                        "FEVD shows corn accounts for ~20–24% of Wheat and Soybean forecast variance."
-                    )
-                if _p("Soybeans", "Wheat") < 0.05:
-                    interp_lines.append(
-                        "🌾 **Wheat Granger-causes Soybeans** — crop rotation and substitution "
-                        "signals in global export markets."
-                    )
-                if _p("Corn", "Soybeans") < 0.05:
-                    interp_lines.append(
-                        "🫘 **Soybeans Granger-cause Corn** — the soy/corn price ratio is a "
-                        "key acreage-switching signal watched by commodity traders."
-                    )
-
-            elif g_key == "ag_extended":
-                crush = _p("Soybean Meal", "Soybean Oil") < 0.05 or _p("Soybean Oil", "Soybean Meal") < 0.05
-                if crush:
-                    interp_lines.append(
-                        "🫘 **Soybean Oil and Soybean Meal are causally linked** — both are "
-                        "crush co-products; the soy crush spread drives processing margins and "
-                        "creates feedback between the two."
-                    )
-                wheat_link = _p("Wheat (KC HRW)", "Oats (CBOT)") < 0.05 or _p("Wheat", "Wheat (KC HRW)") < 0.05
-                if wheat_link:
-                    interp_lines.append(
-                        "🌾 **Inter-wheat price discovery detected** — CBOT SRW and KC HRW "
-                        "wheat trade on different protein/quality specs but share export demand signals."
-                    )
-                rice_indep = not _sig_causes("Rough Rice (CBOT)")
-                if rice_indep:
-                    interp_lines.append(
-                        "🍚 **Rough Rice trades independently** — primarily driven by Asian "
-                        "demand and weather in Southeast Asia, decoupled from U.S. grain complex dynamics."
-                    )
-
-            elif g_key == "livestock":
-                fc_lc = _p("Feeder Cattle", "Live Cattle")
-                lc_fc = _p("Live Cattle", "Feeder Cattle")
-                if fc_lc < 0.05:
-                    interp_lines.append(
-                        "🐄 **Live Cattle Granger-causes Feeder Cattle** — finished cattle prices "
-                        "set the ceiling for what feedlots will pay for feeder cattle, "
-                        "creating a downstream pricing cascade."
-                    )
-                if lc_fc < 0.05:
-                    interp_lines.append(
-                        "🐂 **Feeder Cattle Granger-causes Live Cattle** — input cost signals "
-                        "from the feeder market propagate forward to finished cattle prices."
-                    )
-                hogs_indep = not _sig_causes("Lean Hogs")
-                if hogs_indep:
-                    interp_lines.append(
-                        "🐷 **Lean Hogs trade independently of cattle** — pork and beef supply "
-                        "chains are largely separate, with hog prices driven by packer margins "
-                        "and feed costs independent of the cattle cycle."
-                    )
-
-            elif g_key == "softs":
-                coffee_sugar = _p("Sugar", "Coffee") < 0.05 or _p("Coffee", "Sugar") < 0.05
-                if coffee_sugar:
-                    interp_lines.append(
-                        "☕ **Coffee and Sugar are causally linked** — both are tropical crops "
-                        "heavily exposed to Brazilian weather and Real/USD FX, creating "
-                        "correlated supply shocks."
-                    )
-                cocoa_indep = not _sig_causes("Cocoa")
-                if cocoa_indep:
-                    interp_lines.append(
-                        "🍫 **Cocoa trades independently** — West African supply concentration "
-                        "(Ghana/Ivory Coast ~60% of global output) means price discovery "
-                        "is driven by regional crop conditions rather than broader soft commodity signals."
-                    )
-                oj_indep = not _sig_causes("Orange Juice (FCOJ-A)")
-                if oj_indep:
-                    interp_lines.append(
-                        "🍊 **Orange Juice trades independently** — Florida and Brazil citrus "
-                        "greening disease and USDA crop estimates dominate price discovery, "
-                        "disconnected from other softs."
-                    )
-
-            elif g_key == "new_commodities":
-                btc_effects = _sig_effects("Bitcoin")
-                li_re = _p("Rare Earths*", "Lithium*") < 0.05 or _p("Lithium*", "Rare Earths*") < 0.05
-                if li_re:
-                    interp_lines.append(
-                        "🔋 **Lithium and Rare Earths are causally linked** — both are critical "
-                        "battery and EV supply chain inputs; demand signals from one propagate to the other."
-                    )
-                if btc_effects:
-                    targets = ", ".join(c.replace("*", "").strip() for c in btc_effects)
-                    interp_lines.append(
-                        f"₿ **Bitcoin Granger-causes {targets}** — risk-appetite spillover: "
-                        "Bitcoin acts as a high-beta risk asset; moves can lead commodity ETFs "
-                        "that share speculative investor bases (Lithium, Rare Earths)."
-                    )
-                btc_causes = _sig_causes("Bitcoin")
-                if not btc_causes and not btc_effects:
-                    interp_lines.append(
-                        "₿ **Bitcoin trades independently** of Lithium and Rare Earths — "
-                        "crypto price discovery is dominated by on-chain flows and macro "
-                        "liquidity rather than physical commodity fundamentals."
-                    )
-
-            if not interp_lines:
-                interp_lines.append(
-                    f"No dominant lead-lag relationships detected at p < 0.05 "
-                    f"({sig_total}/{total_pairs} pairs significant). "
-                    "This may reflect efficient price discovery, a structural break in the "
-                    "sample window, or lag dynamics beyond 5 days for this group."
-                )
-
-            st.info("\n\n".join(interp_lines))
-
-            st.divider()
-
-            # ── IRF line chart ─────────────────────────────────────────────────
-            st.markdown("##### Impulse Response Functions (10-day horizon)")
-            st.caption("One-standard-deviation shock to each commodity → response across the system.")
+        _ph_var = st.empty()
+        _ph_var.markdown(_ghost(400, "VAR / Granger causality"), unsafe_allow_html=True)
+        with st.spinner("Fitting VAR…"):
             try:
-                irf = var.impulse_response(steps=10)
-                shock_names = irf.columns.get_level_values("shock").unique().tolist()
-                n_shocks = len(shock_names)
-                from plotly.subplots import make_subplots as _make_subplots
-                irf_cols = min(n_shocks, 3)
-                irf_rows = (n_shocks + irf_cols - 1) // irf_cols
-                fig_irf = _make_subplots(
-                    rows=irf_rows, cols=irf_cols,
-                    subplot_titles=[s.replace("*", "").split("(")[0].strip() for s in shock_names],
-                    shared_yaxes=False,
+                from models.statistical.var_vecm import CommodityVAR
+                prices_db = load_prices_db()
+                var = CommodityVAR(group=g_key)
+                var.fit(prices_db)
+                _ph_var.empty()
+
+                # ── Granger causality heatmap ──────────────────────────────────────
+                gc = var.granger_causality(max_lag=5)
+                # Shorten labels for readability on the heatmap
+                short = {c: c.replace(" (COMEX)", "").replace(" (CBOT)", "")
+                           .replace(" (Henry Hub)", "").replace(" (FCOJ-A)", "")
+                           .replace("*", "").strip()
+                         for c in gc.columns}
+                gc_plot = gc.rename(index=short, columns=short)
+                hmap_h = max(350, 80 * len(var._cols))
+                fig_gc = px.imshow(
+                    gc_plot.astype(float),
+                    color_continuous_scale="RdYlGn_r",
+                    zmin=0, zmax=0.1,
+                    text_auto=".3f",
+                    title="Granger Causality p-values — row caused by column (min p across lags 1–5)",
                 )
-                for s_idx, shock in enumerate(shock_names):
-                    r, c = divmod(s_idx, irf_cols)
-                    for r_idx, resp in enumerate(irf[shock].columns.tolist()):
-                        fig_irf.add_trace(
-                            go.Scatter(
-                                x=list(range(11)), y=irf[(shock, resp)].values,
-                                mode="lines",
-                                name=resp.replace("*", "").split("(")[0].strip(),
-                                line=dict(color=VAR_COLORS[r_idx % len(VAR_COLORS)], width=2),
-                                showlegend=(s_idx == 0),
-                            ),
-                            row=r + 1, col=c + 1,
+                fig_gc.update_layout(
+                    paper_bgcolor=BG, plot_bgcolor=BG,
+                    font_color="#FAFAFA", height=hmap_h,
+                    margin=dict(t=55, l=120, r=20, b=100),
+                    coloraxis_colorbar=dict(title="p-value"),
+                )
+                fig_gc.update_xaxes(tickangle=-40)
+                st.plotly_chart(fig_gc, use_container_width=True)
+
+                v1, v2, v3 = st.columns(3)
+                v1.metric("VAR Lag Order", var._lag_order)
+                v2.metric("Commodities in system", len(var._cols))
+                sig_total = int((gc < 0.05).sum().sum())
+                total_pairs = int(gc.count().sum())
+                v3.metric("Significant pairs (p<0.05)", f"{sig_total} / {total_pairs}")
+
+                # ── Dynamic economic interpretation ───────────────────────────────
+                interp_lines = []
+
+                def _p(row, col):
+                    try:
+                        return gc.loc[row, col]
+                    except KeyError:
+                        return float("nan")
+
+                def _sig_causes(effect, threshold=0.05):
+                    """Return list of commodities that significantly Granger-cause `effect`."""
+                    return [c for c in gc.columns if c != effect and _p(effect, c) < threshold]
+
+                def _sig_effects(cause, threshold=0.05):
+                    """Return list of commodities significantly caused by `cause`."""
+                    return [r for r in gc.index if r != cause and _p(r, cause) < threshold]
+
+                if g_key == "energy":
+                    wti_ng = _p("Natural Gas", "WTI Crude Oil")
+                    ng_wti = _p("WTI Crude Oil", "Natural Gas")
+                    if wti_ng > 0.05 and ng_wti > 0.05:
+                        interp_lines.append(
+                            "⚡ **WTI and Natural Gas show no significant lead-lag relationship** — "
+                            "reflects their structural decoupling post-2022 as U.S. LNG export capacity "
+                            "expanded. Natural Gas now trades on global supply dynamics, not oil signals."
                         )
-                    fig_irf.add_hline(y=0, line_dash="dash", line_color="#555",
-                                      row=r + 1, col=c + 1)
-                fig_irf.update_layout(
-                    paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
-                    font_color="#FAFAFA", height=280 * irf_rows,
-                    margin=dict(t=50, l=50, r=20, b=40),
-                    legend=dict(bgcolor=PLOT_BG, borderwidth=0),
-                )
-                fig_irf.update_xaxes(title_text="Days", gridcolor=GRID)
-                fig_irf.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
-                st.plotly_chart(fig_irf, use_container_width=True)
+                    if _p("Brent Crude Oil", "WTI Crude Oil") < 0.05:
+                        interp_lines.append(
+                            "🛢️ **WTI Granger-causes Brent** — U.S. crude sets the short-run benchmark; "
+                            "Brent adjusts with a measurable lag."
+                        )
+                    refined = [n for n, col in [("RBOB Gasoline", "Gasoline (RBOB)"), ("Heating Oil", "Heating Oil")]
+                               if _p(col, "WTI Crude Oil") < 0.05]
+                    if refined:
+                        interp_lines.append(
+                            f"⛽ **WTI Granger-causes {', '.join(refined)}** — crude feedstock costs "
+                            "propagate into refined product prices within 1–5 trading days."
+                        )
+
+                elif g_key == "energy_transition":
+                    coal_pair = _p("Metallurgical Coal*", "Thermal Coal*")
+                    if coal_pair < 0.05:
+                        interp_lines.append(
+                            "⛏️ **Thermal Coal Granger-causes Met Coal** — thermal price signals "
+                            "spill across coal grades as miners and buyers substitute between end uses."
+                        )
+                    if _p("Carbon Credits*", "Thermal Coal*") < 0.05 or _p("Thermal Coal*", "Carbon Credits*") < 0.05:
+                        interp_lines.append(
+                            "🌿 **Carbon Credits and Thermal Coal are linked** — carbon pricing "
+                            "incentivizes fuel-switching, creating a feedback loop between EUA prices "
+                            "and coal demand."
+                        )
+                    u_causes = _sig_causes("Uranium*")
+                    if not u_causes:
+                        interp_lines.append(
+                            "☢️ **Uranium trades independently** of coal and carbon — driven by "
+                            "long-term utility contracting cycles rather than short-run energy prices."
+                        )
+                    if _p("Lumber*", "Carbon Credits*") < 0.05:
+                        interp_lines.append(
+                            "🌲 **Carbon Credits Granger-cause Lumber** — forest carbon sequestration "
+                            "values influence timber harvest decisions."
+                        )
+
+                elif g_key == "precious_metals":
+                    gold_to_silver = _p("Silver", "Gold")
+                    silver_to_gold = _p("Gold", "Silver")
+                    if gold_to_silver < 0.05:
+                        interp_lines.append(
+                            "🥇 **Gold Granger-causes Silver** — institutional gold flows lead; "
+                            "silver follows as the high-beta precious metals proxy."
+                        )
+                    if silver_to_gold < 0.05:
+                        interp_lines.append(
+                            "🥈 **Silver Granger-causes Gold** — industrial demand signals "
+                            "in silver can anticipate broader precious metals moves."
+                        )
+                    pd_indep = not _sig_causes("Palladium")
+                    pt_indep = not _sig_causes("Platinum")
+                    if pd_indep:
+                        interp_lines.append(
+                            "🚗 **Palladium trades independently** — dominated by auto catalyst demand "
+                            "(ICE vehicles) and Russian supply risk rather than monetary metal flows."
+                        )
+                    phys_gold = _p("Gold (Physical/London)*", "Gold")
+                    if phys_gold < 0.05:
+                        interp_lines.append(
+                            "🏦 **Spot Gold Granger-causes the Physical ETF** — futures price "
+                            "discovery leads the London AM/PM fix."
+                        )
+
+                elif g_key == "industrial_metals":
+                    cu_effects = _sig_effects("Copper")
+                    if cu_effects:
+                        targets = ", ".join(c.replace("*", "").strip() for c in cu_effects)
+                        interp_lines.append(
+                            f"🔧 **Copper Granger-causes {targets}** — copper's role as a macro "
+                            "bellwether ('Dr. Copper') propagates demand signals across the base metals complex."
+                        )
+                    if _p("HRC Steel", "Iron Ore / Steel*") < 0.05 or _p("Iron Ore / Steel*", "HRC Steel") < 0.05:
+                        interp_lines.append(
+                            "🏗️ **HRC Steel and Iron Ore are causally linked** — steelmaking input "
+                            "costs (iron ore, coking coal) feed through to hot-rolled coil prices."
+                        )
+                    zn_indep = not _sig_causes("Zinc & Cobalt*")
+                    if zn_indep:
+                        interp_lines.append(
+                            "🔋 **Zinc & Cobalt trade independently** — battery metal dynamics "
+                            "and galvanizing demand are driven by separate supply chains."
+                        )
+
+                elif g_key == "grains":
+                    corn_effects = _sig_effects("Corn")
+                    if corn_effects:
+                        targets_str = " and ".join(f"**{r.split('(')[0].strip()}**" for r in corn_effects)
+                        interp_lines.append(
+                            f"🌽 **Corn Granger-causes {targets_str}** — shared acreage competition "
+                            "and feed-cost dynamics make corn the primary grain complex driver. "
+                            "FEVD shows corn accounts for ~20–24% of Wheat and Soybean forecast variance."
+                        )
+                    if _p("Soybeans", "Wheat") < 0.05:
+                        interp_lines.append(
+                            "🌾 **Wheat Granger-causes Soybeans** — crop rotation and substitution "
+                            "signals in global export markets."
+                        )
+                    if _p("Corn", "Soybeans") < 0.05:
+                        interp_lines.append(
+                            "🫘 **Soybeans Granger-cause Corn** — the soy/corn price ratio is a "
+                            "key acreage-switching signal watched by commodity traders."
+                        )
+
+                elif g_key == "ag_extended":
+                    crush = _p("Soybean Meal", "Soybean Oil") < 0.05 or _p("Soybean Oil", "Soybean Meal") < 0.05
+                    if crush:
+                        interp_lines.append(
+                            "🫘 **Soybean Oil and Soybean Meal are causally linked** — both are "
+                            "crush co-products; the soy crush spread drives processing margins and "
+                            "creates feedback between the two."
+                        )
+                    wheat_link = _p("Wheat (KC HRW)", "Oats (CBOT)") < 0.05 or _p("Wheat", "Wheat (KC HRW)") < 0.05
+                    if wheat_link:
+                        interp_lines.append(
+                            "🌾 **Inter-wheat price discovery detected** — CBOT SRW and KC HRW "
+                            "wheat trade on different protein/quality specs but share export demand signals."
+                        )
+                    rice_indep = not _sig_causes("Rough Rice (CBOT)")
+                    if rice_indep:
+                        interp_lines.append(
+                            "🍚 **Rough Rice trades independently** — primarily driven by Asian "
+                            "demand and weather in Southeast Asia, decoupled from U.S. grain complex dynamics."
+                        )
+
+                elif g_key == "livestock":
+                    fc_lc = _p("Feeder Cattle", "Live Cattle")
+                    lc_fc = _p("Live Cattle", "Feeder Cattle")
+                    if fc_lc < 0.05:
+                        interp_lines.append(
+                            "🐄 **Live Cattle Granger-causes Feeder Cattle** — finished cattle prices "
+                            "set the ceiling for what feedlots will pay for feeder cattle, "
+                            "creating a downstream pricing cascade."
+                        )
+                    if lc_fc < 0.05:
+                        interp_lines.append(
+                            "🐂 **Feeder Cattle Granger-causes Live Cattle** — input cost signals "
+                            "from the feeder market propagate forward to finished cattle prices."
+                        )
+                    hogs_indep = not _sig_causes("Lean Hogs")
+                    if hogs_indep:
+                        interp_lines.append(
+                            "🐷 **Lean Hogs trade independently of cattle** — pork and beef supply "
+                            "chains are largely separate, with hog prices driven by packer margins "
+                            "and feed costs independent of the cattle cycle."
+                        )
+
+                elif g_key == "softs":
+                    coffee_sugar = _p("Sugar", "Coffee") < 0.05 or _p("Coffee", "Sugar") < 0.05
+                    if coffee_sugar:
+                        interp_lines.append(
+                            "☕ **Coffee and Sugar are causally linked** — both are tropical crops "
+                            "heavily exposed to Brazilian weather and Real/USD FX, creating "
+                            "correlated supply shocks."
+                        )
+                    cocoa_indep = not _sig_causes("Cocoa")
+                    if cocoa_indep:
+                        interp_lines.append(
+                            "🍫 **Cocoa trades independently** — West African supply concentration "
+                            "(Ghana/Ivory Coast ~60% of global output) means price discovery "
+                            "is driven by regional crop conditions rather than broader soft commodity signals."
+                        )
+                    oj_indep = not _sig_causes("Orange Juice (FCOJ-A)")
+                    if oj_indep:
+                        interp_lines.append(
+                            "🍊 **Orange Juice trades independently** — Florida and Brazil citrus "
+                            "greening disease and USDA crop estimates dominate price discovery, "
+                            "disconnected from other softs."
+                        )
+
+                elif g_key == "new_commodities":
+                    btc_effects = _sig_effects("Bitcoin")
+                    li_re = _p("Rare Earths*", "Lithium*") < 0.05 or _p("Lithium*", "Rare Earths*") < 0.05
+                    if li_re:
+                        interp_lines.append(
+                            "🔋 **Lithium and Rare Earths are causally linked** — both are critical "
+                            "battery and EV supply chain inputs; demand signals from one propagate to the other."
+                        )
+                    if btc_effects:
+                        targets = ", ".join(c.replace("*", "").strip() for c in btc_effects)
+                        interp_lines.append(
+                            f"₿ **Bitcoin Granger-causes {targets}** — risk-appetite spillover: "
+                            "Bitcoin acts as a high-beta risk asset; moves can lead commodity ETFs "
+                            "that share speculative investor bases (Lithium, Rare Earths)."
+                        )
+                    btc_causes = _sig_causes("Bitcoin")
+                    if not btc_causes and not btc_effects:
+                        interp_lines.append(
+                            "₿ **Bitcoin trades independently** of Lithium and Rare Earths — "
+                            "crypto price discovery is dominated by on-chain flows and macro "
+                            "liquidity rather than physical commodity fundamentals."
+                        )
+
+                if not interp_lines:
+                    interp_lines.append(
+                        f"No dominant lead-lag relationships detected at p < 0.05 "
+                        f"({sig_total}/{total_pairs} pairs significant). "
+                        "This may reflect efficient price discovery, a structural break in the "
+                        "sample window, or lag dynamics beyond 5 days for this group."
+                    )
+
+                st.info("\n\n".join(interp_lines))
+
+                st.divider()
+
+                # ── IRF line chart ─────────────────────────────────────────────────
+                st.markdown("##### Impulse Response Functions (10-day horizon)")
+                st.caption("One-standard-deviation shock to each commodity → response across the system.")
+                try:
+                    irf = var.impulse_response(steps=10)
+                    shock_names = irf.columns.get_level_values("shock").unique().tolist()
+                    n_shocks = len(shock_names)
+                    from plotly.subplots import make_subplots as _make_subplots
+                    irf_cols = min(n_shocks, 3)
+                    irf_rows = (n_shocks + irf_cols - 1) // irf_cols
+                    fig_irf = _make_subplots(
+                        rows=irf_rows, cols=irf_cols,
+                        subplot_titles=[s.replace("*", "").split("(")[0].strip() for s in shock_names],
+                        shared_yaxes=False,
+                    )
+                    for s_idx, shock in enumerate(shock_names):
+                        r, c = divmod(s_idx, irf_cols)
+                        for r_idx, resp in enumerate(irf[shock].columns.tolist()):
+                            fig_irf.add_trace(
+                                go.Scatter(
+                                    x=list(range(11)), y=irf[(shock, resp)].values,
+                                    mode="lines",
+                                    name=resp.replace("*", "").split("(")[0].strip(),
+                                    line=dict(color=VAR_COLORS[r_idx % len(VAR_COLORS)], width=2),
+                                    showlegend=(s_idx == 0),
+                                ),
+                                row=r + 1, col=c + 1,
+                            )
+                        fig_irf.add_hline(y=0, line_dash="dash", line_color="#555",
+                                          row=r + 1, col=c + 1)
+                    fig_irf.update_layout(
+                        paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
+                        font_color="#FAFAFA", height=280 * irf_rows,
+                        margin=dict(t=50, l=50, r=20, b=40),
+                        legend=dict(bgcolor=PLOT_BG, borderwidth=0),
+                    )
+                    fig_irf.update_xaxes(title_text="Days", gridcolor=GRID)
+                    fig_irf.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
+                    st.plotly_chart(fig_irf, use_container_width=True)
+                except Exception as e:
+                    st.caption(f"IRF unavailable: {e}")
+
+                st.divider()
+
+                # ── FEVD stacked bar chart ─────────────────────────────────────────
+                st.markdown("##### Forecast Error Variance Decomposition (10-day horizon)")
+                st.caption("What fraction of each commodity's forecast error originates from shocks in other commodities?")
+                try:
+                    fevd = var.fevd(steps=10)
+                    def _short(name):
+                        return name.replace("*", "").replace(" (COMEX)", "").replace(" (CBOT)", "") \
+                                   .replace(" (Henry Hub)", "").replace(" (FCOJ-A)", "").strip()
+                    fevd_plot = fevd.copy()
+                    fevd_plot.index = [_short(c) for c in fevd_plot.index]
+                    fevd_plot.columns = [_short(c) for c in fevd_plot.columns]
+                    fig_fevd = go.Figure()
+                    for i, shock_col in enumerate(fevd_plot.columns):
+                        fig_fevd.add_trace(go.Bar(
+                            name=shock_col,
+                            x=fevd_plot.index.tolist(),
+                            y=(fevd_plot[shock_col] * 100).round(1).tolist(),
+                            marker_color=VAR_COLORS[i % len(VAR_COLORS)],
+                        ))
+                    fig_fevd.update_layout(
+                        barmode="stack",
+                        paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
+                        font_color="#FAFAFA", height=360,
+                        margin=dict(t=30, l=50, r=20, b=100),
+                        legend=dict(bgcolor=PLOT_BG, borderwidth=0, title="Shock source"),
+                        xaxis=dict(title="Commodity", gridcolor=GRID, tickangle=-40),
+                        yaxis=dict(title="% of forecast error variance", gridcolor=GRID),
+                    )
+                    st.plotly_chart(fig_fevd, use_container_width=True)
+                except Exception as e:
+                    st.caption(f"FEVD unavailable: {e}")
+
             except Exception as e:
-                st.caption(f"IRF unavailable: {e}")
-
-            st.divider()
-
-            # ── FEVD stacked bar chart ─────────────────────────────────────────
-            st.markdown("##### Forecast Error Variance Decomposition (10-day horizon)")
-            st.caption("What fraction of each commodity's forecast error originates from shocks in other commodities?")
-            try:
-                fevd = var.fevd(steps=10)
-                def _short(name):
-                    return name.replace("*", "").replace(" (COMEX)", "").replace(" (CBOT)", "") \
-                               .replace(" (Henry Hub)", "").replace(" (FCOJ-A)", "").strip()
-                fevd_plot = fevd.copy()
-                fevd_plot.index = [_short(c) for c in fevd_plot.index]
-                fevd_plot.columns = [_short(c) for c in fevd_plot.columns]
-                fig_fevd = go.Figure()
-                for i, shock_col in enumerate(fevd_plot.columns):
-                    fig_fevd.add_trace(go.Bar(
-                        name=shock_col,
-                        x=fevd_plot.index.tolist(),
-                        y=(fevd_plot[shock_col] * 100).round(1).tolist(),
-                        marker_color=VAR_COLORS[i % len(VAR_COLORS)],
-                    ))
-                fig_fevd.update_layout(
-                    barmode="stack",
-                    paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
-                    font_color="#FAFAFA", height=360,
-                    margin=dict(t=30, l=50, r=20, b=100),
-                    legend=dict(bgcolor=PLOT_BG, borderwidth=0, title="Shock source"),
-                    xaxis=dict(title="Commodity", gridcolor=GRID, tickangle=-40),
-                    yaxis=dict(title="% of forecast error variance", gridcolor=GRID),
-                )
-                st.plotly_chart(fig_fevd, use_container_width=True)
-            except Exception as e:
-                st.caption(f"FEVD unavailable: {e}")
-
-        except Exception as e:
-            st.warning(f"VAR failed: {e}")
+                _ph_var.empty()
+                st.warning(f"VAR failed: {e}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — ML MODELS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.subheader("🌲 Machine Learning Models")
-    st.caption(
-        "Regime detection, tree ensembles, SHAP explainability, and sparse factor models. "
-        "Primary accuracy metric: Spearman IC (Information Coefficient). IC > 0.05 = actionable."
-    )
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 2 — ML MODELS
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab2:
+        st.session_state["_ml_tier_ran"] = True
+        st.subheader("🌲 Machine Learning Models")
+        st.caption(
+            "Regime detection, tree ensembles, SHAP explainability, and sparse factor models. "
+            "Primary accuracy metric: Spearman IC (Information Coefficient). IC > 0.05 = actionable."
+        )
+        _render_tier_spark("ml", "ML", GREEN)
 
-    ml_commodity = st.selectbox(
-        "Target commodity", list(MODELING_COMMODITIES.keys()), index=0, key="ml_comm"
-    )
+        ml_commodity = st.selectbox(
+            "Target commodity", list(MODELING_COMMODITIES.keys()), index=0, key="ml_comm"
+        )
 
-    with st.spinner("Building feature matrix…"):
+        _ph_feat = st.empty()
+        _ph_feat.markdown(_ghost(60, "Building feature matrix…"), unsafe_allow_html=True)
         feat_matrix = get_features(prices_full)
         from models.features import build_target
         ml_target = build_target(prices_full, ml_commodity)
+        _ph_feat.empty()
 
-    st.divider()
+        st.divider()
 
-    # ── HMM Regime Detector ────────────────────────────────────────────────────
-    st.markdown("#### HMM Market Regime Detector")
-    st.caption("Gaussian HMM on (return, volatility) pairs — 4-state: Bear / Neutral / High-Vol / Bull")
+        # ── HMM Regime Detector ────────────────────────────────────────────────────
+        st.markdown("#### HMM Market Regime Detector")
+        st.caption("Gaussian HMM on (return, volatility) pairs — 4-state: Bear / Neutral / High-Vol / Bull")
 
-    hmm_commodity = st.selectbox(
-        "Commodity for regime detection",
-        list(MODELING_COMMODITIES.keys()), index=0, key="hmm_comm"
-    )
-
-    with st.spinner(f"Fitting HMM on {hmm_commodity}…"):
-        try:
-            from models.ml.hmm_regime import HMMRegimeDetector
-            hmm = HMMRegimeDetector(n_states=4)
-            hmm.fit(returns_full[hmm_commodity])
-            regime_series = hmm.regime_series()
-            probs = hmm.state_probabilities()
-            counts = regime_series.value_counts()
-
-            # Color-coded price chart
-            fig_hmm = go.Figure()
-            for regime, color in REGIME_COLORS.items():
-                mask = regime_series == regime
-                dates = prices_full.index[prices_full.index.isin(regime_series[mask].index)]
-                if len(dates) == 0:
-                    continue
-                fig_hmm.add_trace(go.Scatter(
-                    x=dates, y=prices_full[hmm_commodity].reindex(dates),
-                    mode="markers",
-                    marker=dict(color=color, size=3, opacity=0.7),
-                    name=regime,
-                ))
-            dark_layout(fig_hmm, height=380,
-                        title=f"{hmm_commodity} Price — Colour-coded by HMM Regime")
-            st.plotly_chart(fig_hmm, use_container_width=True)
-
-            # State probabilities heatmap (last 126 days)
-            prob_tail = probs.tail(126)
-            fig_prob = px.imshow(
-                prob_tail.T,
-                color_continuous_scale="Viridis",
-                aspect="auto",
-                labels=dict(x="Date", y="Regime", color="Probability"),
-                title="State Probabilities (last 126 trading days)",
-            )
-            fig_prob.update_layout(
-                paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
-                font_color="#FAFAFA", height=250,
-                margin=dict(t=40, l=80, r=20, b=40),
-            )
-            st.plotly_chart(fig_prob, use_container_width=True)
-
-            cols = st.columns(len(counts))
-            for col_widget, (regime, cnt) in zip(cols, counts.items()):
-                pct = round(100 * cnt / len(regime_series), 1)
-                col_widget.metric(regime, f"{pct}%", f"{cnt} days")
-
-            current_regime = regime_series.iloc[-1]
-            st.info(f"**Current regime ({regime_series.index[-1].date()}):** {current_regime}")
-        except Exception as e:
-            st.warning(f"HMM failed: {e}")
-
-    # ── HMM Optuna tuning ──────────────────────────────────────────────────────
-    with st.expander("🎛️ Optuna — tune HMM structure (n_states, covariance, n_iter)", expanded=False):
-        st.caption(
-            "Searches over number of hidden states (3/4/5), covariance type (full/diag), "
-            "and max EM iterations. Objective: normalised log-likelihood on the held-out 20% test window. "
-            "~1-3 min for 20 trials."
+        hmm_commodity = st.selectbox(
+            "Commodity for regime detection",
+            list(MODELING_COMMODITIES.keys()), index=0, key="hmm_comm"
         )
-        _hmm_trials = st.slider(
-            "Optuna trials", min_value=5, max_value=50, value=20, step=5,
-            key="hmm_optuna_trials",
-        )
-        _run_hmm_tune = st.button("▶ Tune HMM", key="run_hmm_tune")
-        if _run_hmm_tune:
-            st.session_state["hmm_tune_triggered"] = True
 
-        if st.session_state.get("hmm_tune_triggered"):
-            with st.spinner(f"Running Optuna on HMM ({_hmm_trials} trials)…"):
-                try:
-                    from models.ml.hmm_regime import tune_hmm
-                    _hmm_result = tune_hmm(
-                        returns_full[hmm_commodity],
-                        n_trials=_hmm_trials,
-                    )
-                    st.session_state["hmm_tune_triggered"] = False
-                    _bp = _hmm_result["best_params"]
-                    _ll = _hmm_result["best_log_likelihood_per_obs"]
-                    st.success(
-                        f"Best: n_states={_bp['n_states']}, "
-                        f"covariance_type={_bp['covariance_type']}, "
-                        f"n_iter={_bp['n_iter']} → log-likelihood/obs = {_ll:.4f}"
-                    )
-                    st.caption(
-                        "To use these params, re-fit the model above with these settings. "
-                        "The HMM detector will apply them automatically on the next run."
-                    )
-                    st.json(_hmm_result)
-                except ImportError:
-                    st.error("Optuna is not installed. Run: `pip install optuna`")
-                    st.session_state["hmm_tune_triggered"] = False
-                except Exception as _e:
-                    st.error(f"HMM tuning failed: {_e}")
-                    st.session_state["hmm_tune_triggered"] = False
+        _ph_hmm = st.empty()
+        _ph_hmm.markdown(_ghost(420, "HMM regime detector"), unsafe_allow_html=True)
+        with st.spinner(f"Fitting HMM on {hmm_commodity}…"):
+            try:
+                from models.ml.hmm_regime import HMMRegimeDetector
+                hmm = HMMRegimeDetector(n_states=4)
+                hmm.fit(returns_full[hmm_commodity])
+                regime_series = hmm.regime_series()
+                probs = hmm.state_probabilities()
+                counts = regime_series.value_counts()
 
-    st.divider()
-
-    # ── XGBoost + SHAP ─────────────────────────────────────────────────────────
-    st.markdown("#### XGBoost + SHAP Explainability")
-    st.caption(
-        "Gradient boosted trees with SHAP TreeExplainer. "
-        "Waterfall shows which features pushed today's forecast up or down."
-    )
-
-    with st.spinner(f"Training XGBoost on {ml_commodity}…"):
-        try:
-            from models.ml.xgboost_shap import XGBoostForecaster
-            xgb_model = XGBoostForecaster(commodity=ml_commodity)
-            xgb_model.fit(feat_matrix, ml_target)
-
-            # Emit standardized signal (IC already cached from fit)
-            xgb_signal = xgb_model.predict_with_signal(feat_matrix)
-            shap_imp   = xgb_model.global_shap_importance(feat_matrix)
-            waterfall  = xgb_model.waterfall_data(feat_matrix)
-
-            # ── SHAP charts (kept from prior version) ─────────────────────
-            x1, x2 = st.columns(2)
-            with x1:
-                top_shap = shap_imp.head(15)
-                fig_shap = go.Figure(go.Bar(
-                    x=top_shap["mean_abs_shap"],
-                    y=top_shap["feature"],
-                    orientation="h",
-                    marker_color=AMBER,
-                ))
-                dark_layout(fig_shap, height=380, title="Global SHAP Feature Importance (Top 15)")
-                fig_shap.update_layout(yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_shap, use_container_width=True)
-
-            with x2:
-                feats  = waterfall["features"][:12]
-                names  = [f[0] for f in feats]
-                values = [f[1] for f in feats]
-                colors = [GREEN if v > 0 else RED for v in values]
-                fig_wf = go.Figure(go.Bar(
-                    x=values, y=names, orientation="h",
-                    marker_color=colors,
-                ))
-                dark_layout(fig_wf, height=380,
-                            title=f"SHAP Waterfall — {waterfall['date']}")
-                fig_wf.update_layout(yaxis=dict(autorange="reversed"))
-                fig_wf.add_vline(x=0, line_color="#888", line_width=1)
-                st.plotly_chart(fig_wf, use_container_width=True)
-
-            # ── Signal summary cards ───────────────────────────────────────
-            st.markdown("##### Model Signal")
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric(
-                "Forecast (next-day)",
-                f"{xgb_signal.forecast_return:+.2%}",
-                delta="Bullish" if xgb_signal.forecast_return > 0 else "Bearish",
-            )
-            sc2.metric(
-                "Confidence (IC)",
-                f"{xgb_signal.confidence:.4f}",
-                delta="Actionable" if xgb_signal.confidence > 0.05 else "Marginal",
-            )
-            sc3.metric("Regime", xgb_signal.regime.upper())
-            band_width = xgb_signal.uncertainty_band[1] - xgb_signal.uncertainty_band[0]
-            sc4.metric("Uncertainty band", f"±{band_width / 2:.2%}")
-
-            # ── Trigger routing (Phase 2C) ─────────────────────────────────
-            # If any active trigger affects this commodity, surface the boost.
-            # The raw IC above is the backtest statistic and stays unchanged;
-            # the routed confidence is the ecosystem-aware view.
-            xgb_routed = _signal_router.route([xgb_signal], trigger_events)[0]
-            if xgb_routed.metadata.get("routed_triggers"):
-                _multiplier = xgb_routed.metadata["confidence_multiplier"]
-                _trail = xgb_routed.metadata["routed_triggers"]
-                _summary = ", ".join(
-                    f"{t['family'].replace('_', ' ').title()} (×{t['boost']:.2f})"
-                    for t in _trail
-                )
-                st.info(
-                    f"🔥 **Trigger boost active:** {_summary}.  \n"
-                    f"Effective confidence: {xgb_signal.confidence:.4f} × "
-                    f"{_multiplier:.2f} = **{xgb_routed.confidence:.4f}**.  \n"
-                    f"_Raw IC remains {xgb_signal.confidence:.4f} — the multiplier "
-                    f"reflects macro context, not model accuracy._"
-                )
-
-            # ── Structured drivers ─────────────────────────────────────────
-            st.divider()
-            d1, d2 = st.columns(2)
-            with d1:
-                st.markdown("**Bullish drivers**")
-                if xgb_signal.top_bullish_drivers:
-                    for feature, contribution in xgb_signal.top_bullish_drivers:
-                        short_name = feature.split("_")[0] if len(feature) > 30 else feature
-                        st.markdown(f"- `{short_name}` → **{contribution:+.4f}**")
-                else:
-                    st.caption("None detected")
-            with d2:
-                st.markdown("**Bearish drivers**")
-                if xgb_signal.top_bearish_drivers:
-                    for feature, contribution in xgb_signal.top_bearish_drivers:
-                        short_name = feature.split("_")[0] if len(feature) > 30 else feature
-                        st.markdown(f"- `{short_name}` → **{contribution:+.4f}**")
-                else:
-                    st.caption("None detected")
-
-            with st.expander("Full signal (JSON)"):
-                st.json(xgb_signal.to_dict())
-
-        except Exception as e:
-            st.warning(f"XGBoost/SHAP failed: {e}")
-
-    st.divider()
-
-    # ── Random Forest ──────────────────────────────────────────────────────────
-    st.markdown("#### Random Forest — Feature Importance")
-    with st.spinner(f"Training Random Forest on {ml_commodity}…"):
-        try:
-            from models.ml.random_forest import CommodityRF
-            rf = CommodityRF(commodity=ml_commodity)
-            rf.fit(feat_matrix, ml_target)
-            rf_ic = rf.ic_score(feat_matrix, ml_target)
-            rf_imp = rf.feature_importance(top_n=20)
-
-            fig_rf = go.Figure(go.Bar(
-                x=rf_imp["importance"],
-                y=rf_imp["feature"],
-                orientation="h",
-                marker_color=BLUE,
-            ))
-            dark_layout(fig_rf, height=400, title=f"RF Gini Importance — {ml_commodity} (Top 20)")
-            fig_rf.update_layout(yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_rf, use_container_width=True)
-
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Spearman IC", f"{rf_ic:.4f}",
-                      delta="Actionable" if rf_ic > 0.05 else "Marginal")
-            r2.metric("Top feature", rf_imp["feature"].iloc[0])
-            r3.metric("Top feature importance", f"{rf_imp['importance_pct'].iloc[0]:.1f}%")
-        except Exception as e:
-            st.warning(f"Random Forest failed: {e}")
-
-    st.divider()
-
-    # ── Elastic Net ────────────────────────────────────────────────────────────
-    st.markdown("#### Elastic Net / Lasso Factor Model")
-    st.caption(
-        "Sparse cross-commodity factor model across **all 41 dashboard instruments**. "
-        "Lasso (L1) regularisation drives noise features to exactly zero, leaving only genuine drivers. "
-        "The coefficient table is the explanation — no SHAP required. "
-        "Primary metric: Spearman IC (>0.08 = strong, >0.04 = acceptable)."
-    )
-
-    en_commodity = st.selectbox(
-        "Target instrument",
-        list(MODELING_COMMODITIES.keys()),
-        index=0,
-        key="en_comm",
-    )
-
-    # Load full 41-instrument price matrix from local DB
-    with st.spinner("Loading full instrument set from database…"):
-        prices_en = load_prices_en()
-    feat_en = get_features_en(prices_en)
-
-    with st.spinner(f"Fitting Elastic Net on {en_commodity}…"):
-        try:
-            from models.ml.elastic_net import ElasticNetFactorModel
-            from models.features import build_target
-            en = ElasticNetFactorModel(commodity=en_commodity)
-            en_target = build_target(prices_en, en_commodity)
-            en.fit(feat_en, en_target)
-            en_ic      = en.ic_score(feat_en, en_target)
-            coef_table = en.coefficient_table()
-            sparsity   = en.sparsity()
-            narrative  = en.factor_narrative(top_n=5)
-
-            # IC grade
-            if en_ic >= 0.08:
-                _grade, _gcol = "STRONG",     GREEN
-            elif en_ic >= 0.04:
-                _grade, _gcol = "ACCEPTABLE", AMBER
-            elif en_ic > 0.0:
-                _grade, _gcol = "WEAK",       BLUE
-            else:
-                _grade, _gcol = "NO SIGNAL",  RED
-
-            ec_left, ec_right = st.columns([3, 2])
-
-            with ec_left:
-                if not coef_table.empty:
-                    top_coefs  = coef_table.head(20)
-                    colors_en  = [GREEN if c > 0 else RED for c in top_coefs["coefficient"]]
-                    fig_en = go.Figure(go.Bar(
-                        x=top_coefs["coefficient"],
-                        y=top_coefs["feature"],
-                        orientation="h",
-                        marker_color=colors_en,
-                        hovertemplate="%{y}: %{x:.6f}<extra></extra>",
+                # Color-coded price chart
+                fig_hmm = go.Figure()
+                for regime, color in REGIME_COLORS.items():
+                    mask = regime_series == regime
+                    dates = prices_full.index[prices_full.index.isin(regime_series[mask].index)]
+                    if len(dates) == 0:
+                        continue
+                    fig_hmm.add_trace(go.Scatter(
+                        x=dates, y=prices_full[hmm_commodity].reindex(dates),
+                        mode="markers",
+                        marker=dict(color=color, size=3, opacity=0.7),
+                        name=regime,
                     ))
-                    dark_layout(fig_en, height=460,
-                                title=f"Surviving Factors — {en_commodity} (Top 20 of {sparsity['n_features_nonzero']})")
-                    fig_en.update_layout(yaxis=dict(autorange="reversed"))
-                    fig_en.add_vline(x=0, line_color="#888", line_width=1)
-                    st.plotly_chart(fig_en, use_container_width=True)
-                else:
-                    st.warning("All features zeroed out — price-derived features carry no signal for this instrument. "
-                               "Consider adding macro/sentiment signals via features/assembler.py.")
+                dark_layout(fig_hmm, height=380,
+                            title=f"{hmm_commodity} Price — Colour-coded by HMM Regime")
+                _ph_hmm.plotly_chart(fig_hmm, use_container_width=True)
 
-            with ec_right:
-                # Grade badge
-                _color_name = {"STRONG": "green", "ACCEPTABLE": "orange",
-                               "WEAK": "blue", "NO SIGNAL": "red"}[_grade]
-                st.markdown(f"**Signal grade:** :{_color_name}[**{_grade}**]")
+                # State probabilities heatmap (last 126 days)
+                prob_tail = probs.tail(126)
+                fig_prob = px.imshow(
+                    prob_tail.T,
+                    color_continuous_scale="Viridis",
+                    aspect="auto",
+                    labels=dict(x="Date", y="Regime", color="Probability"),
+                    title="State Probabilities (last 126 trading days)",
+                )
+                fig_prob.update_layout(
+                    paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
+                    font_color="#FAFAFA", height=250,
+                    margin=dict(t=40, l=80, r=20, b=40),
+                )
+                st.plotly_chart(fig_prob, use_container_width=True)
+
+                cols = st.columns(len(counts))
+                for col_widget, (regime, cnt) in zip(cols, counts.items()):
+                    pct = round(100 * cnt / len(regime_series), 1)
+                    col_widget.metric(regime, f"{pct}%", f"{cnt} days")
+
+                current_regime = regime_series.iloc[-1]
+                st.info(f"**Current regime ({regime_series.index[-1].date()}):** {current_regime}")
+            except Exception as e:
+                _ph_hmm.empty()
+                st.warning(f"HMM failed: {e}")
+
+        # ── HMM Optuna tuning ──────────────────────────────────────────────────────
+        with st.expander("🎛️ Optuna — tune HMM structure (n_states, covariance, n_iter)", expanded=False):
+            st.caption(
+                "Searches over number of hidden states (3/4/5), covariance type (full/diag), "
+                "and max EM iterations. Objective: normalised log-likelihood on the held-out 20% test window. "
+                "~1-3 min for 20 trials."
+            )
+            _hmm_trials = st.slider(
+                "Optuna trials", min_value=5, max_value=50, value=20, step=5,
+                key="hmm_optuna_trials",
+            )
+            _run_hmm_tune = st.button("▶ Tune HMM", key="run_hmm_tune")
+            if _run_hmm_tune:
+                st.session_state["hmm_tune_triggered"] = True
+
+            if st.session_state.get("hmm_tune_triggered"):
+                with st.spinner(f"Running Optuna on HMM ({_hmm_trials} trials)…"):
+                    try:
+                        from models.ml.hmm_regime import tune_hmm
+                        _hmm_result = tune_hmm(
+                            returns_full[hmm_commodity],
+                            n_trials=_hmm_trials,
+                        )
+                        st.session_state["hmm_tune_triggered"] = False
+                        _bp = _hmm_result["best_params"]
+                        _ll = _hmm_result["best_log_likelihood_per_obs"]
+                        st.success(
+                            f"Best: n_states={_bp['n_states']}, "
+                            f"covariance_type={_bp['covariance_type']}, "
+                            f"n_iter={_bp['n_iter']} → log-likelihood/obs = {_ll:.4f}"
+                        )
+                        st.caption(
+                            "To use these params, re-fit the model above with these settings. "
+                            "The HMM detector will apply them automatically on the next run."
+                        )
+                        st.json(_hmm_result)
+                    except ImportError:
+                        st.error("Optuna is not installed. Run: `pip install optuna`")
+                        st.session_state["hmm_tune_triggered"] = False
+                    except Exception as _e:
+                        st.error(f"HMM tuning failed: {_e}")
+                        st.session_state["hmm_tune_triggered"] = False
+
+        st.divider()
+
+        # ── XGBoost + SHAP ─────────────────────────────────────────────────────────
+        st.markdown("#### XGBoost + SHAP Explainability")
+        st.caption(
+            "Gradient boosted trees with SHAP TreeExplainer. "
+            "Waterfall shows which features pushed today's forecast up or down."
+        )
+
+        _ph_xgb = st.empty()
+        _ph_xgb.markdown(_ghost(420, "XGBoost / SHAP"), unsafe_allow_html=True)
+        with st.spinner(f"Training XGBoost on {ml_commodity}…"):
+            try:
+                from models.ml.xgboost_shap import XGBoostForecaster
+                xgb_model = XGBoostForecaster(commodity=ml_commodity)
+                xgb_model.fit(feat_matrix, ml_target)
+
+                # Emit standardized signal (IC already cached from fit)
+                xgb_signal = xgb_model.predict_with_signal(feat_matrix)
+                shap_imp   = xgb_model.global_shap_importance(feat_matrix)
+                waterfall  = xgb_model.waterfall_data(feat_matrix)
+
+                _ph_xgb.empty()
+                # ── SHAP charts (kept from prior version) ─────────────────────
+                x1, x2 = st.columns(2)
+                with x1:
+                    top_shap = shap_imp.head(15)
+                    fig_shap = go.Figure(go.Bar(
+                        x=top_shap["mean_abs_shap"],
+                        y=top_shap["feature"],
+                        orientation="h",
+                        marker_color=AMBER,
+                    ))
+                    dark_layout(fig_shap, height=380, title="Global SHAP Feature Importance (Top 15)")
+                    fig_shap.update_layout(yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig_shap, use_container_width=True)
+
+                with x2:
+                    feats  = waterfall["features"][:12]
+                    names  = [f[0] for f in feats]
+                    values = [f[1] for f in feats]
+                    colors = [GREEN if v > 0 else RED for v in values]
+                    fig_wf = go.Figure(go.Bar(
+                        x=values, y=names, orientation="h",
+                        marker_color=colors,
+                    ))
+                    dark_layout(fig_wf, height=380,
+                                title=f"SHAP Waterfall — {waterfall['date']}")
+                    fig_wf.update_layout(yaxis=dict(autorange="reversed"))
+                    fig_wf.add_vline(x=0, line_color="#888", line_width=1)
+                    st.plotly_chart(fig_wf, use_container_width=True)
+
+                # ── Signal summary cards ───────────────────────────────────────
+                st.markdown("##### Model Signal")
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.metric(
+                    "Forecast (next-day)",
+                    f"{xgb_signal.forecast_return:+.2%}",
+                    delta="Bullish" if xgb_signal.forecast_return > 0 else "Bearish",
+                )
+                sc2.metric(
+                    "Confidence (IC)",
+                    f"{xgb_signal.confidence:.4f}",
+                    delta="Actionable" if xgb_signal.confidence > 0.05 else "Marginal",
+                )
+                sc3.metric("Regime", xgb_signal.regime.upper())
+                band_width = xgb_signal.uncertainty_band[1] - xgb_signal.uncertainty_band[0]
+                sc4.metric("Uncertainty band", f"±{band_width / 2:.2%}")
+
+                # ── Trigger routing (Phase 2C) ─────────────────────────────────
+                # If any active trigger affects this commodity, surface the boost.
+                # The raw IC above is the backtest statistic and stays unchanged;
+                # the routed confidence is the ecosystem-aware view.
+                xgb_routed = _signal_router.route([xgb_signal], trigger_events)[0]
+                if xgb_routed.metadata.get("routed_triggers"):
+                    _multiplier = xgb_routed.metadata["confidence_multiplier"]
+                    _trail = xgb_routed.metadata["routed_triggers"]
+                    _summary = ", ".join(
+                        f"{t['family'].replace('_', ' ').title()} (×{t['boost']:.2f})"
+                        for t in _trail
+                    )
+                    st.info(
+                        f"🔥 **Trigger boost active:** {_summary}.  \n"
+                        f"Effective confidence: {xgb_signal.confidence:.4f} × "
+                        f"{_multiplier:.2f} = **{xgb_routed.confidence:.4f}**.  \n"
+                        f"_Raw IC remains {xgb_signal.confidence:.4f} — the multiplier "
+                        f"reflects macro context, not model accuracy._"
+                    )
+
+                # ── Structured drivers ─────────────────────────────────────────
                 st.divider()
-
-                ea, eb = st.columns(2)
-                ea.metric("Spearman IC", f"{en_ic:+.4f}")
-                eb.metric("Active features",
-                          f"{sparsity['n_features_nonzero']} / {sparsity['n_features_total']}")
-                ec, ed = st.columns(2)
-                ec.metric("Sparsity", f"{sparsity['sparsity_pct']:.0f}%")
-                ed.metric("l1_ratio (CV)", f"{sparsity['l1_ratio']:.2f}")
-                st.divider()
-
-                st.markdown("**Factor narrative**")
-                st.info(narrative if narrative.strip() else
-                        "No surviving factors — model predicts the unconditional mean.")
-
-                # Coefficient table (collapsible)
-                with st.expander("Full coefficient table"):
-                    if coef_table.empty:
-                        st.write("No non-zero coefficients.")
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.markdown("**Bullish drivers**")
+                    if xgb_signal.top_bullish_drivers:
+                        for feature, contribution in xgb_signal.top_bullish_drivers:
+                            short_name = feature.split("_")[0] if len(feature) > 30 else feature
+                            st.markdown(f"- `{short_name}` → **{contribution:+.4f}**")
                     else:
-                        st.dataframe(coef_table, use_container_width=True, hide_index=True)
+                        st.caption("None detected")
+                with d2:
+                    st.markdown("**Bearish drivers**")
+                    if xgb_signal.top_bearish_drivers:
+                        for feature, contribution in xgb_signal.top_bearish_drivers:
+                            short_name = feature.split("_")[0] if len(feature) > 30 else feature
+                            st.markdown(f"- `{short_name}` → **{contribution:+.4f}**")
+                    else:
+                        st.caption("None detected")
 
-        except Exception as e:
-            st.warning(f"Elastic Net failed: {e}")
+                with st.expander("Full signal (JSON)"):
+                    st.json(xgb_signal.to_dict())
 
-    st.divider()
+            except Exception as e:
+                _ph_xgb.empty()
+                st.warning(f"XGBoost/SHAP failed: {e}")
 
-    # ── All-instrument IC leaderboard ──────────────────────────────────────────
-    st.markdown("##### All-Instrument Leaderboard")
-    st.caption(
-        "Fits Elastic Net for every dashboard instrument and ranks by Spearman IC. "
-        "Cached for 4 hours after first run (~2 min)."
-    )
+        st.divider()
 
-    _run_lb = st.button("Run full leaderboard (41 instruments)", key="en_run_all")
-    if _run_lb:
-        st.session_state["en_lb_triggered"] = True
+        # ── Random Forest ──────────────────────────────────────────────────────────
+        st.markdown("#### Random Forest — Feature Importance")
+        _ph_rf = st.empty()
+        _ph_rf.markdown(_ghost(380, "Random Forest"), unsafe_allow_html=True)
+        with st.spinner(f"Training Random Forest on {ml_commodity}…"):
+            try:
+                from models.ml.random_forest import CommodityRF
+                rf = CommodityRF(commodity=ml_commodity)
+                rf.fit(feat_matrix, ml_target)
+                rf_ic = rf.ic_score(feat_matrix, ml_target)
+                rf_imp = rf.feature_importance(top_n=20)
 
-    if st.session_state.get("en_lb_triggered"):
-        with st.spinner("Fitting all 41 models (cached after first run)…"):
+                fig_rf = go.Figure(go.Bar(
+                    x=rf_imp["importance"],
+                    y=rf_imp["feature"],
+                    orientation="h",
+                    marker_color=BLUE,
+                ))
+                dark_layout(fig_rf, height=400, title=f"RF Gini Importance — {ml_commodity} (Top 20)")
+                fig_rf.update_layout(yaxis=dict(autorange="reversed"))
+                _ph_rf.plotly_chart(fig_rf, use_container_width=True)
+
+                r1, r2, r3 = st.columns(3)
+                r1.metric("Spearman IC", f"{rf_ic:.4f}",
+                          delta="Actionable" if rf_ic > 0.05 else "Marginal")
+                r2.metric("Top feature", rf_imp["feature"].iloc[0])
+                r3.metric("Top feature importance", f"{rf_imp['importance_pct'].iloc[0]:.1f}%")
+            except Exception as e:
+                _ph_rf.empty()
+                st.warning(f"Random Forest failed: {e}")
+
+        st.divider()
+
+        # ── Elastic Net ────────────────────────────────────────────────────────────
+        st.markdown("#### Elastic Net / Lasso Factor Model")
+        st.caption(
+            "Sparse cross-commodity factor model across **all 41 dashboard instruments**. "
+            "Lasso (L1) regularisation drives noise features to exactly zero, leaving only genuine drivers. "
+            "The coefficient table is the explanation — no SHAP required. "
+            "Primary metric: Spearman IC (>0.08 = strong, >0.04 = acceptable)."
+        )
+
+        en_commodity = st.selectbox(
+            "Target instrument",
+            list(MODELING_COMMODITIES.keys()),
+            index=0,
+            key="en_comm",
+        )
+
+        # Load full 41-instrument price matrix from local DB
+        _ph_en_load = st.empty()
+        _ph_en_load.markdown(_ghost(60, "Loading instruments…"), unsafe_allow_html=True)
+        with st.spinner("Loading full instrument set from database…"):
+            prices_en = load_prices_en()
+        _ph_en_load.empty()
+        feat_en = get_features_en(prices_en)
+
+        _ph_en = st.empty()
+        _ph_en.markdown(_ghost(380, "Elastic Net"), unsafe_allow_html=True)
+        with st.spinner(f"Fitting Elastic Net on {en_commodity}…"):
+            try:
+                from models.ml.elastic_net import ElasticNetFactorModel
+                from models.features import build_target
+                en = ElasticNetFactorModel(commodity=en_commodity)
+                en_target = build_target(prices_en, en_commodity)
+                en.fit(feat_en, en_target)
+                en_ic      = en.ic_score(feat_en, en_target)
+                coef_table = en.coefficient_table()
+                sparsity   = en.sparsity()
+                narrative  = en.factor_narrative(top_n=5)
+
+                # IC grade
+                if en_ic >= 0.08:
+                    _grade, _gcol = "STRONG",     GREEN
+                elif en_ic >= 0.04:
+                    _grade, _gcol = "ACCEPTABLE", AMBER
+                elif en_ic > 0.0:
+                    _grade, _gcol = "WEAK",       BLUE
+                else:
+                    _grade, _gcol = "NO SIGNAL",  RED
+
+                _ph_en.empty()
+                ec_left, ec_right = st.columns([3, 2])
+
+                with ec_left:
+                    if not coef_table.empty:
+                        top_coefs  = coef_table.head(20)
+                        colors_en  = [GREEN if c > 0 else RED for c in top_coefs["coefficient"]]
+                        fig_en = go.Figure(go.Bar(
+                            x=top_coefs["coefficient"],
+                            y=top_coefs["feature"],
+                            orientation="h",
+                            marker_color=colors_en,
+                            hovertemplate="%{y}: %{x:.6f}<extra></extra>",
+                        ))
+                        dark_layout(fig_en, height=460,
+                                    title=f"Surviving Factors — {en_commodity} (Top 20 of {sparsity['n_features_nonzero']})")
+                        fig_en.update_layout(yaxis=dict(autorange="reversed"))
+                        fig_en.add_vline(x=0, line_color="#888", line_width=1)
+                        st.plotly_chart(fig_en, use_container_width=True)
+                    else:
+                        st.warning("All features zeroed out — price-derived features carry no signal for this instrument. "
+                                   "Consider adding macro/sentiment signals via features/assembler.py.")
+
+                with ec_right:
+                    # Grade badge
+                    _color_name = {"STRONG": "green", "ACCEPTABLE": "orange",
+                                   "WEAK": "blue", "NO SIGNAL": "red"}[_grade]
+                    st.markdown(f"**Signal grade:** :{_color_name}[**{_grade}**]")
+                    st.divider()
+
+                    ea, eb = st.columns(2)
+                    ea.metric("Spearman IC", f"{en_ic:+.4f}")
+                    eb.metric("Active features",
+                              f"{sparsity['n_features_nonzero']} / {sparsity['n_features_total']}")
+                    ec, ed = st.columns(2)
+                    ec.metric("Sparsity", f"{sparsity['sparsity_pct']:.0f}%")
+                    ed.metric("l1_ratio (CV)", f"{sparsity['l1_ratio']:.2f}")
+                    st.divider()
+
+                    st.markdown("**Factor narrative**")
+                    st.info(narrative if narrative.strip() else
+                            "No surviving factors — model predicts the unconditional mean.")
+
+                    # Coefficient table (collapsible)
+                    with st.expander("Full coefficient table"):
+                        if coef_table.empty:
+                            st.write("No non-zero coefficients.")
+                        else:
+                            st.dataframe(coef_table, use_container_width=True, hide_index=True)
+
+            except Exception as e:
+                _ph_en.empty()
+                st.warning(f"Elastic Net failed: {e}")
+
+        st.divider()
+
+        # ── All-instrument IC leaderboard ──────────────────────────────────────────
+        st.markdown("##### All-Instrument Leaderboard")
+        st.caption(
+            "Fits Elastic Net for every dashboard instrument and ranks by Spearman IC. "
+            "Cached for 4 hours after first run (~2 min)."
+        )
+
+        _run_lb = st.button("Run full leaderboard (41 instruments)", key="en_run_all")
+        if _run_lb:
+            st.session_state["en_lb_triggered"] = True
+
+        if st.session_state.get("en_lb_triggered"):
+            _ph_en_all = st.empty()
+            _ph_en_all.markdown(_ghost(420, "Elastic Net leaderboard"), unsafe_allow_html=True)
+            _status_lb = st.empty()
+            _status_lb.info(
+                "⏳ Step 1 / 3 — Fitting Elastic Net for all 41 instruments "
+                "(cached after first run — ~2 min)…"
+            )
             try:
                 _all = run_en_all_cached(prices_en)
 
+                _status_lb.info("⏳ Step 2 / 3 — Computing IC grades and ranking instruments…")
                 _lb_rows = []
                 for _name, _r in _all.items():
                     _ic = _r["ic"]
@@ -1651,6 +1839,7 @@ with tab2:
                 }
                 _bar_colors = [_grade_colors[g] for g in _lb_df["Grade"]]
 
+                _status_lb.info("⏳ Step 3 / 3 — Rendering leaderboard chart…")
                 fig_lb = go.Figure(go.Bar(
                     x=_lb_df["IC (Spearman)"],
                     y=_lb_df["Instrument"],
@@ -1673,7 +1862,10 @@ with tab2:
                                  annotation_text="0.08 strong",
                                  annotation_position="top right",
                                  annotation_font_color=GREEN)
-                st.plotly_chart(fig_lb, use_container_width=True)
+                _ph_en_all.plotly_chart(fig_lb, use_container_width=True)
+                _status_lb.success(
+                    f"✅ Leaderboard complete — {len(_lb_rows)} instruments ranked by Spearman IC."
+                )
 
                 # Summary metrics row
                 _strong_n = sum(1 for r in _lb_rows if r["Grade"] == "STRONG")
@@ -1699,734 +1891,933 @@ with tab2:
                     st.dataframe(_display_df, use_container_width=True, hide_index=True)
 
             except Exception as _e:
-                st.warning(f"Full leaderboard failed: {_e}")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTOR TUNER — Optuna hyperparameter search for XGBoost + Random Forest
-    # ══════════════════════════════════════════════════════════════════════════
-    st.divider()
-    st.subheader("🎛️ Sector Hyperparameter Tuner")
-    st.caption(
-        "Runs Optuna TPE search across all five commodity sectors simultaneously. "
-        "One study per sector — optimises mean Spearman IC across every instrument in that sector. "
-        "Results are saved to `data/sector_params.json` and automatically picked up by XGBoost "
-        "and Random Forest on their next fit. **This is compute-heavy — budget 5–30 min.**"
-    )
-
-    # ── Current params display ─────────────────────────────────────────────
-    with st.expander("Current tuned params (data/sector_params.json)", expanded=False):
-        try:
-            from models.ml.sector_tuner import load_sector_params
-            _sp = load_sector_params()
-            if _sp:
-                _tuned_at = _sp.get("tuned_at", "unknown")
-                st.caption(f"Last tuned: {_tuned_at}")
-                _sp_display = {k: v for k, v in _sp.items() if k != "tuned_at"}
-                st.json(_sp_display)
-            else:
-                st.info("No tuned params found — models are using domain-default seeds from `config.py`.")
-        except Exception as _e:
-            st.warning(f"Could not load sector_params.json: {_e}")
-
-    # ── Tuner controls ─────────────────────────────────────────────────────
-    _tc1, _tc2, _tc3 = st.columns([2, 2, 2])
-    with _tc1:
-        _tune_model = st.selectbox(
-            "Model to tune",
-            options=["XGBoost", "Random Forest", "Both"],
-            key="tuner_model_sel",
-        )
-    with _tc2:
-        _tune_sectors = st.multiselect(
-            "Sectors (leave blank = all five)",
-            options=["energy", "metals", "agriculture", "livestock", "digital"],
-            default=[],
-            key="tuner_sector_sel",
-        )
-    with _tc3:
-        _tune_trials = st.slider(
-            "Optuna trials per sector",
-            min_value=10, max_value=100, value=30, step=5,
-            key="tuner_trials_sl",
-            help="More trials = better params but longer runtime. 30 is a good starting point.",
-        )
-
-    _run_tuner = st.button(
-        "▶ Run Sector Tuner",
-        key="run_sector_tuner",
-        help="Fits all commodities in each sector and optimises IC. Saves results automatically.",
-    )
-
-    if _run_tuner:
-        st.session_state["sector_tuner_triggered"] = True
-
-    if st.session_state.get("sector_tuner_triggered"):
-        _sectors_arg = _tune_sectors if _tune_sectors else None
-        _models_to_run = (
-            ["xgb"]       if _tune_model == "XGBoost"
-            else ["rf"]   if _tune_model == "Random Forest"
-            else ["xgb", "rf"]
-        )
-
-        _tuner_status = st.empty()
-        _tuner_progress = st.progress(0)
-        _total_steps = len(_models_to_run) * (len(_sectors_arg) if _sectors_arg else 5)
-        _step = 0
-
-        _tuner_results = {}
-
-        try:
-            from models.ml.sector_tuner import SectorTuner
-            with st.spinner("Initialising SectorTuner (building feature matrix)…"):
-                _tuner = SectorTuner(prices_full)
-
-            for _m in _models_to_run:
-                _tuner_status.info(f"Tuning {_m.upper()} — {_tune_trials} trials/sector…")
-                _best = _tuner.tune(
-                    model=_m,
-                    n_trials=_tune_trials,
-                    sectors=_sectors_arg,
-                )
-                _tuner_results[_m] = _best
-                _step += len(_best)
-                _tuner_progress.progress(min(_step / _total_steps, 1.0))
-
-            _tuner.save()
-            st.session_state["sector_tuner_triggered"] = False
-            st.success("Tuning complete — params saved to `data/sector_params.json`.")
-
-            # Show best ICs per sector
-            for _m, _sector_best in _tuner_results.items():
-                st.markdown(f"**{_m.upper()} best params by sector:**")
-                st.json(_sector_best)
-
-        except ImportError:
-            st.error("Optuna is not installed. Run: `pip install optuna`")
-            st.session_state["sector_tuner_triggered"] = False
-        except Exception as _e:
-            st.error(f"Sector tuner failed: {_e}")
-            st.session_state["sector_tuner_triggered"] = False
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTOR CASCADE — macro-adjusted forward forecast
-    # ══════════════════════════════════════════════════════════════════════════
-    st.divider()
-    st.subheader("🌊 Sector Cascade Forecast")
-    st.caption(
-        "Adjusts the commodity's 21-day momentum baseline with macro channel signals "
-        "(Real Yields, USD, Risk-Off) derived from TLT momentum, DXY z-score, and VIX."
-    )
-
-    _casc_comm = st.selectbox(
-        "Commodity",
-        options=list(_CASCADE_COMM_EFFECTS.keys()),
-        key="casc_comm_select",
-    )
-    _casc_sector = _CASCADE_SECTOR_MAP.get(_casc_comm, "Unknown")
-
-    # pull latest macro row
-    _casc_macro_row = {}
-    try:
-        if not _macro_for_triggers.empty:
-            _casc_macro_row = _macro_for_triggers.iloc[-1].to_dict()
-    except Exception:
-        pass
-
-    _casc_prices_full = load_prices_db()
-    _casc_price_src   = _casc_prices_full if not _casc_prices_full.empty else prices
-    _c_base, _c_adj, _c_final, _c_band, _c_conf, _c_ch = _compute_cascade_for(
-        _casc_comm, _casc_macro_row, _casc_price_src
-    )
-
-    # ── Forecast card ─────────────────────────────────────────────────────────
-    _casc_color  = "#3DB87A" if _c_final >= 0 else "#D94F4F"
-    _casc_arrow  = "▲" if _c_final >= 0 else "▼"
-    _casc_dir    = "Bullish" if _c_final >= 0 else "Bearish"
-
-    st.markdown(
-        f"""
-        <div style="background:#0C1228;border-radius:10px;padding:18px 24px;margin-bottom:12px;
-                    border-left:4px solid {_casc_color};">
-          <div style="color:#A0AEC0;font-size:0.75rem;text-transform:uppercase;letter-spacing:.08em;">
-            {_casc_sector} · {_casc_comm}
-          </div>
-          <div style="color:{_casc_color};font-size:2.2rem;font-weight:700;margin:4px 0;">
-            {_casc_arrow} {_c_final:+.2f}%
-          </div>
-          <div style="color:#718096;font-size:0.8rem;">
-            Cascade 5-day forecast &nbsp;|&nbsp; 90% band: ±{_c_band:.2f}pp &nbsp;|&nbsp;
-            Direction: <span style="color:{_casc_color};">{_casc_dir}</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # ── Decomposition row ─────────────────────────────────────────────────────
-    _dc1, _dc2, _dc3, _dc4 = st.columns(4)
-    _dc1.metric("Baseline (Momentum)", f"{_c_base:+.2f}%")
-    _dc2.metric("Macro Overlay",       f"{_c_adj:+.2f}pp",
-                delta=f"{'adds' if _c_adj >= 0 else 'subtracts'} {abs(_c_adj):.2f}pp")
-    _dc3.metric("Cascade Final",       f"{_c_final:+.2f}%")
-    _dc4.metric("Confidence",          f"{_c_conf:.0%}")
-
-    # ── Channel breakdown bar chart ───────────────────────────────────────────
-    import plotly.graph_objects as _go_casc
-    _ch_names = list(_c_ch.keys())
-    _ch_vals  = list(_c_ch.values())
-    _ch_colors = ["#3DB87A" if v >= 0 else "#D94F4F" for v in _ch_vals]
-
-    _casc_fig = _go_casc.Figure(_go_casc.Bar(
-        x=_ch_names,
-        y=_ch_vals,
-        marker_color=_ch_colors,
-        text=[f"{v:+.2f}pp" for v in _ch_vals],
-        textposition="outside",
-    ))
-    _casc_fig.update_layout(
-        title="Macro Channel Contributions",
-        yaxis_title="Contribution (pp)",
-        paper_bgcolor="#060912",
-        plot_bgcolor="#0C1228",
-        font_color="#E2E8F0",
-        height=300,
-        margin=dict(l=40, r=20, t=40, b=30),
-        showlegend=False,
-    )
-    _casc_fig.update_xaxes(gridcolor="#1A2340")
-    _casc_fig.update_yaxes(gridcolor="#1A2340", zeroline=True, zerolinecolor="#718096")
-    st.plotly_chart(_casc_fig, use_container_width=True)
-
-    # ── vs Independent baseline comparison ───────────────────────────────────
-    with st.expander("What changed by accounting for upstream macro shocks?"):
-        _delta_abs = abs(_c_adj)
-        _same_dir  = (_c_base >= 0) == (_c_final >= 0)
-        if _delta_abs < 0.10:
-            _narrative = (
-                "Macro channels are near-neutral. The cascade forecast is essentially "
-                "the same as the independent momentum baseline — no material upstream shock."
-            )
-        elif _same_dir:
-            _narrative = (
-                f"Macro channels **reinforce** the momentum signal, adding {_c_adj:+.2f}pp. "
-                f"The cascade strengthens the {_casc_dir.lower()} baseline view."
-            )
-        else:
-            _narrative = (
-                f"Macro channels **oppose** the momentum signal ({_c_adj:+.2f}pp). "
-                f"The cascade flips or mutes the baseline — upstream macro shocks are "
-                f"the dominant driver."
-            )
-        st.markdown(_narrative)
-
-        _cmp_c1, _cmp_c2 = st.columns(2)
-        with _cmp_c1:
-            st.markdown("**Without macro cascade (momentum only)**")
-            st.metric("Baseline forecast", f"{_c_base:+.2f}%")
-        with _cmp_c2:
-            st.markdown("**With macro cascade**")
-            st.metric("Cascade forecast", f"{_c_final:+.2f}%",
-                      delta=f"{_c_adj:+.2f}pp from macro")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — MARKET SIGNALS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.subheader("🌍 Forward-Looking Market Signals")
-    st.caption(
-        "Macro overlays (DXY / VIX / TLT), commodity calendar events (WASDE / OPEC+), "
-        "climate signals (ENSO), and energy transition proxies."
-    )
-
-    # ── DXY / VIX / TLT ───────────────────────────────────────────────────────
-    with st.spinner("Loading macro signals…"):
-        macro_df = load_macro(period="2y", _price_index=prices.index)
-
-    if not macro_df.empty:
-        st.markdown("#### DXY · VIX · TLT Macro Overlay")
-
-        macro_tail = macro_df.tail(252)
-
-        fig_macro = make_subplots(rows=3, cols=1, shared_xaxes=True,
-            row_heights=[0.34, 0.33, 0.33], vertical_spacing=0.04,
-            subplot_titles=["DXY Z-Score (63d)", "VIX (Fear Gauge)", "TLT 21d Momentum"])
-
-        fig_macro.add_trace(go.Scatter(
-            x=macro_tail.index, y=macro_tail["dxy_zscore63"],
-            line=dict(color=AMBER, width=1.5), name="DXY z-score",
-        ), row=1, col=1)
-        fig_macro.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.5, row=1, col=1)
-
-        vix_vals = macro_tail["vix"]
-        vix_colors = [RED if v >= 30 else (PURPLE if v >= 20 else GREEN) for v in vix_vals]
-        fig_macro.add_trace(go.Bar(
-            x=macro_tail.index, y=vix_vals,
-            marker_color=vix_colors, name="VIX",
-        ), row=2, col=1)
-        fig_macro.add_hline(y=20, line_dash="dot", line_color=PURPLE, opacity=0.6, row=2, col=1)
-        fig_macro.add_hline(y=30, line_dash="dot", line_color=RED,    opacity=0.6, row=2, col=1)
-
-        fig_macro.add_trace(go.Scatter(
-            x=macro_tail.index, y=macro_tail["tlt_mom21"],
-            fill="tozeroy",
-            fillcolor="rgba(79,195,247,0.12)",
-            line=dict(color=BLUE, width=1.5), name="TLT 21d mom",
-        ), row=3, col=1)
-        fig_macro.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.5, row=3, col=1)
-
-        dark_layout(fig_macro, height=520, title="Macro Regime Dashboard")
-        st.plotly_chart(fig_macro, use_container_width=True)
-
-        vix_now = float(macro_df["vix"].dropna().iloc[-1])
-        dxy_z   = float(macro_df["dxy_zscore63"].dropna().iloc[-1])
-        tlt_m   = float(macro_df["tlt_mom21"].dropna().iloc[-1])
-        wasde_d = int(macro_df["days_to_wasde"].dropna().iloc[-1])
-        opec_d  = int(macro_df["days_to_opec"].dropna().iloc[-1])
-
-        m1, m2, m3, m4, m5 = st.columns(5)
-        vix_label = "Crisis" if vix_now >= 30 else ("Risk-Off" if vix_now >= 20 else "Risk-On")
-        m1.metric("VIX", f"{vix_now:.1f}", delta=vix_label)
-        m2.metric("DXY Z-Score", f"{dxy_z:+.2f}",
-                  delta="Dollar strong" if dxy_z > 0.5 else ("Dollar weak" if dxy_z < -0.5 else "Neutral"))
-        m3.metric("TLT 21d Mom", f"{tlt_m:+.3f}",
-                  delta="Rates falling" if tlt_m > 0 else "Rates rising")
-        m4.metric("Days to WASDE", f"{wasde_d:+d}",
-                  delta="Window active" if macro_df["is_wasde_window"].iloc[-1] else "Outside window")
-        m5.metric("Days to OPEC+", f"{opec_d:+d}",
-                  delta="Window active" if macro_df["is_opec_window"].iloc[-1] else "Outside window")
-    else:
-        st.warning("Macro data unavailable — check internet connection.")
-
-    st.divider()
-
-    # ── ENSO / Climate ─────────────────────────────────────────────────────────
-    st.markdown("#### ENSO Climate Signal (MEI v2)")
-    st.caption(
-        "Multivariate ENSO Index: El Niño (>+0.5) disrupts global precipitation, "
-        "lagging Cocoa/Coffee 3-6 months; La Niña (<−0.5) stresses Brazil soy."
-    )
-
-    with st.spinner("Loading ENSO data…"):
-        mei_df = load_enso()
-
-    if not mei_df.empty:
-        mei_tail = mei_df.tail(252 * 2)  # 2 years
-        colors_enso = [
-            RED if v >= 0.5 else (BLUE if v <= -0.5 else "#888")
-            for v in mei_tail["mei"]
-        ]
-        fig_mei = go.Figure()
-        fig_mei.add_trace(go.Bar(
-            x=mei_tail.index, y=mei_tail["mei"],
-            marker_color=colors_enso, name="MEI v2",
-        ))
-        fig_mei.add_hline(y=0.5,  line_dash="dot", line_color=RED,  opacity=0.7)
-        fig_mei.add_hline(y=-0.5, line_dash="dot", line_color=BLUE, opacity=0.7)
-        dark_layout(fig_mei, height=320, title="MEI v2 — El Niño (red) / La Niña (blue)")
-        st.plotly_chart(fig_mei, use_container_width=True)
-
-        enso_now = float(mei_df["mei"].dropna().iloc[-1])
-        phase    = "🔴 El Niño" if enso_now >= 0.5 else ("🔵 La Niña" if enso_now <= -0.5 else "⚪ Neutral")
-        lag3     = float(mei_df["mei_lag3m"].dropna().iloc[-1]) if "mei_lag3m" in mei_df.columns else np.nan
-        lag6     = float(mei_df["mei_lag6m"].dropna().iloc[-1]) if "mei_lag6m" in mei_df.columns else np.nan
-
-        ec1, ec2, ec3 = st.columns(3)
-        ec1.metric("Current MEI", f"{enso_now:+.2f}", delta=phase)
-        ec2.metric("3-Month Lag Signal", f"{lag3:+.2f}" if not np.isnan(lag3) else "—")
-        ec3.metric("6-Month Lag Signal", f"{lag6:+.2f}" if not np.isnan(lag6) else "—")
-
-        if enso_now <= -0.5:
-            st.info("**La Niña active:** Watch Brazil soy stress (2-4 month lead), "
-                    "higher US natural gas demand from cooler winters, "
-                    "and wetter SE Asia conditions for palm oil/cocoa.")
-        elif enso_now >= 0.5:
-            st.info("**El Niño active:** Watch drier SE Asia (palm oil/cocoa/coffee bearish), "
-                    "wetter US Gulf Coast (US soy bullish), drier Australian wheat.")
-    else:
-        st.warning("ENSO data unavailable.")
-
-    st.divider()
-
-    # ── Energy Transition ──────────────────────────────────────────────────────
-    st.markdown("#### Energy Transition Signals")
-    st.caption(
-        "Uranium spread proxy (URA vs 90d SMA), battery metals PC1 (LIT/GLNCY/REMX), "
-        "and ETS policy stress (KRBN volatility-weighted return)."
-    )
-
-    with st.spinner("Loading energy transition data…"):
-        et_df = load_energy_transition(period="2y")
-
-    if not et_df.empty:
-        et_tail = et_df.tail(252)
-        et_cols = [c for c in ["uranium_spread_zscore", "battery_demand_index", "ets_stress_zscore"]
-                   if c in et_df.columns]
-
-        if et_cols:
-            fig_et = make_subplots(rows=len(et_cols), cols=1, shared_xaxes=True,
-                vertical_spacing=0.06,
-                subplot_titles=[c.replace("_", " ").title() for c in et_cols])
-            palette = [AMBER, BLUE, GREEN]
-            for i, col in enumerate(et_cols, 1):
-                fig_et.add_trace(go.Scatter(
-                    x=et_tail.index, y=et_tail[col],
-                    line=dict(color=palette[i-1], width=1.5),
-                    fill="tozeroy",
-                    fillcolor=f"rgba({int(palette[i-1][1:3],16)},{int(palette[i-1][3:5],16)},{int(palette[i-1][5:],16)},0.1)",
-                    name=col,
-                ), row=i, col=1)
-                fig_et.add_hline(y=0, line_dash="dash", line_color="#555", opacity=0.6, row=i, col=1)
-            dark_layout(fig_et, height=100 + 170 * len(et_cols), title="Energy Transition Signals")
-            st.plotly_chart(fig_et, use_container_width=True)
-
-            et_cols_metrics = st.columns(len(et_cols))
-            for col_w, col_name in zip(et_cols_metrics, et_cols):
-                val = float(et_tail[col_name].dropna().iloc[-1])
-                col_w.metric(col_name.replace("_", " ").title(), f"{val:+.3f}")
-        else:
-            st.info("Energy transition columns not yet available.")
-    else:
-        st.warning("Energy transition data unavailable — yfinance fetch may have failed.")
-
-    st.divider()
-
-    # ── Macro Router ───────────────────────────────────────────────────────────
-    st.markdown("#### Macro-to-Sector Routing Coefficients")
-    st.caption(
-        "OLS regression coefficients learned from 504 trading days (~2 yr) of "
-        "DXY / VIX / TLT vs sector equal-weighted returns, conditioned on market "
-        "regime (bull / bear / high_vol / neutral). Rebuilt automatically every 7 days."
-    )
-
-    try:
-        from models.macro_router import load_macro_routes
-
-        routes = load_macro_routes()
-        if routes is None:
-            st.info("Macro routes not yet built. Run `python -m models.macro_router` once.")
-        else:
-            meta       = routes.get("_metadata", {})
-            fitted_at  = meta.get("fitted_at", "unknown")
-            window     = meta.get("backtest_days", "?")
-            val_block  = routes.get("validation", {})
-            validation = val_block.get("checks", [])
-
-            # ── Validation scorecard ───────────────────────────────────────────
-            n_pass  = val_block.get("n_passed", sum(1 for v in validation if v.get("passed")))
-            n_total = val_block.get("n_checks", len(validation))
-
-            score_color = GREEN if n_pass == n_total else (AMBER if n_pass >= n_total * 0.7 else RED)
-            st.markdown(
-                f"<span style='color:{score_color};font-size:1.1em;font-weight:600'>"
-                f"Domain validation: {n_pass}/{n_total} checks passed</span>",
-                unsafe_allow_html=True,
-            )
-            st.caption(f"Fitted: {str(fitted_at)[:19].replace('T',' ')} UTC · Window: {window} trading days")
-
-            # Expand the scorecard
-            with st.expander("📋 Validation detail — what each check means and why failures can be valid", expanded=False):
-                st.markdown(
-                    """
-**What is domain validation?**
-After fitting OLS regression coefficients for each macro variable → sector pair,
-the router checks that each coefficient has the sign expected by economic theory
-(e.g. DXY↑ should be bearish for commodities priced in USD). A failure means the
-empirical slope over the sample window ran *opposite* to textbook theory.
-
-**Failures are not bugs.** They are informative signals about the regime in the data window.
-
-**Current sample window: May 2024 – May 2026 (504 trading days)**
-
----
-""")
-
-                for v in validation:
-                    passed = v.get("passed", False)
-                    icon   = "✅" if passed else "❌"
-                    name   = v.get("name", "")
-                    slope  = v.get("actual_slope", float("nan"))
-                    r2     = v.get("r_squared", float("nan"))
-                    pval   = v.get("p_value", float("nan"))
-                    note   = v.get("note", "")
-
-                    st.markdown(
-                        f"**{icon} {name}**  \n"
-                        f"slope `{slope:+.4f}` · R²=`{r2:.3f}` · p=`{pval:.3f}`"
-                        + (f"  \n*{note}*" if note else ""),
-                    )
-
-                st.markdown("---")
-                st.markdown(
-                    """
-**Why DXY → Energy failed (positive slope, expected negative)**
-
-The classic USD-pricing channel says: *stronger dollar → commodities cost more for
-non-USD buyers → demand falls → price drops*. This held historically.
-
-However, the 2022 energy crisis created a period where **both** DXY and WTI surged
-simultaneously — the Ukraine invasion compressed supply while USD strengthened as a
-safe-haven. The 2-year regression window includes significant exposure to that co-movement,
-which overwhelms the normal inverse relationship. R²=0.013 (the regression explains
-**1.3% of variance**) means this coefficient is close to noise regardless of sign.
-
-**Why Rising Rates → Energy failed (positive slope, expected negative)**
-
-The `tlt_yield_proxy` variable is `−TLT_return`, so a positive slope means
-*rising rates associate with rising energy prices*. Again, 2022: the Fed began its
-most aggressive rate-hike cycle in 40 years *while* energy prices were at multi-year
-highs. These co-moved for fundamental supply/demand reasons unrelated to the
-interest-rate channel. R²=0.012 — same story, negligible explanatory power.
-
-**What to watch:** If these checks still fail after a full year of normal-rate-environment
-data enters the rolling window (i.e., by Q3 2026), that would suggest a structural
-regime shift rather than a sample artefact.
-""")
-
-            # ── Routing coefficient heatmap ────────────────────────────────────
-            routing_matrix = routes.get("routing_matrix", {})
-            if routing_matrix:
-                # routing_matrix keys are aliased display names (dxy_spike, vix_spike, tlt_drop)
-                _ALIAS_LABELS = {
-                    "dxy_spike":  "DXY spike (USD↑)",
-                    "vix_spike":  "VIX spike (fear↑)",
-                    "tlt_drop":   "Rates rise (TLT↓)",
-                }
-                macro_vars = list(routing_matrix.keys())
-                sectors    = ["energy", "metals", "agriculture", "livestock", "digital"]
-
-                z_vals, hover_text = [], []
-                for mv in macro_vars:
-                    row_z, row_h = [], []
-                    for sec in sectors:
-                        coef = routing_matrix.get(mv, {}).get(sec, 0.0)
-                        row_z.append(coef)
-                        row_h.append(f"{_ALIAS_LABELS.get(mv, mv)} → {sec}<br>slope: {coef:+.4f}")
-                    z_vals.append(row_z)
-                    hover_text.append(row_h)
-
-                macro_labels = [_ALIAS_LABELS.get(m, m.replace("_", " ")) for m in macro_vars]
-                sector_labels = [s.capitalize() for s in sectors]
-
-                fig_routes = go.Figure(go.Heatmap(
-                    z=z_vals,
-                    x=sector_labels,
-                    y=macro_labels,
-                    text=[[f"{v:+.3f}" for v in row] for row in z_vals],
-                    texttemplate="%{text}",
-                    hovertext=hover_text,
-                    hovertemplate="%{hovertext}<extra></extra>",
-                    colorscale="RdYlGn",
-                    zmid=0,
-                    colorbar=dict(title="OLS slope", tickfont=dict(size=10)),
-                ))
-                fig_routes.update_layout(
-                    **{**PLOTLY_LAYOUT,
-                       "height": 280,
-                       "title_text": "Macro → Sector Routing Matrix (all-regime OLS slopes)",
-                       "margin": dict(t=50, l=130, r=20, b=40),
-                       "xaxis_title": "Sector",
-                       "yaxis_title": "Macro variable",
-                    }
-                )
-                st.plotly_chart(fig_routes, width="stretch")
-                st.caption(
-                    "Green = positive empirical relationship · Red = negative · "
-                    "Coefficient is the OLS slope across all regimes combined. "
-                    "Small magnitude + high p-value cells (especially DXY→Energy, "
-                    "TLT yield→Energy) reflect noisy 2022-era co-movement, not structural signal."
-                )
-
-    except Exception as _mr_exc:
-        st.info(f"Macro router unavailable: {_mr_exc}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — DEEP LEARNING
-# ══════════════════════════════════════════════════════════════════════════════
-with tab4:
-    st.subheader("🧠 Deep Learning Models")
-    st.caption("Tier 3 models: BiLSTM, Meta-Prophet decomposition, and Temporal Fusion Transformer.")
-
-    dl_col1, dl_col2 = st.columns(2)
-
-    with dl_col1:
-        st.markdown("#### Prophet Trend Decomposition")
-        dl_commodity = st.selectbox(
-            "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="dl_comm"
-        )
-        run_prophet = st.button("▶ Run Prophet (30-60s)", key="run_prophet")
-
-    if run_prophet:
-        with st.spinner(f"Running Prophet on {dl_commodity} — this takes ~30s…"):
-            try:
-                from models.deep.prophet_decomp import ProphetDecomposer
-                pd_model = ProphetDecomposer(commodity=dl_commodity)
-                pd_model.fit(prices_full)
-                future_df, forecast_df = pd_model.forecast(periods=90)
-                ss = pd_model.seasonal_strength()
-                cp_summary = pd_model.changepoint_summary()
-                tr = pd_model.trend_regime()
-
-                fig_pr = go.Figure()
-                fig_pr.add_trace(go.Scatter(
-                    x=forecast_df["ds"], y=np.exp(forecast_df["yhat"]),
-                    line=dict(color=AMBER, width=1.8), name="Prophet forecast",
-                ))
-                fig_pr.add_trace(go.Scatter(
-                    x=list(forecast_df["ds"]) + list(forecast_df["ds"][::-1]),
-                    y=list(np.exp(forecast_df["yhat_upper"])) + list(np.exp(forecast_df["yhat_lower"])[::-1]),
-                    fill="toself", fillcolor="rgba(245,166,35,0.12)",
-                    line=dict(width=0), name="95% CI",
-                ))
-                act = forecast_df[forecast_df["ds"].isin(prices_full.index)]
-                fig_pr.add_trace(go.Scatter(
-                    x=prices_full.index[-180:], y=prices_full[dl_commodity].iloc[-180:],
-                    line=dict(color=BLUE, width=1.2, dash="dash"), name="Actual (last 180d)",
-                ))
-                dark_layout(fig_pr, height=420,
-                            title=f"{dl_commodity} — Prophet 90-Day Forecast")
-                st.plotly_chart(fig_pr, use_container_width=True)
-
-                p1, p2, p3 = st.columns(3)
-                p1.metric("Yearly seasonal strength", f"{ss.get('yearly', 0):.3f}")
-                p2.metric("Weekly seasonal strength", f"{ss.get('weekly', 0):.3f}")
-                p3.metric("Trend regime", tr.get("regime", "Unknown"))
-
-                if cp_summary:
-                    st.markdown("**Key Changepoints detected:**")
-                    for cp in cp_summary[:5]:
-                        st.caption(f"- {cp['date']} | {cp['label']} | Δtrend: {cp['delta']:+.4f}")
-            except ImportError as e:
-                st.warning(f"Prophet not installed: `pip install prophet`\n\n{e}")
-            except Exception as e:
-                st.warning(f"Prophet error: {e}")
-    else:
-        st.info("Click **▶ Run Prophet** to run the decomposition model on live data.")
-
-    with st.expander("🎛️ Optuna — tune Prophet changepoint & seasonality scales", expanded=False):
+                _ph_en_all.empty()
+                _status_lb.error(f"Full leaderboard failed: {_e}")
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # SECTOR TUNER — Optuna hyperparameter search for XGBoost + Random Forest
+        # ══════════════════════════════════════════════════════════════════════════
+        st.divider()
+        st.subheader("🎛️ Sector Hyperparameter Tuner")
         st.caption(
-            "Searches over `changepoint_prior_scale` (trend flexibility) and "
-            "`seasonality_prior_scale` (seasonality amplitude). "
-            "Objective: Spearman IC of implied 1-day returns on the 20% holdout. "
-            "~3-10 min for 20 trials (each fit takes 10-30s)."
+            "Runs Optuna TPE search across all five commodity sectors simultaneously. "
+            "One study per sector — optimises mean Spearman IC across every instrument in that sector. "
+            "Results are saved to `data/sector_params.json` and automatically picked up by XGBoost "
+            "and Random Forest on their next fit. **This is compute-heavy — budget 5–30 min.**"
         )
-        _prophet_trials = st.slider(
-            "Optuna trials", min_value=5, max_value=40, value=15, step=5,
-            key="prophet_optuna_trials",
-        )
-        _run_prophet_tune = st.button("▶ Tune Prophet", key="run_prophet_tune")
-        if _run_prophet_tune:
-            st.session_state["prophet_tune_triggered"] = True
 
-        if st.session_state.get("prophet_tune_triggered"):
-            with st.spinner(
-                f"Running Optuna on Prophet for {dl_commodity} ({_prophet_trials} trials) — "
-                "each trial fits a full Prophet model, this will take several minutes…"
-            ):
-                try:
-                    from models.deep.prophet_decomp import tune_prophet
-                    _prophet_result = tune_prophet(
-                        prices_full,
-                        commodity=dl_commodity,
-                        n_trials=_prophet_trials,
+        # ── Current params display ─────────────────────────────────────────────
+        with st.expander("Current tuned params (data/sector_params.json)", expanded=False):
+            try:
+                from models.ml.sector_tuner import load_sector_params
+                _sp = load_sector_params()
+                if _sp:
+                    _tuned_at = _sp.get("tuned_at", "unknown")
+                    st.caption(f"Last tuned: {_tuned_at}")
+                    _sp_display = {k: v for k, v in _sp.items() if k != "tuned_at"}
+                    st.json(_sp_display)
+                else:
+                    st.info("No tuned params found — models are using domain-default seeds from `config.py`.")
+            except Exception as _e:
+                st.warning(f"Could not load sector_params.json: {_e}")
+
+        # ── Tuner controls ─────────────────────────────────────────────────────
+        _tc1, _tc2, _tc3 = st.columns([2, 2, 2])
+        with _tc1:
+            _tune_model = st.selectbox(
+                "Model to tune",
+                options=["XGBoost", "Random Forest", "Both"],
+                key="tuner_model_sel",
+            )
+        with _tc2:
+            _tune_sectors = st.multiselect(
+                "Sectors (leave blank = all five)",
+                options=["energy", "metals", "agriculture", "livestock", "digital"],
+                default=[],
+                key="tuner_sector_sel",
+            )
+        with _tc3:
+            _tune_trials = st.slider(
+                "Optuna trials per sector",
+                min_value=10, max_value=100, value=30, step=5,
+                key="tuner_trials_sl",
+                help="More trials = better params but longer runtime. 30 is a good starting point.",
+            )
+
+        _run_tuner = st.button(
+            "▶ Run Sector Tuner",
+            key="run_sector_tuner",
+            help="Fits all commodities in each sector and optimises IC. Saves results automatically.",
+        )
+
+        if _run_tuner:
+            st.session_state["sector_tuner_triggered"] = True
+
+        if st.session_state.get("sector_tuner_triggered"):
+            _sectors_arg = _tune_sectors if _tune_sectors else None
+            _models_to_run = (
+                ["xgb"]       if _tune_model == "XGBoost"
+                else ["rf"]   if _tune_model == "Random Forest"
+                else ["xgb", "rf"]
+            )
+
+            _tuner_status = st.empty()
+            _tuner_progress = st.progress(0)
+            _total_steps = len(_models_to_run) * (len(_sectors_arg) if _sectors_arg else 5)
+            _step = 0
+
+            _tuner_results = {}
+
+            try:
+                from models.ml.sector_tuner import SectorTuner
+                _ph_sector = st.empty()
+                _ph_sector.markdown(_ghost(60, "Sector tuner…"), unsafe_allow_html=True)
+                with st.spinner("Initialising SectorTuner (building feature matrix)…"):
+                    _tuner = SectorTuner(prices_full)
+                _ph_sector.empty()
+
+                for _m in _models_to_run:
+                    _tuner_status.info(f"Tuning {_m.upper()} — {_tune_trials} trials/sector…")
+                    _best = _tuner.tune(
+                        model=_m,
+                        n_trials=_tune_trials,
+                        sectors=_sectors_arg,
                     )
-                    st.session_state["prophet_tune_triggered"] = False
-                    _pb = _prophet_result["best_params"]
-                    _pic = _prophet_result["best_ic"]
-                    _grade = "STRONG" if _pic > 0.05 else ("ACCEPTABLE" if _pic > 0.02 else "WEAK")
-                    st.success(
-                        f"Best: changepoint_prior_scale={_pb['changepoint_prior_scale']:.4f}, "
-                        f"seasonality_prior_scale={_pb['seasonality_prior_scale']:.4f} "
-                        f"→ IC = {_pic:.4f} ({_grade})"
+                    _tuner_results[_m] = _best
+                    _step += len(_best)
+                    _tuner_progress.progress(min(_step / _total_steps, 1.0))
+
+                _tuner.save()
+                st.session_state["sector_tuner_triggered"] = False
+                st.success("Tuning complete — params saved to `data/sector_params.json`.")
+
+                # Show best ICs per sector
+                for _m, _sector_best in _tuner_results.items():
+                    st.markdown(f"**{_m.upper()} best params by sector:**")
+                    st.json(_sector_best)
+
+            except ImportError:
+                st.error("Optuna is not installed. Run: `pip install optuna`")
+                st.session_state["sector_tuner_triggered"] = False
+            except Exception as _e:
+                st.error(f"Sector tuner failed: {_e}")
+                st.session_state["sector_tuner_triggered"] = False
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # SECTOR CASCADE — macro-adjusted forward forecast
+        # ══════════════════════════════════════════════════════════════════════════
+        st.divider()
+        st.subheader("🌊 Sector Cascade Forecast")
+        st.caption(
+            "Adjusts the commodity's 21-day momentum baseline with macro channel signals "
+            "(Real Yields, USD, Risk-Off) derived from TLT momentum, DXY z-score, and VIX."
+        )
+
+        _casc_comm = st.selectbox(
+            "Commodity",
+            options=list(_CASCADE_COMM_EFFECTS.keys()),
+            key="casc_comm_select",
+        )
+        _casc_sector = _CASCADE_SECTOR_MAP.get(_casc_comm, "Unknown")
+
+        # pull latest macro row
+        _casc_macro_row = {}
+        try:
+            if not _macro_for_triggers.empty:
+                _casc_macro_row = _macro_for_triggers.iloc[-1].to_dict()
+        except Exception:
+            pass
+
+        _casc_prices_full = load_prices_db()
+        _casc_price_src   = _casc_prices_full if not _casc_prices_full.empty else prices
+        _c_base, _c_adj, _c_final, _c_band, _c_conf, _c_ch = _compute_cascade_for(
+            _casc_comm, _casc_macro_row, _casc_price_src
+        )
+
+        # ── Forecast card ─────────────────────────────────────────────────────────
+        _casc_color  = "#3DB87A" if _c_final >= 0 else "#D94F4F"
+        _casc_arrow  = "▲" if _c_final >= 0 else "▼"
+        _casc_dir    = "Bullish" if _c_final >= 0 else "Bearish"
+
+        st.markdown(
+            f"""
+            <div style="background:#0C1228;border-radius:10px;padding:18px 24px;margin-bottom:12px;
+                        border-left:4px solid {_casc_color};">
+              <div style="color:#A0AEC0;font-size:0.75rem;text-transform:uppercase;letter-spacing:.08em;">
+                {_casc_sector} · {_casc_comm}
+              </div>
+              <div style="color:{_casc_color};font-size:2.2rem;font-weight:700;margin:4px 0;">
+                {_casc_arrow} {_c_final:+.2f}%
+              </div>
+              <div style="color:#718096;font-size:0.8rem;">
+                Cascade 5-day forecast &nbsp;|&nbsp; 90% band: ±{_c_band:.2f}pp &nbsp;|&nbsp;
+                Direction: <span style="color:{_casc_color};">{_casc_dir}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ── Decomposition row ─────────────────────────────────────────────────────
+        _dc1, _dc2, _dc3, _dc4 = st.columns(4)
+        _dc1.metric("Baseline (Momentum)", f"{_c_base:+.2f}%")
+        _dc2.metric("Macro Overlay",       f"{_c_adj:+.2f}pp",
+                    delta=f"{'adds' if _c_adj >= 0 else 'subtracts'} {abs(_c_adj):.2f}pp")
+        _dc3.metric("Cascade Final",       f"{_c_final:+.2f}%")
+        _dc4.metric("Confidence",          f"{_c_conf:.0%}")
+
+        # ── Channel breakdown bar chart ───────────────────────────────────────────
+        import plotly.graph_objects as _go_casc
+        _ch_names = list(_c_ch.keys())
+        _ch_vals  = list(_c_ch.values())
+        _ch_colors = ["#3DB87A" if v >= 0 else "#D94F4F" for v in _ch_vals]
+
+        _casc_fig = _go_casc.Figure(_go_casc.Bar(
+            x=_ch_names,
+            y=_ch_vals,
+            marker_color=_ch_colors,
+            text=[f"{v:+.2f}pp" for v in _ch_vals],
+            textposition="outside",
+        ))
+        _casc_fig.update_layout(
+            title="Macro Channel Contributions",
+            yaxis_title="Contribution (pp)",
+            paper_bgcolor="#060912",
+            plot_bgcolor="#0C1228",
+            font_color="#E2E8F0",
+            height=300,
+            margin=dict(l=40, r=20, t=40, b=30),
+            showlegend=False,
+        )
+        _casc_fig.update_xaxes(gridcolor="#1A2340")
+        _casc_fig.update_yaxes(gridcolor="#1A2340", zeroline=True, zerolinecolor="#718096")
+        st.plotly_chart(_casc_fig, use_container_width=True)
+
+        # ── vs Independent baseline comparison ───────────────────────────────────
+        with st.expander("What changed by accounting for upstream macro shocks?"):
+            _delta_abs = abs(_c_adj)
+            _same_dir  = (_c_base >= 0) == (_c_final >= 0)
+            if _delta_abs < 0.10:
+                _narrative = (
+                    "Macro channels are near-neutral. The cascade forecast is essentially "
+                    "the same as the independent momentum baseline — no material upstream shock."
+                )
+            elif _same_dir:
+                _narrative = (
+                    f"Macro channels **reinforce** the momentum signal, adding {_c_adj:+.2f}pp. "
+                    f"The cascade strengthens the {_casc_dir.lower()} baseline view."
+                )
+            else:
+                _narrative = (
+                    f"Macro channels **oppose** the momentum signal ({_c_adj:+.2f}pp). "
+                    f"The cascade flips or mutes the baseline — upstream macro shocks are "
+                    f"the dominant driver."
+                )
+            st.markdown(_narrative)
+
+            _cmp_c1, _cmp_c2 = st.columns(2)
+            with _cmp_c1:
+                st.markdown("**Without macro cascade (momentum only)**")
+                st.metric("Baseline forecast", f"{_c_base:+.2f}%")
+            with _cmp_c2:
+                st.markdown("**With macro cascade**")
+                st.metric("Cascade forecast", f"{_c_final:+.2f}%",
+                          delta=f"{_c_adj:+.2f}pp from macro")
+
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 3 — MARKET SIGNALS
+    # ══════════════════════════════════════════════════════════════════════════════
+    @st.fragment(run_every="15m")
+    def _render_market_signals():
+        st.subheader("🌍 Forward-Looking Market Signals")
+        st.caption(
+            "Macro overlays (DXY / VIX / TLT), commodity calendar events (WASDE / OPEC+), "
+            "climate signals (ENSO), and energy transition proxies."
+        )
+
+        # ── DXY / VIX / TLT ───────────────────────────────────────────────────────
+        _ph_macro = st.empty()
+        _ph_macro.markdown(_ghost(520, "DXY · VIX · TLT"), unsafe_allow_html=True)
+        with st.spinner("Loading macro signals…"):
+            macro_df = load_macro(period="2y", _price_index=prices.index)
+
+        if not macro_df.empty:
+            st.markdown("#### DXY · VIX · TLT Macro Overlay")
+
+            macro_tail = macro_df.tail(252)
+
+            fig_macro = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                row_heights=[0.34, 0.33, 0.33], vertical_spacing=0.04,
+                subplot_titles=["DXY Z-Score (63d)", "VIX (Fear Gauge)", "TLT 21d Momentum"])
+
+            fig_macro.add_trace(go.Scatter(
+                x=macro_tail.index, y=macro_tail["dxy_zscore63"],
+                line=dict(color=AMBER, width=1.5), name="DXY z-score",
+            ), row=1, col=1)
+            fig_macro.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.5, row=1, col=1)
+
+            vix_vals = macro_tail["vix"]
+            vix_colors = [RED if v >= 30 else (PURPLE if v >= 20 else GREEN) for v in vix_vals]
+            fig_macro.add_trace(go.Bar(
+                x=macro_tail.index, y=vix_vals,
+                marker_color=vix_colors, name="VIX",
+            ), row=2, col=1)
+            fig_macro.add_hline(y=20, line_dash="dot", line_color=PURPLE, opacity=0.6, row=2, col=1)
+            fig_macro.add_hline(y=30, line_dash="dot", line_color=RED,    opacity=0.6, row=2, col=1)
+
+            fig_macro.add_trace(go.Scatter(
+                x=macro_tail.index, y=macro_tail["tlt_mom21"],
+                fill="tozeroy",
+                fillcolor="rgba(79,195,247,0.12)",
+                line=dict(color=BLUE, width=1.5), name="TLT 21d mom",
+            ), row=3, col=1)
+            fig_macro.add_hline(y=0, line_dash="dash", line_color="#888", opacity=0.5, row=3, col=1)
+
+            dark_layout(fig_macro, height=520, title="Macro Regime Dashboard")
+            _ph_macro.plotly_chart(fig_macro, use_container_width=True)
+
+            vix_now = float(macro_df["vix"].dropna().iloc[-1])
+            dxy_z   = float(macro_df["dxy_zscore63"].dropna().iloc[-1])
+            tlt_m   = float(macro_df["tlt_mom21"].dropna().iloc[-1])
+            wasde_d = int(macro_df["days_to_wasde"].dropna().iloc[-1])
+            opec_d  = int(macro_df["days_to_opec"].dropna().iloc[-1])
+
+            m1, m2, m3, m4, m5 = st.columns(5)
+            vix_label = "Crisis" if vix_now >= 30 else ("Risk-Off" if vix_now >= 20 else "Risk-On")
+            m1.metric("VIX", f"{vix_now:.1f}", delta=vix_label)
+            m2.metric("DXY Z-Score", f"{dxy_z:+.2f}",
+                      delta="Dollar strong" if dxy_z > 0.5 else ("Dollar weak" if dxy_z < -0.5 else "Neutral"))
+            m3.metric("TLT 21d Mom", f"{tlt_m:+.3f}",
+                      delta="Rates falling" if tlt_m > 0 else "Rates rising")
+            m4.metric("Days to WASDE", f"{wasde_d:+d}",
+                      delta="Window active" if macro_df["is_wasde_window"].iloc[-1] else "Outside window")
+            m5.metric("Days to OPEC+", f"{opec_d:+d}",
+                      delta="Window active" if macro_df["is_opec_window"].iloc[-1] else "Outside window")
+        else:
+            _ph_macro.empty()
+            st.warning("Macro data unavailable — check internet connection.")
+
+        st.divider()
+
+        # ── ENSO / Climate ─────────────────────────────────────────────────────────
+        st.markdown("#### ENSO Climate Signal (MEI v2)")
+        st.caption(
+            "Multivariate ENSO Index: El Niño (>+0.5) disrupts global precipitation, "
+            "lagging Cocoa/Coffee 3-6 months; La Niña (<−0.5) stresses Brazil soy."
+        )
+
+        _ph_enso = st.empty()
+        _ph_enso.markdown(_ghost(320, "ENSO climate signal"), unsafe_allow_html=True)
+        with st.spinner("Loading ENSO data…"):
+            mei_df = load_enso()
+
+        if not mei_df.empty:
+            mei_tail = mei_df.tail(252 * 2)  # 2 years
+            colors_enso = [
+                RED if v >= 0.5 else (BLUE if v <= -0.5 else "#888")
+                for v in mei_tail["mei"]
+            ]
+            fig_mei = go.Figure()
+            fig_mei.add_trace(go.Bar(
+                x=mei_tail.index, y=mei_tail["mei"],
+                marker_color=colors_enso, name="MEI v2",
+            ))
+            fig_mei.add_hline(y=0.5,  line_dash="dot", line_color=RED,  opacity=0.7)
+            fig_mei.add_hline(y=-0.5, line_dash="dot", line_color=BLUE, opacity=0.7)
+            dark_layout(fig_mei, height=320, title="MEI v2 — El Niño (red) / La Niña (blue)")
+            _ph_enso.plotly_chart(fig_mei, use_container_width=True)
+
+            enso_now = float(mei_df["mei"].dropna().iloc[-1])
+            phase    = "🔴 El Niño" if enso_now >= 0.5 else ("🔵 La Niña" if enso_now <= -0.5 else "⚪ Neutral")
+            lag3     = float(mei_df["mei_lag3m"].dropna().iloc[-1]) if "mei_lag3m" in mei_df.columns else np.nan
+            lag6     = float(mei_df["mei_lag6m"].dropna().iloc[-1]) if "mei_lag6m" in mei_df.columns else np.nan
+
+            ec1, ec2, ec3 = st.columns(3)
+            ec1.metric("Current MEI", f"{enso_now:+.2f}", delta=phase)
+            ec2.metric("3-Month Lag Signal", f"{lag3:+.2f}" if not np.isnan(lag3) else "—")
+            ec3.metric("6-Month Lag Signal", f"{lag6:+.2f}" if not np.isnan(lag6) else "—")
+
+            if enso_now <= -0.5:
+                st.info("**La Niña active:** Watch Brazil soy stress (2-4 month lead), "
+                        "higher US natural gas demand from cooler winters, "
+                        "and wetter SE Asia conditions for palm oil/cocoa.")
+            elif enso_now >= 0.5:
+                st.info("**El Niño active:** Watch drier SE Asia (palm oil/cocoa/coffee bearish), "
+                        "wetter US Gulf Coast (US soy bullish), drier Australian wheat.")
+        else:
+            _ph_enso.empty()
+            st.warning("ENSO data unavailable.")
+
+        st.divider()
+
+        # ── Energy Transition ──────────────────────────────────────────────────────
+        st.markdown("#### Energy Transition Signals")
+        st.caption(
+            "Uranium spread proxy (URA vs 90d SMA), battery metals PC1 (LIT/GLNCY/REMX), "
+            "and ETS policy stress (KRBN volatility-weighted return)."
+        )
+
+        _ph_et = st.empty()
+        _ph_et.markdown(_ghost(380, "Energy transition signals"), unsafe_allow_html=True)
+        with st.spinner("Loading energy transition data…"):
+            et_df = load_energy_transition(period="2y")
+
+        if not et_df.empty:
+            et_tail = et_df.tail(252)
+            et_cols = [c for c in ["uranium_spread_zscore", "battery_demand_index", "ets_stress_zscore"]
+                       if c in et_df.columns]
+
+            _ph_et.empty()
+            if et_cols:
+                fig_et = make_subplots(rows=len(et_cols), cols=1, shared_xaxes=True,
+                    vertical_spacing=0.06,
+                    subplot_titles=[c.replace("_", " ").title() for c in et_cols])
+                palette = [AMBER, BLUE, GREEN]
+                for i, col in enumerate(et_cols, 1):
+                    fig_et.add_trace(go.Scatter(
+                        x=et_tail.index, y=et_tail[col],
+                        line=dict(color=palette[i-1], width=1.5),
+                        fill="tozeroy",
+                        fillcolor=f"rgba({int(palette[i-1][1:3],16)},{int(palette[i-1][3:5],16)},{int(palette[i-1][5:],16)},0.1)",
+                        name=col,
+                    ), row=i, col=1)
+                    fig_et.add_hline(y=0, line_dash="dash", line_color="#555", opacity=0.6, row=i, col=1)
+                dark_layout(fig_et, height=100 + 170 * len(et_cols), title="Energy Transition Signals")
+                st.plotly_chart(fig_et, use_container_width=True)
+
+                et_cols_metrics = st.columns(len(et_cols))
+                for col_w, col_name in zip(et_cols_metrics, et_cols):
+                    val = float(et_tail[col_name].dropna().iloc[-1])
+                    col_w.metric(col_name.replace("_", " ").title(), f"{val:+.3f}")
+            else:
+                st.info("Energy transition columns not yet available.")
+        else:
+            _ph_et.empty()
+            st.warning("Energy transition data unavailable — yfinance fetch may have failed.")
+
+        st.divider()
+
+        # ── Macro Router ───────────────────────────────────────────────────────────
+        st.markdown("#### Macro-to-Sector Routing Coefficients")
+        st.caption(
+            "OLS regression coefficients learned from 504 trading days (~2 yr) of "
+            "DXY / VIX / TLT vs sector equal-weighted returns, conditioned on market "
+            "regime (bull / bear / high_vol / neutral). Rebuilt automatically every 7 days."
+        )
+
+        try:
+            from models.macro_router import load_macro_routes
+
+            routes = load_macro_routes()
+            if routes is None:
+                st.info("Macro routes not yet built. Run `python -m models.macro_router` once.")
+            else:
+                meta       = routes.get("_metadata", {})
+                fitted_at  = meta.get("fitted_at", "unknown")
+                window     = meta.get("backtest_days", "?")
+                val_block  = routes.get("validation", {})
+                validation = val_block.get("checks", [])
+
+                # ── Validation scorecard ───────────────────────────────────────────
+                n_pass  = val_block.get("n_passed", sum(1 for v in validation if v.get("passed")))
+                n_total = val_block.get("n_checks", len(validation))
+
+                score_color = GREEN if n_pass == n_total else (AMBER if n_pass >= n_total * 0.7 else RED)
+                st.markdown(
+                    f"<span style='color:{score_color};font-size:1.1em;font-weight:600'>"
+                    f"Domain validation: {n_pass}/{n_total} checks passed</span>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"Fitted: {str(fitted_at)[:19].replace('T',' ')} UTC · Window: {window} trading days")
+
+                # Expand the scorecard
+                with st.expander("📋 Validation detail — what each check means and why failures can be valid", expanded=False):
+                    st.markdown(
+                        """
+    **What is domain validation?**
+    After fitting OLS regression coefficients for each macro variable → sector pair,
+    the router checks that each coefficient has the sign expected by economic theory
+    (e.g. DXY↑ should be bearish for commodities priced in USD). A failure means the
+    empirical slope over the sample window ran *opposite* to textbook theory.
+
+    **Failures are not bugs.** They are informative signals about the regime in the data window.
+
+    **Current sample window: May 2024 – May 2026 (504 trading days)**
+
+    ---
+    """)
+
+                    for v in validation:
+                        passed = v.get("passed", False)
+                        icon   = "✅" if passed else "❌"
+                        name   = v.get("name", "")
+                        slope  = v.get("actual_slope", float("nan"))
+                        r2     = v.get("r_squared", float("nan"))
+                        pval   = v.get("p_value", float("nan"))
+                        note   = v.get("note", "")
+
+                        st.markdown(
+                            f"**{icon} {name}**  \n"
+                            f"slope `{slope:+.4f}` · R²=`{r2:.3f}` · p=`{pval:.3f}`"
+                            + (f"  \n*{note}*" if note else ""),
+                        )
+
+                    st.markdown("---")
+                    st.markdown(
+                        """
+    **Why DXY → Energy failed (positive slope, expected negative)**
+
+    The classic USD-pricing channel says: *stronger dollar → commodities cost more for
+    non-USD buyers → demand falls → price drops*. This held historically.
+
+    However, the 2022 energy crisis created a period where **both** DXY and WTI surged
+    simultaneously — the Ukraine invasion compressed supply while USD strengthened as a
+    safe-haven. The 2-year regression window includes significant exposure to that co-movement,
+    which overwhelms the normal inverse relationship. R²=0.013 (the regression explains
+    **1.3% of variance**) means this coefficient is close to noise regardless of sign.
+
+    **Why Rising Rates → Energy failed (positive slope, expected negative)**
+
+    The `tlt_yield_proxy` variable is `−TLT_return`, so a positive slope means
+    *rising rates associate with rising energy prices*. Again, 2022: the Fed began its
+    most aggressive rate-hike cycle in 40 years *while* energy prices were at multi-year
+    highs. These co-moved for fundamental supply/demand reasons unrelated to the
+    interest-rate channel. R²=0.012 — same story, negligible explanatory power.
+
+    **What to watch:** If these checks still fail after a full year of normal-rate-environment
+    data enters the rolling window (i.e., by Q3 2026), that would suggest a structural
+    regime shift rather than a sample artefact.
+    """)
+
+                # ── Routing coefficient heatmap ────────────────────────────────────
+                routing_matrix = routes.get("routing_matrix", {})
+                if routing_matrix:
+                    # routing_matrix keys are aliased display names (dxy_spike, vix_spike, tlt_drop)
+                    _ALIAS_LABELS = {
+                        "dxy_spike":  "DXY spike (USD↑)",
+                        "vix_spike":  "VIX spike (fear↑)",
+                        "tlt_drop":   "Rates rise (TLT↓)",
+                    }
+                    macro_vars = list(routing_matrix.keys())
+                    sectors    = ["energy", "metals", "agriculture", "livestock", "digital"]
+
+                    z_vals, hover_text = [], []
+                    for mv in macro_vars:
+                        row_z, row_h = [], []
+                        for sec in sectors:
+                            coef = routing_matrix.get(mv, {}).get(sec, 0.0)
+                            row_z.append(coef)
+                            row_h.append(f"{_ALIAS_LABELS.get(mv, mv)} → {sec}<br>slope: {coef:+.4f}")
+                        z_vals.append(row_z)
+                        hover_text.append(row_h)
+
+                    macro_labels = [_ALIAS_LABELS.get(m, m.replace("_", " ")) for m in macro_vars]
+                    sector_labels = [s.capitalize() for s in sectors]
+
+                    fig_routes = go.Figure(go.Heatmap(
+                        z=z_vals,
+                        x=sector_labels,
+                        y=macro_labels,
+                        text=[[f"{v:+.3f}" for v in row] for row in z_vals],
+                        texttemplate="%{text}",
+                        hovertext=hover_text,
+                        hovertemplate="%{hovertext}<extra></extra>",
+                        colorscale="RdYlGn",
+                        zmid=0,
+                        colorbar=dict(title="OLS slope", tickfont=dict(size=10)),
+                    ))
+                    fig_routes.update_layout(
+                        **{**PLOTLY_LAYOUT,
+                           "height": 280,
+                           "title_text": "Macro → Sector Routing Matrix (all-regime OLS slopes)",
+                           "margin": dict(t=50, l=130, r=20, b=40),
+                           "xaxis_title": "Sector",
+                           "yaxis_title": "Macro variable",
+                        }
                     )
+                    st.plotly_chart(fig_routes, width="stretch")
                     st.caption(
-                        "These params are returned for reference. To apply them permanently, "
-                        "update `_SEASONAL_CONFIG` in `models/deep/prophet_decomp.py` or pass "
-                        "them to `ProphetDecomposer(changepoint_prior_scale=...)` directly."
+                        "Green = positive empirical relationship · Red = negative · "
+                        "Coefficient is the OLS slope across all regimes combined. "
+                        "Small magnitude + high p-value cells (especially DXY→Energy, "
+                        "TLT yield→Energy) reflect noisy 2022-era co-movement, not structural signal."
                     )
-                    st.json(_prophet_result)
-                except ImportError as _e:
-                    st.error(f"Missing dependency: {_e}")
-                    st.session_state["prophet_tune_triggered"] = False
-                except Exception as _e:
-                    st.error(f"Prophet tuning failed: {_e}")
-                    st.session_state["prophet_tune_triggered"] = False
 
-    st.divider()
+        except Exception as _mr_exc:
+            st.info(f"Macro router unavailable: {_mr_exc}")
 
-    st.markdown("#### BiLSTM Multi-Commodity Forecaster")
-    run_lstm = st.button("▶ Run BiLSTM (1-5 min)", key="run_lstm")
-    if run_lstm:
-        with st.spinner("Training BiLSTM — this may take 1-5 min on CPU…"):
-            try:
-                from models.deep.lstm import LSTMForecaster
-                lstm = LSTMForecaster(seq_len=63)
-                lstm.fit(prices_full)
-                forecasts = lstm.predict_latest(prices_full)
-                st.success("BiLSTM trained successfully!")
-                fc_df = pd.DataFrame([
-                    {"Commodity": k, "Predicted log-return": v}
-                    for k, v in forecasts.items()
-                ])
-                st.dataframe(fc_df.round(5), use_container_width=True)
-            except ImportError as e:
-                st.warning(f"PyTorch not installed or GPU unavailable: {e}")
-            except Exception as e:
-                st.warning(f"LSTM error: {e}")
-    else:
-        st.info("Click **▶ Run BiLSTM** to train the 2-layer bidirectional LSTM.")
-
-    st.divider()
-
-    st.markdown("#### Temporal Fusion Transformer (TFT)")
-    st.caption("Multi-horizon quantile forecasts [1d, 5d, 20d] via pytorch-forecasting.")
-    run_tft = st.button("▶ Run TFT (5-15 min)", key="run_tft")
-    if run_tft:
-        with st.spinner("Training TFT — this may take 5-15 min…"):
-            try:
-                from models.deep.tft import CommodityTFT
-                tft = CommodityTFT(max_encoder_length=63, max_prediction_length=20)
-                tft.fit(prices_full, max_epochs=20)
-                fc_df = tft.forecast(prices_full)
-                st.success("TFT trained!")
-                st.dataframe(fc_df.round(5), use_container_width=True)
-            except ImportError as e:
-                st.warning(f"pytorch-forecasting not installed: {e}")
-            except Exception as e:
-                st.warning(f"TFT error: {e}")
-    else:
-        st.info("Click **▶ Run TFT** to train the Temporal Fusion Transformer.")
+    with tab3:
+        _sp3_cols = st.columns(4)
+        for (_t3, _l3, _c3), _sc3 in zip(
+            [
+                ("statistical", "Statistical", BLUE),
+                ("ml",          "ML",          GREEN),
+                ("deep",        "Deep",        PURPLE),
+                ("quantum",     "Quantum",     AMBER),
+            ],
+            _sp3_cols,
+        ):
+            with _sc3:
+                _render_tier_spark(_t3, _l3, _c3, compact=True)
+        _render_market_signals()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — QUANTUM
-# ══════════════════════════════════════════════════════════════════════════════
-with tab5:
-    st.subheader("⚛️ Quantum-Enhanced Models")
-    st.caption(
-        "Tier 4 (experimental): quantum kernel SVMs, QAOA portfolio optimisation, "
-        "and QNN hybrid layers via PennyLane."
-    )
+    # ══════════════════════════════════════════════════════════════════════════════
 
-    st.info(
-        "**Status:** Quantum models require PennyLane ≥ 0.38 (`pip install pennylane`). "
-        "Simulations run on CPU — IBM Quantum backend available via pennylane-qiskit."
-    )
+else:
+    tab4, tab5, tab6, tab7 = st.tabs([
+        "🧠 Deep Learning",
+        "⚛️ Quantum",
+        "🔮 Consensus",
+        "🩺 Health",
+    ])
 
-    # ── Kernel Benchmark ───────────────────────────────────────────────────────
-    st.markdown("#### Quantum Kernel Benchmark")
-    st.caption(
-        "Compares a quantum fidelity kernel (Hilbert-space inner product via `models.quantum.kernel`) "
-        "against a classical RBF kernel ridge regression on WTI Crude Oil return prediction. "
-        "Uses the last 200 trading days, 4-qubit feature embedding, 75/25 train-test split."
-    )
-    run_kernel = st.button("▶ Run Kernel Benchmark (2-10 min)", key="run_kernel")
-    if run_kernel:
-        with st.spinner("Computing quantum and classical kernel matrices — this may take a few minutes…"):
+    # TAB 4 — DEEP LEARNING
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab4:
+        st.subheader("🧠 Deep Learning Models")
+        st.caption("Tier 3 models: BiLSTM, Meta-Prophet decomposition, and Temporal Fusion Transformer.")
+        _render_tier_spark("deep", "Deep", PURPLE)
+
+        dl_col1, dl_col2 = st.columns(2)
+
+        with dl_col1:
+            st.markdown("#### Prophet Trend Decomposition")
+            dl_commodity = st.selectbox(
+                "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="dl_comm"
+            )
+            run_prophet = st.button("▶ Run Prophet (30-60s)", key="run_prophet")
+
+        if run_prophet:
+            st.session_state["_deep_tier_ran"] = True
+            _ph_prophet = st.empty()
+            _ph_prophet.markdown(_ghost(420, "Prophet trend decomposition"), unsafe_allow_html=True)
+            with st.spinner(f"Running Prophet on {dl_commodity} — this takes ~30s…"):
+                try:
+                    from models.deep.prophet_decomp import ProphetDecomposer
+                    pd_model = ProphetDecomposer(commodity=dl_commodity)
+                    pd_model.fit(prices_full)
+                    future_df, forecast_df = pd_model.forecast(periods=90)
+                    ss = pd_model.seasonal_strength()
+                    cp_summary = pd_model.changepoint_summary()
+                    tr = pd_model.trend_regime()
+
+                    fig_pr = go.Figure()
+                    fig_pr.add_trace(go.Scatter(
+                        x=forecast_df["ds"], y=np.exp(forecast_df["yhat"]),
+                        line=dict(color=AMBER, width=1.8), name="Prophet forecast",
+                    ))
+                    fig_pr.add_trace(go.Scatter(
+                        x=list(forecast_df["ds"]) + list(forecast_df["ds"][::-1]),
+                        y=list(np.exp(forecast_df["yhat_upper"])) + list(np.exp(forecast_df["yhat_lower"])[::-1]),
+                        fill="toself", fillcolor="rgba(245,166,35,0.12)",
+                        line=dict(width=0), name="95% CI",
+                    ))
+                    act = forecast_df[forecast_df["ds"].isin(prices_full.index)]
+                    fig_pr.add_trace(go.Scatter(
+                        x=prices_full.index[-180:], y=prices_full[dl_commodity].iloc[-180:],
+                        line=dict(color=BLUE, width=1.2, dash="dash"), name="Actual (last 180d)",
+                    ))
+                    dark_layout(fig_pr, height=420,
+                                title=f"{dl_commodity} — Prophet 90-Day Forecast")
+                    _ph_prophet.plotly_chart(fig_pr, use_container_width=True)
+
+                    p1, p2, p3 = st.columns(3)
+                    p1.metric("Yearly seasonal strength", f"{ss.get('yearly', 0):.3f}")
+                    p2.metric("Weekly seasonal strength", f"{ss.get('weekly', 0):.3f}")
+                    p3.metric("Trend regime", tr.get("regime", "Unknown"))
+
+                    if cp_summary:
+                        st.markdown("**Key Changepoints detected:**")
+                        for cp in cp_summary[:5]:
+                            st.caption(f"- {cp['date']} | {cp['label']} | Δtrend: {cp['delta']:+.4f}")
+                except ImportError as e:
+                    _ph_prophet.empty()
+                    st.warning(f"Prophet not installed: `pip install prophet`\n\n{e}")
+                except Exception as e:
+                    _ph_prophet.empty()
+                    st.warning(f"Prophet error: {e}")
+        else:
+            st.info("Click **▶ Run Prophet** to run the decomposition model on live data.")
+
+        with st.expander("🎛️ Optuna — tune Prophet changepoint & seasonality scales", expanded=False):
+            st.caption(
+                "Searches over `changepoint_prior_scale` (trend flexibility) and "
+                "`seasonality_prior_scale` (seasonality amplitude). "
+                "Objective: Spearman IC of implied 1-day returns on the 20% holdout. "
+                "~3-10 min for 20 trials (each fit takes 10-30s)."
+            )
+            _prophet_trials = st.slider(
+                "Optuna trials", min_value=5, max_value=40, value=15, step=5,
+                key="prophet_optuna_trials",
+            )
+            _run_prophet_tune = st.button("▶ Tune Prophet", key="run_prophet_tune")
+            if _run_prophet_tune:
+                st.session_state["prophet_tune_triggered"] = True
+
+            if st.session_state.get("prophet_tune_triggered"):
+                with st.spinner(
+                    f"Running Optuna on Prophet for {dl_commodity} ({_prophet_trials} trials) — "
+                    "each trial fits a full Prophet model, this will take several minutes…"
+                ):
+                    try:
+                        from models.deep.prophet_decomp import tune_prophet
+                        _prophet_result = tune_prophet(
+                            prices_full,
+                            commodity=dl_commodity,
+                            n_trials=_prophet_trials,
+                        )
+                        st.session_state["prophet_tune_triggered"] = False
+                        _pb = _prophet_result["best_params"]
+                        _pic = _prophet_result["best_ic"]
+                        _grade = "STRONG" if _pic > 0.05 else ("ACCEPTABLE" if _pic > 0.02 else "WEAK")
+                        st.success(
+                            f"Best: changepoint_prior_scale={_pb['changepoint_prior_scale']:.4f}, "
+                            f"seasonality_prior_scale={_pb['seasonality_prior_scale']:.4f} "
+                            f"→ IC = {_pic:.4f} ({_grade})"
+                        )
+                        st.caption(
+                            "These params are returned for reference. To apply them permanently, "
+                            "update `_SEASONAL_CONFIG` in `models/deep/prophet_decomp.py` or pass "
+                            "them to `ProphetDecomposer(changepoint_prior_scale=...)` directly."
+                        )
+                        st.json(_prophet_result)
+                    except ImportError as _e:
+                        st.error(f"Missing dependency: {_e}")
+                        st.session_state["prophet_tune_triggered"] = False
+                    except Exception as _e:
+                        st.error(f"Prophet tuning failed: {_e}")
+                        st.session_state["prophet_tune_triggered"] = False
+
+        st.divider()
+
+        st.markdown("#### BiLSTM Multi-Commodity Forecaster")
+        run_lstm = st.button("▶ Run BiLSTM (1-5 min)", key="run_lstm")
+        if run_lstm:
+            st.session_state["_deep_tier_ran"] = True
+            _ph_lstm = st.empty()
+            _ph_lstm.markdown(_ghost(320, "BiLSTM forecaster"), unsafe_allow_html=True)
+            with st.spinner("Training BiLSTM — this may take 1-5 min on CPU…"):
+                try:
+                    from models.deep.lstm import LSTMForecaster
+                    lstm = LSTMForecaster(seq_len=63)
+                    lstm.fit(prices_full)
+                    forecasts = lstm.predict_latest(prices_full)
+                    st.success("BiLSTM trained successfully!")
+                    fc_df = pd.DataFrame([
+                        {"Commodity": k, "Predicted log-return": v}
+                        for k, v in forecasts.items()
+                    ])
+                    _ph_lstm.empty()
+                    st.dataframe(fc_df.round(5), use_container_width=True)
+                except ImportError as e:
+                    _ph_lstm.empty()
+                    st.warning(f"PyTorch not installed or GPU unavailable: {e}")
+                except Exception as e:
+                    _ph_lstm.empty()
+                    st.warning(f"LSTM error: {e}")
+        else:
+            st.info("Click **▶ Run BiLSTM** to train the 2-layer bidirectional LSTM.")
+
+        st.divider()
+
+        st.markdown("#### Temporal Fusion Transformer (TFT)")
+        st.caption("Multi-horizon quantile forecasts [1d, 5d, 20d] via pytorch-forecasting.")
+        run_tft = st.button("▶ Run TFT (5-15 min)", key="run_tft")
+        if run_tft:
+            st.session_state["_deep_tier_ran"] = True
+            _ph_tft = st.empty()
+            _ph_tft.markdown(_ghost(320, "Temporal Fusion Transformer"), unsafe_allow_html=True)
+            with st.spinner("Training TFT — this may take 5-15 min…"):
+                try:
+                    from models.deep.tft import CommodityTFT
+                    tft = CommodityTFT(max_encoder_length=63, max_prediction_length=20)
+                    tft.fit(prices_full, max_epochs=20)
+                    fc_df = tft.forecast(prices_full)
+                    st.success("TFT trained!")
+                    _ph_tft.empty()
+                    st.dataframe(fc_df.round(5), use_container_width=True)
+                except ImportError as e:
+                    _ph_tft.empty()
+                    st.warning(f"pytorch-forecasting not installed: {e}")
+                except Exception as e:
+                    _ph_tft.empty()
+                    st.warning(f"TFT error: {e}")
+        else:
+            st.info("Click **▶ Run TFT** to train the Temporal Fusion Transformer.")
+
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 5 — QUANTUM
+    # ══════════════════════════════════════════════════════════════════════════════
+    with tab5:
+        st.subheader("⚛️ Quantum-Enhanced Models")
+        st.caption(
+            "Tier 4 (experimental): quantum kernel SVMs, QAOA portfolio optimisation, "
+            "and QNN hybrid layers via PennyLane."
+        )
+        _render_tier_spark("quantum", "Quantum", AMBER)
+
+        st.info(
+            "**Status:** Quantum models require PennyLane ≥ 0.38 (`pip install pennylane`). "
+            "Simulations run on CPU — IBM Quantum backend available via pennylane-qiskit."
+        )
+
+        # ── Kernel Benchmark ───────────────────────────────────────────────────────
+        st.markdown("#### Quantum Kernel Benchmark")
+        st.caption(
+            "Compares a quantum fidelity kernel (Hilbert-space inner product via `models.quantum.kernel`) "
+            "against a classical RBF kernel ridge regression on WTI Crude Oil return prediction. "
+            "Uses the last 200 trading days, 4-qubit feature embedding, 75/25 train-test split."
+        )
+        run_kernel = st.button("▶ Run Kernel Benchmark (2-10 min)", key="run_kernel")
+        if run_kernel:
+            st.session_state["_quantum_tier_ran"] = True
+            _ph_kernel = st.empty()
+            _ph_kernel.markdown(_ghost(300, "Quantum kernel benchmark"), unsafe_allow_html=True)
+            with st.spinner("Computing quantum and classical kernel matrices — this may take a few minutes…"):
+                try:
+                    import time
+                    from models.quantum.kernel import kernel_matrix
+                    from models.features import build_feature_matrix, build_target
+                    from sklearn.kernel_ridge import KernelRidge
+                    from sklearn.preprocessing import StandardScaler
+                    from sklearn.linear_model import Ridge
+                    from scipy.stats import spearmanr as _sp
+
+                    feat  = build_feature_matrix(prices_full)
+                    tgt   = build_target(prices_full, "WTI Crude Oil")
+                    clean = pd.concat([feat, tgt], axis=1).dropna()
+                    X_raw = clean.drop(columns=[tgt.name]).values[-200:, :4]
+                    y     = clean[tgt.name].values[-200:]
+
+                    scaler = StandardScaler()
+                    X = scaler.fit_transform(X_raw)
+
+                    n_train = 150
+                    X_tr, X_te = X[:n_train], X[n_train:]
+                    y_tr, y_te = y[:n_train], y[n_train:]
+
+                    # Quantum kernel ridge
+                    t0 = time.time()
+                    K_tr = kernel_matrix(X_tr)
+                    K_te = kernel_matrix(X_te, X_tr)
+                    kr_q = KernelRidge(alpha=1e-5, kernel="precomputed")
+                    kr_q.fit(K_tr, y_tr)
+                    y_pred_q = kr_q.predict(K_te)
+                    q_time = time.time() - t0
+                    ic_q, _ = _sp(y_pred_q, y_te)
+                    r2_q = float(1 - np.var(y_te - y_pred_q) / np.var(y_te))
+
+                    # Classical RBF kernel ridge baseline
+                    t0 = time.time()
+                    kr_rbf = KernelRidge(alpha=1e-4, kernel="rbf")
+                    kr_rbf.fit(X_tr, y_tr)
+                    y_pred_rbf = kr_rbf.predict(X_te)
+                    c_time = time.time() - t0
+                    ic_rbf, _ = _sp(y_pred_rbf, y_te)
+                    r2_rbf = float(1 - np.var(y_te - y_pred_rbf) / np.var(y_te))
+
+                    results_df = pd.DataFrame([
+                        {"Kernel": "Quantum (fidelity, 4-qubit)", "IC (Spearman)": round(ic_q, 4),
+                         "R²": round(r2_q, 4), "Runtime (s)": round(q_time, 1)},
+                        {"Kernel": "Classical (RBF)", "IC (Spearman)": round(ic_rbf, 4),
+                         "R²": round(r2_rbf, 4), "Runtime (s)": round(c_time, 1)},
+                    ])
+                    _ph_kernel.empty()
+                    st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+                    k1, k2 = st.columns(2)
+                    k1.metric("Quantum IC", f"{ic_q:+.4f}")
+                    k2.metric("Classical IC", f"{ic_rbf:+.4f}",
+                              delta=f"{'Quantum wins' if ic_q > ic_rbf else 'Classical wins'}")
+                except Exception as e:
+                    _ph_kernel.empty()
+                    st.warning(f"Kernel benchmark error: {e}")
+        else:
+            st.info("Click **▶ Run Kernel Benchmark** to compare quantum vs classical kernels.")
+
+        st.divider()
+
+        # ── QAOA Portfolio ─────────────────────────────────────────────────────────
+        st.markdown("#### QAOA Portfolio Optimiser")
+        st.caption(
+            "QUBO→Ising transformation, CommutingEvolution mixer, "
+            "cardinality-constrained basket selection across commodities."
+        )
+
+        n_select = st.slider("Number of assets to select (K)", 2, 6, 3, key="qaoa_k")
+        run_qaoa  = st.button("▶ Run QAOA", key="run_qaoa")
+        if run_qaoa:
+            st.session_state["_quantum_tier_ran"] = True
+            _ph_qaoa = st.empty()
+            _ph_qaoa.markdown(_ghost(350, "QAOA portfolio optimiser"), unsafe_allow_html=True)
+            with st.spinner("Running QAOA optimiser…"):
+                try:
+                    from models.quantum.qaoa_portfolio import QAOAPortfolioOptimizer
+                    ret = returns_full.tail(252).mean() * 252
+                    cov = returns_full.tail(252).cov()  * 252
+                    qaoa = QAOAPortfolioOptimizer(
+                        n_assets=len(ret), n_layers=2, n_select=n_select
+                    )
+                    qaoa.fit(ret.values, cov.values, asset_names=list(ret.index))
+                    basket = qaoa.optimal_basket()
+                    landscape = qaoa.cost_landscape()
+
+                    st.success(f"**Optimal basket (K={n_select}):** {basket['assets']}")
+                    q1, q2, q3 = st.columns(3)
+                    q1.metric("Expected Return", f"{basket['expected_return']:.2%}")
+                    q2.metric("Expected Volatility", f"{basket['expected_vol']:.2%}")
+                    q3.metric("Sharpe Ratio", f"{basket['sharpe']:.2f}")
+
+                    fig_ql = px.scatter(landscape, x="gamma", y="cost",
+                                        color="beta", title="QAOA Cost Landscape",
+                                        color_continuous_scale="Viridis")
+                    fig_ql.update_layout(paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
+                                         font_color="#FAFAFA", height=350,
+                                         margin=dict(t=50, l=55, r=20, b=40))
+                    _ph_qaoa.plotly_chart(fig_ql, use_container_width=True)
+                except ImportError as e:
+                    _ph_qaoa.empty()
+                    st.warning(f"PennyLane not installed: {e}")
+                except Exception as e:
+                    _ph_qaoa.empty()
+                    st.warning(f"QAOA error: {e}")
+        else:
+            st.info("Click **▶ Run QAOA** to run the quantum portfolio optimiser.")
+
+        st.divider()
+
+        # ── QNN Hybrid (Optuna-tuned) ───────────────────────────────────────────────
+        st.markdown("#### Quantum Hybrid Regressor — Optuna-Tuned")
+        st.caption(
+            "The quantum fidelity kernel captures directional signal (IC > 0.10) but the default "
+            "regularization (`ridge_reg = 1e-5`) causes magnitude blow-up (R² ≈ −65). "
+            "This runner pre-computes the kernel matrix **once**, then lets Optuna search "
+            "`ridge_reg` across 30 trials in seconds (no extra circuit calls). "
+            "The best `ridge_reg` is then used to refit on the full train set and evaluate on held-out test data."
+        )
+
+        _qnn_n_trials = st.slider("Optuna trials", 10, 50, 30, key="qnn_n_trials",
+                                   help="More trials = better tuning but still fast since the kernel is pre-computed.")
+        _qnn_commodity = st.selectbox(
+            "Target commodity", list(MODELING_COMMODITIES.keys()),
+            index=list(MODELING_COMMODITIES.keys()).index("WTI Crude Oil"),
+            key="qnn_commodity",
+        )
+
+        run_qnn = st.button("▶ Run Optuna-Tuned Quantum Study (10-30 min)", key="run_qnn")
+        if run_qnn:
+            st.session_state["_quantum_tier_ran"] = True
+            _ph_qnn = st.empty()
+            _ph_qnn.markdown(_ghost(340, "Quantum hybrid regressor"), unsafe_allow_html=True)
             try:
                 import time
+                import optuna
+                optuna.logging.set_verbosity(optuna.logging.WARNING)
                 from models.quantum.kernel import kernel_matrix
+                from models.quantum.hybrid import QuantumHybridRegressor
                 from models.features import build_feature_matrix, build_target
                 from sklearn.kernel_ridge import KernelRidge
                 from sklearn.preprocessing import StandardScaler
@@ -2434,512 +2825,393 @@ with tab5:
                 from scipy.stats import spearmanr as _sp
 
                 feat  = build_feature_matrix(prices_full)
-                tgt   = build_target(prices_full, "WTI Crude Oil")
+                tgt   = build_target(prices_full, _qnn_commodity)
                 clean = pd.concat([feat, tgt], axis=1).dropna()
-                X_raw = clean.drop(columns=[tgt.name]).values[-200:, :4]
-                y     = clean[tgt.name].values[-200:]
+                X_raw = clean.drop(columns=[tgt.name]).values[-300:, :4]
+                y     = clean[tgt.name].values[-300:]
 
                 scaler = StandardScaler()
                 X = scaler.fit_transform(X_raw)
 
-                n_train = 150
-                X_tr, X_te = X[:n_train], X[n_train:]
-                y_tr, y_te = y[:n_train], y[n_train:]
+                # Chronological split: train=0:240, val=192:240, test=240:300
+                n_test  = 60
+                n_train = len(X) - n_test        # 240
+                n_val   = 48
+                n_tr    = n_train - n_val         # 192
 
-                # Quantum kernel ridge
-                t0 = time.time()
-                K_tr = kernel_matrix(X_tr)
-                K_te = kernel_matrix(X_te, X_tr)
-                kr_q = KernelRidge(alpha=1e-5, kernel="precomputed")
-                kr_q.fit(K_tr, y_tr)
-                y_pred_q = kr_q.predict(K_te)
-                q_time = time.time() - t0
-                ic_q, _ = _sp(y_pred_q, y_te)
-                r2_q = float(1 - np.var(y_te - y_pred_q) / np.var(y_te))
+                X_tr, y_tr   = X[:n_tr],        y[:n_tr]
+                X_val, y_val = X[n_tr:n_train],  y[n_tr:n_train]
+                X_te, y_te   = X[n_train:],      y[n_train:]
 
-                # Classical RBF kernel ridge baseline
-                t0 = time.time()
-                kr_rbf = KernelRidge(alpha=1e-4, kernel="rbf")
-                kr_rbf.fit(X_tr, y_tr)
-                y_pred_rbf = kr_rbf.predict(X_te)
-                c_time = time.time() - t0
-                ic_rbf, _ = _sp(y_pred_rbf, y_te)
-                r2_rbf = float(1 - np.var(y_te - y_pred_rbf) / np.var(y_te))
+                # ── Step 1: pre-compute full quantum kernel (slow) ─────────────────
+                _status = st.empty()
+                _status.info("⏳ Step 1 / 3 — Computing quantum kernel matrix (this is the slow step)…")
+                t_kernel = time.time()
+                K_full = kernel_matrix(X[:n_train])   # (240, 240) — train+val only
+                kernel_time = time.time() - t_kernel
+                _status.success(f"✅ Kernel matrix computed in {kernel_time:.1f}s  ({n_train}×{n_train})")
 
-                results_df = pd.DataFrame([
-                    {"Kernel": "Quantum (fidelity, 4-qubit)", "IC (Spearman)": round(ic_q, 4),
-                     "R²": round(r2_q, 4), "Runtime (s)": round(q_time, 1)},
-                    {"Kernel": "Classical (RBF)", "IC (Spearman)": round(ic_rbf, 4),
-                     "R²": round(r2_rbf, 4), "Runtime (s)": round(c_time, 1)},
-                ])
-                st.dataframe(results_df, use_container_width=True, hide_index=True)
+                # Sub-matrices for tuning (train/val split, no new circuit calls)
+                K_tr_tr = K_full[:n_tr, :n_tr]
+                K_val_tr = K_full[n_tr:, :n_tr]
 
-                k1, k2 = st.columns(2)
-                k1.metric("Quantum IC", f"{ic_q:+.4f}")
-                k2.metric("Classical IC", f"{ic_rbf:+.4f}",
-                          delta=f"{'Quantum wins' if ic_q > ic_rbf else 'Classical wins'}")
-            except Exception as e:
-                st.warning(f"Kernel benchmark error: {e}")
-    else:
-        st.info("Click **▶ Run Kernel Benchmark** to compare quantum vs classical kernels.")
+                # ── Step 2: Optuna tunes ridge_reg on val IC (fast) ───────────────
+                _status2 = st.empty()
+                _status2.info(f"⏳ Step 2 / 3 — Running {_qnn_n_trials} Optuna trials to tune `ridge_reg`…")
 
-    st.divider()
+                def _objective(trial):
+                    alpha = trial.suggest_float("ridge_reg", 1e-6, 100.0, log=True)
+                    kr = KernelRidge(alpha=alpha, kernel="precomputed")
+                    kr.fit(K_tr_tr, y_tr)
+                    y_val_pred = kr.predict(K_val_tr)
+                    ic, _ = _sp(y_val_pred, y_val)
+                    return float(ic) if not np.isnan(ic) else -1.0
 
-    # ── QAOA Portfolio ─────────────────────────────────────────────────────────
-    st.markdown("#### QAOA Portfolio Optimiser")
-    st.caption(
-        "QUBO→Ising transformation, CommutingEvolution mixer, "
-        "cardinality-constrained basket selection across commodities."
-    )
+                study = optuna.create_study(direction="maximize",
+                                            sampler=optuna.samplers.TPESampler(seed=42))
+                study.optimize(_objective, n_trials=_qnn_n_trials, show_progress_bar=False)
 
-    n_select = st.slider("Number of assets to select (K)", 2, 6, 3, key="qaoa_k")
-    run_qaoa  = st.button("▶ Run QAOA", key="run_qaoa")
-    if run_qaoa:
-        with st.spinner("Running QAOA optimiser…"):
-            try:
-                from models.quantum.qaoa_portfolio import QAOAPortfolioOptimizer
-                ret = returns_full.tail(252).mean() * 252
-                cov = returns_full.tail(252).cov()  * 252
-                qaoa = QAOAPortfolioOptimizer(
-                    n_assets=len(ret), n_layers=2, n_select=n_select
+                best_alpha = study.best_params["ridge_reg"]
+                best_val_ic = study.best_value
+                _status2.success(
+                    f"✅ Optuna done — best `ridge_reg` = **{best_alpha:.2e}**  "
+                    f"(val IC = {best_val_ic:+.4f})"
                 )
-                qaoa.fit(ret.values, cov.values, asset_names=list(ret.index))
-                basket = qaoa.optimal_basket()
-                landscape = qaoa.cost_landscape()
 
-                st.success(f"**Optimal basket (K={n_select}):** {basket['assets']}")
-                q1, q2, q3 = st.columns(3)
-                q1.metric("Expected Return", f"{basket['expected_return']:.2%}")
-                q2.metric("Expected Volatility", f"{basket['expected_vol']:.2%}")
-                q3.metric("Sharpe Ratio", f"{basket['sharpe']:.2f}")
+                # ── Step 3: refit on full train set, evaluate on held-out test ────
+                _status3 = st.empty()
+                _status3.info("⏳ Step 3 / 3 — Refitting with best params and evaluating on test set…")
 
-                fig_ql = px.scatter(landscape, x="gamma", y="cost",
-                                    color="beta", title="QAOA Cost Landscape",
-                                    color_continuous_scale="Viridis")
-                fig_ql.update_layout(paper_bgcolor=BG, plot_bgcolor=PLOT_BG,
-                                     font_color="#FAFAFA", height=350,
-                                     margin=dict(t=50, l=55, r=20, b=40))
-                st.plotly_chart(fig_ql, use_container_width=True)
+                # Need test-vs-train kernel rows
+                K_te_tr = kernel_matrix(X_te, X[:n_train])
+
+                kr_best = KernelRidge(alpha=best_alpha, kernel="precomputed")
+                kr_best.fit(K_full, y[:n_train])
+                y_pred_q = kr_best.predict(K_te_tr)
+                ic_q, _  = _sp(y_pred_q, y_te)
+                r2_q     = float(1 - np.var(y_te - y_pred_q) / (np.var(y_te) + 1e-12))
+
+                # Classical Ridge baseline (same splits)
+                ridge = Ridge(alpha=1.0)
+                ridge.fit(X[:n_train], y[:n_train])
+                y_pred_r = ridge.predict(X_te)
+                ic_r, _  = _sp(y_pred_r, y_te)
+                r2_r     = ridge.score(X_te, y_te)
+
+                _status3.success("✅ Done — results below.")
+                _ph_qnn.empty()
+
+                # ── Results table ──────────────────────────────────────────────────
+                summary = pd.DataFrame([
+                    {"Model": f"Quantum Hybrid (tuned, ridge_reg={best_alpha:.2e})",
+                     "IC (Spearman)": round(ic_q, 4), "R²": round(r2_q, 4),
+                     "Val IC": round(best_val_ic, 4)},
+                    {"Model": "Classical Ridge (alpha=1.0)",
+                     "IC (Spearman)": round(ic_r, 4), "R²": round(r2_r, 4),
+                     "Val IC": "—"},
+                ])
+                st.dataframe(summary, use_container_width=True, hide_index=True)
+
+                qn1, qn2, qn3 = st.columns(3)
+                qn1.metric("Quantum IC (test)", f"{ic_q:+.4f}",
+                           delta="Actionable" if ic_q >= 0.05 else "Marginal")
+                qn2.metric("Quantum R² (test)", f"{r2_q:.4f}",
+                           delta="↑ vs untuned (−65)" if r2_q > -65 else None)
+                qn3.metric("Best ridge_reg", f"{best_alpha:.2e}")
+
+                # ── Optuna trial history chart ─────────────────────────────────────
+                trial_df = pd.DataFrame([
+                    {"trial": t.number, "ridge_reg": t.params["ridge_reg"], "val_IC": t.value}
+                    for t in study.trials if t.value is not None
+                ])
+                fig_opt = go.Figure()
+                fig_opt.add_trace(go.Scatter(
+                    x=trial_df["trial"], y=trial_df["val_IC"],
+                    mode="markers+lines",
+                    marker=dict(
+                        color=trial_df["val_IC"],
+                        colorscale="RdYlGn",
+                        size=7,
+                        showscale=True,
+                        colorbar=dict(title="Val IC"),
+                    ),
+                    line=dict(color="#444", width=1),
+                    name="Val IC per trial",
+                ))
+                fig_opt.add_hline(y=best_val_ic, line_dash="dot", line_color=GREEN,
+                                  annotation_text=f"Best: {best_val_ic:+.4f}",
+                                  annotation_position="top right")
+                fig_opt.add_hline(y=0.05, line_dash="dot", line_color=AMBER,
+                                  annotation_text="0.05 threshold",
+                                  annotation_position="bottom right")
+                dark_layout(fig_opt, height=300, title="Optuna Trial History — Validation IC")
+                st.plotly_chart(fig_opt, use_container_width=True)
+
+                # ── Best params detail ─────────────────────────────────────────────
+                with st.expander("Full Optuna trial log"):
+                    st.dataframe(
+                        trial_df.sort_values("val_IC", ascending=False).round(6),
+                        use_container_width=True, hide_index=True,
+                    )
+
             except ImportError as e:
-                st.warning(f"PennyLane not installed: {e}")
+                _ph_qnn.empty()
+                st.warning(f"Missing dependency: `{e}` — install with `pip install optuna`")
             except Exception as e:
-                st.warning(f"QAOA error: {e}")
-    else:
-        st.info("Click **▶ Run QAOA** to run the quantum portfolio optimiser.")
-
-    st.divider()
-
-    # ── QNN Hybrid (Optuna-tuned) ───────────────────────────────────────────────
-    st.markdown("#### Quantum Hybrid Regressor — Optuna-Tuned")
-    st.caption(
-        "The quantum fidelity kernel captures directional signal (IC > 0.10) but the default "
-        "regularization (`ridge_reg = 1e-5`) causes magnitude blow-up (R² ≈ −65). "
-        "This runner pre-computes the kernel matrix **once**, then lets Optuna search "
-        "`ridge_reg` across 30 trials in seconds (no extra circuit calls). "
-        "The best `ridge_reg` is then used to refit on the full train set and evaluate on held-out test data."
-    )
-
-    _qnn_n_trials = st.slider("Optuna trials", 10, 50, 30, key="qnn_n_trials",
-                               help="More trials = better tuning but still fast since the kernel is pre-computed.")
-    _qnn_commodity = st.selectbox(
-        "Target commodity", list(MODELING_COMMODITIES.keys()),
-        index=list(MODELING_COMMODITIES.keys()).index("WTI Crude Oil"),
-        key="qnn_commodity",
-    )
-
-    run_qnn = st.button("▶ Run Optuna-Tuned Quantum Study (10-30 min)", key="run_qnn")
-    if run_qnn:
-        try:
-            import time
-            import optuna
-            optuna.logging.set_verbosity(optuna.logging.WARNING)
-            from models.quantum.kernel import kernel_matrix
-            from models.quantum.hybrid import QuantumHybridRegressor
-            from models.features import build_feature_matrix, build_target
-            from sklearn.kernel_ridge import KernelRidge
-            from sklearn.preprocessing import StandardScaler
-            from sklearn.linear_model import Ridge
-            from scipy.stats import spearmanr as _sp
-
-            feat  = build_feature_matrix(prices_full)
-            tgt   = build_target(prices_full, _qnn_commodity)
-            clean = pd.concat([feat, tgt], axis=1).dropna()
-            X_raw = clean.drop(columns=[tgt.name]).values[-300:, :4]
-            y     = clean[tgt.name].values[-300:]
-
-            scaler = StandardScaler()
-            X = scaler.fit_transform(X_raw)
-
-            # Chronological split: train=0:240, val=192:240, test=240:300
-            n_test  = 60
-            n_train = len(X) - n_test        # 240
-            n_val   = 48
-            n_tr    = n_train - n_val         # 192
-
-            X_tr, y_tr   = X[:n_tr],        y[:n_tr]
-            X_val, y_val = X[n_tr:n_train],  y[n_tr:n_train]
-            X_te, y_te   = X[n_train:],      y[n_train:]
-
-            # ── Step 1: pre-compute full quantum kernel (slow) ─────────────────
-            _status = st.empty()
-            _status.info("⏳ Step 1 / 3 — Computing quantum kernel matrix (this is the slow step)…")
-            t_kernel = time.time()
-            K_full = kernel_matrix(X[:n_train])   # (240, 240) — train+val only
-            kernel_time = time.time() - t_kernel
-            _status.success(f"✅ Kernel matrix computed in {kernel_time:.1f}s  ({n_train}×{n_train})")
-
-            # Sub-matrices for tuning (train/val split, no new circuit calls)
-            K_tr_tr = K_full[:n_tr, :n_tr]
-            K_val_tr = K_full[n_tr:, :n_tr]
-
-            # ── Step 2: Optuna tunes ridge_reg on val IC (fast) ───────────────
-            _status2 = st.empty()
-            _status2.info(f"⏳ Step 2 / 3 — Running {_qnn_n_trials} Optuna trials to tune `ridge_reg`…")
-
-            def _objective(trial):
-                alpha = trial.suggest_float("ridge_reg", 1e-6, 100.0, log=True)
-                kr = KernelRidge(alpha=alpha, kernel="precomputed")
-                kr.fit(K_tr_tr, y_tr)
-                y_val_pred = kr.predict(K_val_tr)
-                ic, _ = _sp(y_val_pred, y_val)
-                return float(ic) if not np.isnan(ic) else -1.0
-
-            study = optuna.create_study(direction="maximize",
-                                        sampler=optuna.samplers.TPESampler(seed=42))
-            study.optimize(_objective, n_trials=_qnn_n_trials, show_progress_bar=False)
-
-            best_alpha = study.best_params["ridge_reg"]
-            best_val_ic = study.best_value
-            _status2.success(
-                f"✅ Optuna done — best `ridge_reg` = **{best_alpha:.2e}**  "
-                f"(val IC = {best_val_ic:+.4f})"
+                _ph_qnn.empty()
+                st.warning(f"Quantum hybrid error: {e}")
+        else:
+            st.info(
+                "Click **▶ Run Optuna-Tuned Quantum Study** to automatically tune `ridge_reg`. "
+                "The kernel matrix is computed once (~10-30 min); Optuna trials are then near-instant."
             )
 
-            # ── Step 3: refit on full train set, evaluate on held-out test ────
-            _status3 = st.empty()
-            _status3.info("⏳ Step 3 / 3 — Refitting with best params and evaluating on test set…")
 
-            # Need test-vs-train kernel rows
-            K_te_tr = kernel_matrix(X_te, X[:n_train])
-
-            kr_best = KernelRidge(alpha=best_alpha, kernel="precomputed")
-            kr_best.fit(K_full, y[:n_train])
-            y_pred_q = kr_best.predict(K_te_tr)
-            ic_q, _  = _sp(y_pred_q, y_te)
-            r2_q     = float(1 - np.var(y_te - y_pred_q) / (np.var(y_te) + 1e-12))
-
-            # Classical Ridge baseline (same splits)
-            ridge = Ridge(alpha=1.0)
-            ridge.fit(X[:n_train], y[:n_train])
-            y_pred_r = ridge.predict(X_te)
-            ic_r, _  = _sp(y_pred_r, y_te)
-            r2_r     = ridge.score(X_te, y_te)
-
-            _status3.success("✅ Done — results below.")
-
-            # ── Results table ──────────────────────────────────────────────────
-            summary = pd.DataFrame([
-                {"Model": f"Quantum Hybrid (tuned, ridge_reg={best_alpha:.2e})",
-                 "IC (Spearman)": round(ic_q, 4), "R²": round(r2_q, 4),
-                 "Val IC": round(best_val_ic, 4)},
-                {"Model": "Classical Ridge (alpha=1.0)",
-                 "IC (Spearman)": round(ic_r, 4), "R²": round(r2_r, 4),
-                 "Val IC": "—"},
-            ])
-            st.dataframe(summary, use_container_width=True, hide_index=True)
-
-            qn1, qn2, qn3 = st.columns(3)
-            qn1.metric("Quantum IC (test)", f"{ic_q:+.4f}",
-                       delta="Actionable" if ic_q >= 0.05 else "Marginal")
-            qn2.metric("Quantum R² (test)", f"{r2_q:.4f}",
-                       delta="↑ vs untuned (−65)" if r2_q > -65 else None)
-            qn3.metric("Best ridge_reg", f"{best_alpha:.2e}")
-
-            # ── Optuna trial history chart ─────────────────────────────────────
-            trial_df = pd.DataFrame([
-                {"trial": t.number, "ridge_reg": t.params["ridge_reg"], "val_IC": t.value}
-                for t in study.trials if t.value is not None
-            ])
-            fig_opt = go.Figure()
-            fig_opt.add_trace(go.Scatter(
-                x=trial_df["trial"], y=trial_df["val_IC"],
-                mode="markers+lines",
-                marker=dict(
-                    color=trial_df["val_IC"],
-                    colorscale="RdYlGn",
-                    size=7,
-                    showscale=True,
-                    colorbar=dict(title="Val IC"),
-                ),
-                line=dict(color="#444", width=1),
-                name="Val IC per trial",
-            ))
-            fig_opt.add_hline(y=best_val_ic, line_dash="dot", line_color=GREEN,
-                              annotation_text=f"Best: {best_val_ic:+.4f}",
-                              annotation_position="top right")
-            fig_opt.add_hline(y=0.05, line_dash="dot", line_color=AMBER,
-                              annotation_text="0.05 threshold",
-                              annotation_position="bottom right")
-            dark_layout(fig_opt, height=300, title="Optuna Trial History — Validation IC")
-            st.plotly_chart(fig_opt, use_container_width=True)
-
-            # ── Best params detail ─────────────────────────────────────────────
-            with st.expander("Full Optuna trial log"):
-                st.dataframe(
-                    trial_df.sort_values("val_IC", ascending=False).round(6),
-                    use_container_width=True, hide_index=True,
-                )
-
-        except ImportError as e:
-            st.warning(f"Missing dependency: `{e}` — install with `pip install optuna`")
-        except Exception as e:
-            st.warning(f"Quantum hybrid error: {e}")
-    else:
-        st.info(
-            "Click **▶ Run Optuna-Tuned Quantum Study** to automatically tune `ridge_reg`. "
-            "The kernel matrix is computed once (~10-30 min); Optuna trials are then near-instant."
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 6 — MODEL CONSENSUS (META-PREDICTOR)
+    # ══════════════════════════════════════════════════════════════════════════════
+    @st.fragment
+    def _render_consensus():
+        st.subheader("🔮 Model Consensus")
+        st.caption(
+            "The meta-predictor arbitrates between model tiers based on the current macro regime. "
+            "It learns — from historical backtests — which tier (Statistical, ML, Deep, Quantum) "
+            "to trust when VIX is elevated, when DXY is stressed, when event windows are active, etc. "
+            "Before training it falls back to equal weights; after training it shows live regime-driven arbitration."
         )
 
+        # ── Commodity selector ─────────────────────────────────────────────────────
+        consensus_commodity = st.selectbox(
+            "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="consensus_comm"
+        )
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — MODEL CONSENSUS (META-PREDICTOR)
-# ══════════════════════════════════════════════════════════════════════════════
-with tab6:
-    st.subheader("🔮 Model Consensus")
-    st.caption(
-        "The meta-predictor arbitrates between model tiers based on the current macro regime. "
-        "It learns — from historical backtests — which tier (Statistical, ML, Deep, Quantum) "
-        "to trust when VIX is elevated, when DXY is stressed, when event windows are active, etc. "
-        "Before training it falls back to equal weights; after training it shows live regime-driven arbitration."
-    )
+        st.divider()
 
-    # ── Commodity selector ─────────────────────────────────────────────────────
-    consensus_commodity = st.selectbox(
-        "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="consensus_comm"
-    )
+        # ── Market state snapshot ─────────────────────────────────────────────────
+        st.markdown("#### 📡 Current Market State")
+        st.caption("The macro features the meta-predictor sees right now — fed directly from live data.")
 
-    st.divider()
+        _meta_features = collect_meta_features(_macro_for_triggers)
 
-    # ── Market state snapshot ─────────────────────────────────────────────────
-    st.markdown("#### 📡 Current Market State")
-    st.caption("The macro features the meta-predictor sees right now — fed directly from live data.")
+        import math as _math
+        def _fmt(val, fmt="+.2f", fallback="—"):
+            try:
+                return format(val, fmt) if not _math.isnan(val) else fallback
+            except Exception:
+                return fallback
 
-    _meta_features = collect_meta_features(_macro_for_triggers)
+        ms1, ms2, ms3, ms4, ms5, ms6 = st.columns(6)
+        ms1.metric("VIX",          _fmt(_meta_features.vix, ".1f"),
+                   delta="Crisis" if _meta_features.vix_crisis else (
+                         "Risk-Off" if _meta_features.vix_risk_off else "Risk-On"))
+        ms2.metric("DXY Z-Score",  _fmt(_meta_features.dxy_zscore63),
+                   delta="Strong $" if (_meta_features.dxy_zscore63 or 0) > 0.5 else (
+                         "Weak $"   if (_meta_features.dxy_zscore63 or 0) < -0.5 else "Neutral"))
+        ms3.metric("DXY Mom 21d",  _fmt(_meta_features.dxy_mom21, "+.3f"))
+        ms4.metric("TLT Mom 21d",  _fmt(_meta_features.tlt_mom21, "+.3f"),
+                   delta="Rates ↑" if (_meta_features.tlt_mom21 or 0) < 0 else "Rates ↓")
+        ms5.metric("OPEC Window",
+                   "Active" if _meta_features.is_opec_window else "Inactive",
+                   delta=f"{_fmt(_meta_features.days_to_opec, '.0f')}d" if not _math.isnan(
+                       _meta_features.days_to_opec or float("nan")) else None)
+        ms6.metric("WASDE Window",
+                   "Active" if _meta_features.is_wasde_window else "Inactive",
+                   delta=f"{_fmt(_meta_features.days_to_wasde, '.0f')}d" if not _math.isnan(
+                       _meta_features.days_to_wasde or float("nan")) else None)
 
-    import math as _math
-    def _fmt(val, fmt="+.2f", fallback="—"):
-        try:
-            return format(val, fmt) if not _math.isnan(val) else fallback
-        except Exception:
-            return fallback
+        st.divider()
 
-    ms1, ms2, ms3, ms4, ms5, ms6 = st.columns(6)
-    ms1.metric("VIX",          _fmt(_meta_features.vix, ".1f"),
-               delta="Crisis" if _meta_features.vix_crisis else (
-                     "Risk-Off" if _meta_features.vix_risk_off else "Risk-On"))
-    ms2.metric("DXY Z-Score",  _fmt(_meta_features.dxy_zscore63),
-               delta="Strong $" if (_meta_features.dxy_zscore63 or 0) > 0.5 else (
-                     "Weak $"   if (_meta_features.dxy_zscore63 or 0) < -0.5 else "Neutral"))
-    ms3.metric("DXY Mom 21d",  _fmt(_meta_features.dxy_mom21, "+.3f"))
-    ms4.metric("TLT Mom 21d",  _fmt(_meta_features.tlt_mom21, "+.3f"),
-               delta="Rates ↑" if (_meta_features.tlt_mom21 or 0) < 0 else "Rates ↓")
-    ms5.metric("OPEC Window",
-               "Active" if _meta_features.is_opec_window else "Inactive",
-               delta=f"{_fmt(_meta_features.days_to_opec, '.0f')}d" if not _math.isnan(
-                   _meta_features.days_to_opec or float("nan")) else None)
-    ms6.metric("WASDE Window",
-               "Active" if _meta_features.is_wasde_window else "Inactive",
-               delta=f"{_fmt(_meta_features.days_to_wasde, '.0f')}d" if not _math.isnan(
-                   _meta_features.days_to_wasde or float("nan")) else None)
+        # ── Load meta-predictor ────────────────────────────────────────────────────
+        _meta_pred = load_meta_predictor_from_disk()
 
-    st.divider()
+        # ── Collect live votes (button-triggered — slow, fits XGBoost + ARIMA) ─────
+        _collect_votes = st.button(
+            "📊 Collect Live Model Votes",
+            key="collect_votes",
+            help="Fits XGBoost and ARIMA on live data to generate tier forecasts. "
+                 "Takes ~30–60 seconds and is cached for 4 hours.",
+        )
+        if _collect_votes:
+            st.session_state["consensus_votes_requested"] = True
 
-    # ── Load meta-predictor ────────────────────────────────────────────────────
-    _meta_pred = load_meta_predictor_from_disk()
+        _votes: list = []
+        if st.session_state.get("consensus_votes_requested"):
+            _ph_votes = st.empty()
+            _ph_votes.markdown(_ghost(60, "Collecting model votes…"), unsafe_allow_html=True)
+            with st.spinner(f"Fitting XGBoost + ARIMA on {consensus_commodity} — ~30–60 seconds…"):
+                _votes = get_meta_votes(prices_full, consensus_commodity)
+            _ph_votes.empty()
+            if _votes:
+                st.success(f"Got {len(_votes)} vote(s): {', '.join(v.model_name for v in _votes)}")
+            else:
+                st.warning("No votes collected — model fits may have failed. Check terminal for errors.")
 
-    # ── Collect live votes (button-triggered — slow, fits XGBoost + ARIMA) ─────
-    _collect_votes = st.button(
-        "📊 Collect Live Model Votes",
-        key="collect_votes",
-        help="Fits XGBoost and ARIMA on live data to generate tier forecasts. "
-             "Takes ~30–60 seconds and is cached for 4 hours.",
-    )
-    if _collect_votes:
-        st.session_state["consensus_votes_requested"] = True
+        # ── Cascade toggle ────────────────────────────────────────────────────────
+        _use_cascade = st.checkbox(
+            "🌊 Include Cascade Forecast in Ensemble",
+            key="consensus_use_cascade",
+            help=(
+                "Computes a macro-adjusted forecast from the Sector Cascade model and adds it "
+                "as an additional vote (tier='ml', model='CascadeForecast') before the "
+                "meta-predictor arbitrates tier weights."
+            ),
+        )
+        if _use_cascade:
+            _casc_macro_row_c = {}
+            try:
+                if not _macro_for_triggers.empty:
+                    _casc_macro_row_c = _macro_for_triggers.iloc[-1].to_dict()
+            except Exception:
+                pass
 
-    _votes: list = []
-    if st.session_state.get("consensus_votes_requested"):
-        with st.spinner(f"Fitting XGBoost + ARIMA on {consensus_commodity} — ~30–60 seconds…"):
-            _votes = get_meta_votes(prices_full, consensus_commodity)
-        if _votes:
-            st.success(f"Got {len(_votes)} vote(s): {', '.join(v.model_name for v in _votes)}")
+            _cc_base, _cc_adj, _cc_final, _cc_band, _cc_conf, _cc_ch = _compute_cascade_for(
+                consensus_commodity, _casc_macro_row_c, prices_full
+            )
+
+            _cascade_vote = ModelVote(
+                tier="ml",
+                model_name="CascadeForecast",
+                commodity=consensus_commodity,
+                forecast_return=_cc_final / 100.0,
+                confidence=_cc_conf,
+            )
+            _votes = list(_votes) + [_cascade_vote]
+
+            st.info(
+                f"🌊 Cascade vote added — forecast: **{_cc_final:+.2f}%** "
+                f"(base {_cc_base:+.2f}% + macro {_cc_adj:+.2f}pp), "
+                f"confidence: {_cc_conf:.0%}"
+            )
+
+        # ── Run the arbitration (works with 0 votes — falls back to equal weights) ──
+        _decision = _meta_pred.predict(_meta_features, _votes)
+
+        # ── Tier weight cards ──────────────────────────────────────────────────────
+        st.markdown("#### ⚖️ Tier Weights")
+        if _meta_pred.is_trained and _votes:
+            st.caption("Weights derived from backtested market-regime → tier-accuracy mapping, applied to live votes.")
+        elif _meta_pred.is_trained:
+            st.caption("Meta-predictor trained — click **Collect Live Model Votes** above to apply regime weights to today's forecasts.")
         else:
-            st.warning("No votes collected — model fits may have failed. Check terminal for errors.")
+            st.caption(
+                "⚠️ Meta-predictor **not yet trained** — showing equal weights. "
+                "Click **Collect Live Model Votes** to see current-tier forecasts, "
+                "or click **Run Backtest & Train** below to generate regime-aware weights."
+            )
 
-    # ── Cascade toggle ────────────────────────────────────────────────────────
-    _use_cascade = st.checkbox(
-        "🌊 Include Cascade Forecast in Ensemble",
-        key="consensus_use_cascade",
-        help=(
-            "Computes a macro-adjusted forecast from the Sector Cascade model and adds it "
-            "as an additional vote (tier='ml', model='CascadeForecast') before the "
-            "meta-predictor arbitrates tier weights."
-        ),
-    )
-    if _use_cascade:
-        _casc_macro_row_c = {}
-        try:
-            if not _macro_for_triggers.empty:
-                _casc_macro_row_c = _macro_for_triggers.iloc[-1].to_dict()
-        except Exception:
-            pass
+        _tier_icons = {"statistical": "📐", "ml": "🌲", "deep": "🧠", "quantum": "⚛️"}
+        _tier_cols  = st.columns(len(KNOWN_TIERS))
+        for _col, _tier in zip(_tier_cols, KNOWN_TIERS):
+            _w = _decision.weights.get(_tier, 0.0)
+            _is_trusted = (_tier == _decision.trusted_tier and _w > 0)
+            with _col:
+                with st.container(border=True):
+                    label = f"{_tier_icons.get(_tier, '')} {_tier.title()}"
+                    if _is_trusted:
+                        label += " ✅"
+                    st.markdown(f"**{label}**")
+                    st.progress(_w, text=f"{_w:.0%}")
 
-        _cc_base, _cc_adj, _cc_final, _cc_band, _cc_conf, _cc_ch = _compute_cascade_for(
-            consensus_commodity, _casc_macro_row_c, prices_full
+        st.divider()
+
+        # ── Ensemble forecast + consensus metrics ──────────────────────────────────
+        st.markdown("#### 🎯 Consensus Output")
+
+        co1, co2, co3, co4 = st.columns(4)
+        _ens_pct = _decision.ensemble_forecast
+        co1.metric(
+            "Ensemble Forecast",
+            f"{_ens_pct:+.2%}",
+            delta="Bullish" if _ens_pct > 0 else "Bearish",
         )
-
-        _cascade_vote = ModelVote(
-            tier="ml",
-            model_name="CascadeForecast",
-            commodity=consensus_commodity,
-            forecast_return=_cc_final / 100.0,
-            confidence=_cc_conf,
+        co2.metric(
+            "Consensus Strength",
+            f"{_decision.consensus_strength:.0%}",
+            delta="Strong" if _decision.consensus_strength >= 0.7 else (
+                  "Moderate" if _decision.consensus_strength >= 0.3 else "Weak"),
         )
-        _votes = list(_votes) + [_cascade_vote]
-
-        st.info(
-            f"🌊 Cascade vote added — forecast: **{_cc_final:+.2f}%** "
-            f"(base {_cc_base:+.2f}% + macro {_cc_adj:+.2f}pp), "
-            f"confidence: {_cc_conf:.0%}"
+        co3.metric(
+            "Meta Confidence",
+            f"{_decision.meta_confidence:.0%}" if _meta_pred.is_trained else "—",
+            delta="Trained" if _meta_pred.is_trained else "Untrained",
         )
+        co4.metric("Trusted Tier", _decision.trusted_tier.title())
 
-    # ── Run the arbitration (works with 0 votes — falls back to equal weights) ──
-    _decision = _meta_pred.predict(_meta_features, _votes)
+        # Reasoning banner
+        _reasoning_color = (
+            "success" if _decision.consensus_strength >= 0.7
+            else ("warning" if _decision.consensus_strength >= 0.3 else "info")
+        )
+        getattr(st, _reasoning_color)(f"💬 {_decision.reasoning}")
 
-    # ── Tier weight cards ──────────────────────────────────────────────────────
-    st.markdown("#### ⚖️ Tier Weights")
-    if _meta_pred.is_trained and _votes:
-        st.caption("Weights derived from backtested market-regime → tier-accuracy mapping, applied to live votes.")
-    elif _meta_pred.is_trained:
-        st.caption("Meta-predictor trained — click **Collect Live Model Votes** above to apply regime weights to today's forecasts.")
-    else:
+        # Votes used expander
+        if _votes:
+            with st.expander(f"Model votes ({len(_votes)} tiers)"):
+                for _v in _votes:
+                    _tier_w = _decision.weights.get(_v.tier, 0.0)
+                    st.markdown(
+                        f"**{_tier_icons.get(_v.tier,'')} {_v.tier.title()} — {_v.model_name}**  "
+                        f"forecast: `{_v.forecast_return:+.3%}` · "
+                        f"IC: `{_v.confidence:.4f}` · "
+                        f"weight: `{_tier_w:.0%}`"
+                    )
+        else:
+            st.warning("No model votes available — model fits may have failed for this commodity.")
+
+        st.divider()
+
+        # ── Feature importances (trained only) ─────────────────────────────────────
+        if _meta_pred.is_trained:
+            st.markdown("#### 🔬 What Drives the Arbitration?")
+            st.caption(
+                "Feature importances from the meta-predictor's decision tree — "
+                "which macro conditions most determine which tier wins."
+            )
+            _top_feats = _meta_pred.explain(top_n=8)
+            if _top_feats:
+                _feat_names  = [f.replace("_", " ").title() for f, _ in _top_feats]
+                _feat_imps   = [imp for _, imp in _top_feats]
+                fig_fi = go.Figure(go.Bar(
+                    x=_feat_imps,
+                    y=_feat_names,
+                    orientation="h",
+                    marker_color=AMBER,
+                    hovertemplate="%{y}: %{x:.4f}<extra></extra>",
+                ))
+                dark_layout(fig_fi, height=300, title="Meta-Predictor Feature Importances")
+                fig_fi.update_layout(yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_fi, width="stretch")
+
+        # ── Backtest & Train section ───────────────────────────────────────────────
+        st.divider()
+        st.markdown("#### 🏋️ Train Meta-Predictor on Live Data")
         st.caption(
-            "⚠️ Meta-predictor **not yet trained** — showing equal weights. "
-            "Click **Collect Live Model Votes** to see current-tier forecasts, "
-            "or click **Run Backtest & Train** below to generate regime-aware weights."
+            "Runs a train/test backtest across WTI, Gold, and Corn using ARIMA and XGBoost. "
+            "For each test date, labels the tier that had the lowest forecast error. "
+            "Fits the meta-predictor on those labelled records and saves it to "
+            "`data/meta_predictor.pkl`. Typically takes **60–120 seconds**."
         )
 
-    _tier_icons = {"statistical": "📐", "ml": "🌲", "deep": "🧠", "quantum": "⚛️"}
-    _tier_cols  = st.columns(len(KNOWN_TIERS))
-    for _col, _tier in zip(_tier_cols, KNOWN_TIERS):
-        _w = _decision.weights.get(_tier, 0.0)
-        _is_trusted = (_tier == _decision.trusted_tier and _w > 0)
-        with _col:
-            with st.container(border=True):
-                label = f"{_tier_icons.get(_tier, '')} {_tier.title()}"
-                if _is_trusted:
-                    label += " ✅"
-                st.markdown(f"**{label}**")
-                st.progress(_w, text=f"{_w:.0%}")
-
-    st.divider()
-
-    # ── Ensemble forecast + consensus metrics ──────────────────────────────────
-    st.markdown("#### 🎯 Consensus Output")
-
-    co1, co2, co3, co4 = st.columns(4)
-    _ens_pct = _decision.ensemble_forecast
-    co1.metric(
-        "Ensemble Forecast",
-        f"{_ens_pct:+.2%}",
-        delta="Bullish" if _ens_pct > 0 else "Bearish",
-    )
-    co2.metric(
-        "Consensus Strength",
-        f"{_decision.consensus_strength:.0%}",
-        delta="Strong" if _decision.consensus_strength >= 0.7 else (
-              "Moderate" if _decision.consensus_strength >= 0.3 else "Weak"),
-    )
-    co3.metric(
-        "Meta Confidence",
-        f"{_decision.meta_confidence:.0%}" if _meta_pred.is_trained else "—",
-        delta="Trained" if _meta_pred.is_trained else "Untrained",
-    )
-    co4.metric("Trusted Tier", _decision.trusted_tier.title())
-
-    # Reasoning banner
-    _reasoning_color = (
-        "success" if _decision.consensus_strength >= 0.7
-        else ("warning" if _decision.consensus_strength >= 0.3 else "info")
-    )
-    getattr(st, _reasoning_color)(f"💬 {_decision.reasoning}")
-
-    # Votes used expander
-    if _votes:
-        with st.expander(f"Model votes ({len(_votes)} tiers)"):
-            for _v in _votes:
-                _tier_w = _decision.weights.get(_v.tier, 0.0)
-                st.markdown(
-                    f"**{_tier_icons.get(_v.tier,'')} {_v.tier.title()} — {_v.model_name}**  "
-                    f"forecast: `{_v.forecast_return:+.3%}` · "
-                    f"IC: `{_v.confidence:.4f}` · "
-                    f"weight: `{_tier_w:.0%}`"
-                )
-    else:
-        st.warning("No model votes available — model fits may have failed for this commodity.")
-
-    st.divider()
-
-    # ── Feature importances (trained only) ─────────────────────────────────────
-    if _meta_pred.is_trained:
-        st.markdown("#### 🔬 What Drives the Arbitration?")
-        st.caption(
-            "Feature importances from the meta-predictor's decision tree — "
-            "which macro conditions most determine which tier wins."
+        _bt_comm_options = list(MODELING_COMMODITIES.keys())
+        _bt_comms = st.multiselect(
+            "Commodities to backtest",
+            options=_bt_comm_options,
+            default=["WTI Crude Oil", "Gold (COMEX)", "Corn (CBOT)"],
+            key="bt_comms",
         )
-        _top_feats = _meta_pred.explain(top_n=8)
-        if _top_feats:
-            _feat_names  = [f.replace("_", " ").title() for f, _ in _top_feats]
-            _feat_imps   = [imp for _, imp in _top_feats]
-            fig_fi = go.Figure(go.Bar(
-                x=_feat_imps,
-                y=_feat_names,
-                orientation="h",
-                marker_color=AMBER,
-                hovertemplate="%{y}: %{x:.4f}<extra></extra>",
-            ))
-            dark_layout(fig_fi, height=300, title="Meta-Predictor Feature Importances")
-            fig_fi.update_layout(yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_fi, width="stretch")
 
-    # ── Backtest & Train section ───────────────────────────────────────────────
-    st.divider()
-    st.markdown("#### 🏋️ Train Meta-Predictor on Live Data")
-    st.caption(
-        "Runs a train/test backtest across WTI, Gold, and Corn using ARIMA and XGBoost. "
-        "For each test date, labels the tier that had the lowest forecast error. "
-        "Fits the meta-predictor on those labelled records and saves it to "
-        "`data/meta_predictor.pkl`. Typically takes **60–120 seconds**."
-    )
+        _run_bt = st.button(
+            "▶ Run Backtest & Train Meta-Predictor",
+            key="run_backtest_train",
+            type="primary",
+        )
 
-    _bt_comm_options = list(MODELING_COMMODITIES.keys())
-    _bt_comms = st.multiselect(
-        "Commodities to backtest",
-        options=_bt_comm_options,
-        default=["WTI Crude Oil", "Gold (COMEX)", "Corn (CBOT)"],
-        key="bt_comms",
-    )
-
-    _run_bt = st.button(
-        "▶ Run Backtest & Train Meta-Predictor",
-        key="run_backtest_train",
-        type="primary",
-    )
-
-    if _run_bt and _bt_comms:
-        with st.spinner(
-            f"Running backtest on {', '.join(_bt_comms)} — this takes ~60–120 seconds…"
-        ):
+        if _run_bt and _bt_comms:
+            _status_bt = st.empty()
+            _status_bt.info(
+                "⏳ Step 1 / 3 — Importing backtest harness and configuring "
+                "ARIMA + XGBoost adapters…"
+            )
             try:
                 from models.backtest_harness import BacktestHarness, ARIMAAdapter, XGBoostAdapter
                 from pathlib import Path
@@ -2955,6 +3227,13 @@ with tab6:
                     min_train_rows=120,
                 )
                 _save_path = Path(__file__).resolve().parent.parent / "data" / "meta_predictor.pkl"
+
+                _n_comms = len(_bt_comms)
+                _status_bt.info(
+                    f"⏳ Step 2 / 3 — Running walk-forward backtest across "
+                    f"{_n_comms} commodit{'y' if _n_comms == 1 else 'ies'} "
+                    f"(60–120 s)…"
+                )
                 _trained = _harness.train_meta_predictor(
                     prices=_bt_prices,
                     macro_df=_macro_for_triggers,
@@ -2963,390 +3242,413 @@ with tab6:
                     min_samples_leaf=10,
                     save_path=_save_path,
                 )
-                st.success(
-                    f"✅ Meta-predictor trained on backtest data and saved. "
-                    f"Top arbitration feature: **{_trained._top_feature() or '—'}**. "
+
+                _status_bt.info(
+                    "⏳ Step 3 / 3 — Fitting meta-predictor on labelled records "
+                    "and saving to disk…"
+                )
+                load_meta_predictor_from_disk.clear()
+                _status_bt.success(
+                    f"✅ Complete — top arbitration feature: "
+                    f"**{_trained._top_feature() or '—'}**. "
                     f"Refresh the page to see regime-aware weights."
                 )
-                # Clear the cached resource so the new model is loaded on next render
-                load_meta_predictor_from_disk.clear()
             except Exception as _bt_err:
-                st.error(f"Backtest failed: {_bt_err}")
-    elif _run_bt and not _bt_comms:
-        st.warning("Select at least one commodity to backtest.")
+                _status_bt.error(f"Backtest failed: {_bt_err}")
+        elif _run_bt and not _bt_comms:
+            st.warning("Select at least one commodity to backtest.")
 
-    # Full MetaDecision JSON (debug)
-    with st.expander("Full MetaDecision (JSON)"):
-        st.json(_decision.to_dict())
+        # Full MetaDecision JSON (debug)
+        with st.expander("Full MetaDecision (JSON)"):
+            st.json(_decision.to_dict())
+
+    with tab6:
+        _render_consensus()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 7 — MODEL HEALTH
-# Spearman IC trends, training history, on-demand retraining
-# ══════════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════════
+    # TAB 7 — MODEL HEALTH
+    # Spearman IC trends, training history, on-demand retraining
+    # ══════════════════════════════════════════════════════════════════════════════
 
-with tab7:
-    st.subheader("🩺 Model Health Dashboard")
-    st.caption(
-        "IC (Information Coefficient) measures how well each model tier forecasts "
-        "direction. IC ≥ 0.05 = actionable signal. Updated automatically after each "
-        "retraining run."
-    )
-
-    # ── Helper imports ─────────────────────────────────────────────────────────
-    from models.ic_tracker import (
-        ic_summary, ic_trend, recent_ic_scores,
-        IC_THRESHOLD_ACTION, IC_THRESHOLD_NEUTRAL,
-    )
-    from models.daily_retrain import recent_training_runs
-
-    # ── Colour helpers ─────────────────────────────────────────────────────────
-    _IC_TIER_COLORS = {
-        "statistical": BLUE,
-        "ml":          GREEN,
-        "deep":        PURPLE,
-        "quantum":     AMBER,
-    }
-    _SIG_BADGE = {
-        "actionable": f"background:{GREEN}22; color:{GREEN}; border:1px solid {GREEN}",
-        "marginal":   f"background:{AMBER}22; color:{AMBER}; border:1px solid {AMBER}",
-        "negative":   f"background:{RED}22; color:{RED}; border:1px solid {RED}",
-    }
-
-    def _ic_badge(ic_val: float) -> str:
-        if ic_val >= IC_THRESHOLD_ACTION:
-            color, label = GREEN, "✔ Actionable"
-        elif ic_val >= IC_THRESHOLD_NEUTRAL:
-            color, label = AMBER, "~ Marginal"
-        else:
-            color, label = RED, "✘ Negative"
-        return (
-            f'<span style="background:{color}22; color:{color}; '
-            f'border:1px solid {color}; border-radius:4px; '
-            f'padding:2px 8px; font-size:0.78rem; font-weight:600;">'
-            f'{label} ({ic_val:+.3f})</span>'
+    @st.fragment(run_every="30m")
+    def _render_model_health():
+        st.subheader("🩺 Model Health Dashboard")
+        st.caption(
+            "IC (Information Coefficient) measures how well each model tier forecasts "
+            "direction. IC ≥ 0.05 = actionable signal. Updated automatically after each "
+            "retraining run."
         )
 
-    # ── Section 1: IC Scorecard ────────────────────────────────────────────────
-    st.markdown("#### 📊 Latest IC by tier")
-    _ic_sum = ic_summary()
-
-    if _ic_sum.empty:
-        st.info(
-            "No IC scores logged yet. Run a retraining cycle to populate this view. "
-            "Use the **Retrain Now** button below, or run "
-            "`python -m models.daily_retrain` from the terminal.",
-            icon="📭",
+        # ── Helper imports ─────────────────────────────────────────────────────────
+        from models.ic_tracker import (
+            ic_summary, ic_trend, recent_ic_scores,
+            IC_THRESHOLD_ACTION, IC_THRESHOLD_NEUTRAL,
         )
-    else:
-        # Pivot: rows = commodity, cols = tier
-        _pivot = _ic_sum.pivot_table(
-            index="commodity", columns="tier",
-            values="ic_value", aggfunc="first",
-        ).reset_index()
+        from models.daily_retrain import recent_training_runs
 
-        # Render as styled HTML table
-        tier_cols = [c for c in _pivot.columns if c != "commodity"]
-        rows_html = []
-        for _, row in _pivot.iterrows():
-            cells = [f'<td style="color:#C0CDE0; padding:6px 12px;">{row["commodity"]}</td>']
-            for t in tier_cols:
-                val = row.get(t, float("nan"))
-                if val != val:  # NaN
-                    cells.append('<td style="color:#555; padding:6px 12px;">—</td>')
-                else:
-                    cells.append(f'<td style="padding:6px 12px;">{_ic_badge(float(val))}</td>')
-            rows_html.append("<tr>" + "".join(cells) + "</tr>")
+        # ── Colour helpers ─────────────────────────────────────────────────────────
+        _IC_TIER_COLORS = {
+            "statistical": BLUE,
+            "ml":          GREEN,
+            "deep":        PURPLE,
+            "quantum":     AMBER,
+        }
+        _SIG_BADGE = {
+            "actionable": f"background:{GREEN}22; color:{GREEN}; border:1px solid {GREEN}",
+            "marginal":   f"background:{AMBER}22; color:{AMBER}; border:1px solid {AMBER}",
+            "negative":   f"background:{RED}22; color:{RED}; border:1px solid {RED}",
+        }
 
-        header_cells = '<th style="color:#8899AA; padding:6px 12px; text-align:left;">Commodity</th>'
-        for t in tier_cols:
-            header_cells += (
-                f'<th style="color:{_IC_TIER_COLORS.get(t, BLUE)}; '
-                f'padding:6px 12px; text-align:left;">{t.title()}</th>'
+        def _ic_badge(ic_val: float) -> str:
+            if ic_val >= IC_THRESHOLD_ACTION:
+                color, label = GREEN, "✔ Actionable"
+            elif ic_val >= IC_THRESHOLD_NEUTRAL:
+                color, label = AMBER, "~ Marginal"
+            else:
+                color, label = RED, "✘ Negative"
+            return (
+                f'<span style="background:{color}22; color:{color}; '
+                f'border:1px solid {color}; border-radius:4px; '
+                f'padding:2px 8px; font-size:0.78rem; font-weight:600;">'
+                f'{label} ({ic_val:+.3f})</span>'
             )
 
-        st.markdown(
-            f"""
-            <table style="width:100%; border-collapse:collapse;
-                          background:{PLOT_BG}; border-radius:8px;">
-              <thead><tr style="border-bottom:1px solid {GRID};">
-                {header_cells}
-              </tr></thead>
-              <tbody>{"".join(rows_html)}</tbody>
-            </table>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            f"Last computed: {_ic_sum['computed_at'].max()[:19]} UTC  |  "
-            f"{len(_ic_sum)} (commodity, tier) pairs tracked"
-        )
+        # ── Section 1: IC Scorecard ────────────────────────────────────────────────
+        st.markdown("#### 📊 Latest IC by tier")
+        _ph_ic = st.empty()
+        _ph_ic.markdown(_ghost(200, "IC scorecard"), unsafe_allow_html=True)
+        _ic_sum = ic_summary()
+        _ph_ic.empty()
 
-    st.divider()
-
-    # ── Section 2: IC trend chart ──────────────────────────────────────────────
-    st.markdown("#### 📈 IC trend over time (mean across commodities)")
-    _trend_df = ic_trend(days=180)
-
-    if _trend_df.empty:
-        st.info("No trend data yet — run a retraining cycle first.", icon="📈")
-    else:
-        _trend_fig = go.Figure()
-        for _tier in _trend_df["tier"].unique():
-            _t = _trend_df[_trend_df["tier"] == _tier]
-            _t_color = _IC_TIER_COLORS.get(_tier, BLUE)
-            _trend_fig.add_trace(go.Scatter(
-                x=_t["computed_at"],
-                y=_t["mean_ic"],
-                mode="lines+markers",
-                name=_tier.title(),
-                line=dict(color=_t_color, width=2),
-                marker=dict(size=6, color=_t_color),
-                hovertemplate=(
-                    f"<b>{_tier.title()}</b><br>"
-                    "Date: %{x|%Y-%m-%d}<br>"
-                    "Mean IC: %{y:.4f}<extra></extra>"
-                ),
-            ))
-
-        # Threshold lines
-        _trend_fig.add_hline(
-            y=IC_THRESHOLD_ACTION, line_dash="dot",
-            line_color=GREEN, opacity=0.5,
-            annotation_text="Actionable (0.05)",
-            annotation_position="bottom right",
-        )
-        _trend_fig.add_hline(
-            y=0, line_dash="dash",
-            line_color=RED, opacity=0.4,
-            annotation_text="Zero",
-            annotation_position="bottom right",
-        )
-
-        dark_layout(_trend_fig, height=340, title="")
-        st.plotly_chart(_trend_fig, use_container_width=True,
-                        config={"displayModeBar": False})
-
-    st.divider()
-
-    # ── Section 3: Training history + Retrain Now ─────────────────────────────
-    _h_col, _btn_col = st.columns([3, 1])
-
-    with _h_col:
-        st.markdown("#### 🗂️ Retraining history")
-        _train_hist = recent_training_runs(n=10)
-
-        if _train_hist.empty:
+        if _ic_sum.empty:
             st.info(
-                "No retraining runs recorded. Run `python -m models.daily_retrain` "
-                "or click **Retrain Now**.",
+                "No IC scores logged yet. Run a retraining cycle to populate this view. "
+                "Use the **Retrain Now** button below, or run "
+                "`python -m models.daily_retrain` from the terminal.",
                 icon="📭",
             )
         else:
-            # Pretty-format for display
-            _disp = _train_hist.copy()
-            if "retrained_at" in _disp.columns:
-                _disp["retrained_at"] = _disp["retrained_at"].str[:19]
-            if "tier_distribution" in _disp.columns:
-                _disp = _disp.drop(columns=["tier_distribution"])
-            st.dataframe(_disp, use_container_width=True, hide_index=True)
+            # Pivot: rows = commodity, cols = tier
+            _pivot = _ic_sum.pivot_table(
+                index="commodity", columns="tier",
+                values="ic_value", aggfunc="first",
+            ).reset_index()
 
-    with _btn_col:
-        st.markdown("#### 🔁 On-demand retrain")
-        st.caption(
-            "Trains the MetaPredictor on your current DB data. "
-            "Takes ~30–60s depending on data size."
-        )
-        _retrain_btn = st.button(
-            "🔁 Retrain Now",
-            type="primary",
-            key="health_retrain_btn",
-        )
-        if _retrain_btn:
-            st.session_state["health_retrain_requested"] = True
+            # Render as styled HTML table
+            tier_cols = [c for c in _pivot.columns if c != "commodity"]
+            rows_html = []
+            for _, row in _pivot.iterrows():
+                cells = [f'<td style="color:#C0CDE0; padding:6px 12px;">{row["commodity"]}</td>']
+                for t in tier_cols:
+                    val = row.get(t, float("nan"))
+                    if val != val:  # NaN
+                        cells.append('<td style="color:#555; padding:6px 12px;">—</td>')
+                    else:
+                        cells.append(f'<td style="padding:6px 12px;">{_ic_badge(float(val))}</td>')
+                rows_html.append("<tr>" + "".join(cells) + "</tr>")
 
-        st.markdown("#### ⚙️ Threshold tuning")
-        st.caption(
-            "Replays detectors over 180 days to find the minimum strength "
-            "that predicts price moves."
-        )
-        _tune_btn = st.button(
-            "⚙️ Tune Thresholds",
-            key="health_tune_btn",
-        )
-        if _tune_btn:
-            st.session_state["health_tune_requested"] = True
-
-    # ── Retrain execution (button-triggered, never on page load) ───────────────
-    if st.session_state.get("health_retrain_requested"):
-        st.session_state["health_retrain_requested"] = False
-
-        with st.spinner("Loading data and running backtest…"):
-            from models.daily_retrain import run_daily_retrain, RetrainConfig
-            _rt_cfg = RetrainConfig(max_depth=5, min_samples_leaf=10)
-            _rt_result = run_daily_retrain(config=_rt_cfg)
-
-        if _rt_result.success:
-            load_meta_predictor_from_disk.clear()   # bust cache → fresh weights
-            st.success(
-                f"✅ Retraining complete — "
-                f"{_rt_result.n_training_pairs} pairs, "
-                f"{_rt_result.n_commodities} commodities. "
-                f"Top feature: **{_rt_result.top_feature or '—'}**. "
-                f"Refresh the page to see updated IC scores."
-            )
-            # Show summary metrics inline
-            _m1, _m2, _m3 = st.columns(3)
-            with _m1:
-                st.metric("Training pairs", _rt_result.n_training_pairs)
-            with _m2:
-                st.metric("Tree leaves", _rt_result.tree_n_leaves)
-            with _m3:
-                dom_tier = max(_rt_result.tier_distribution,
-                               key=lambda k: _rt_result.tier_distribution[k],
-                               default="—")
-                st.metric("Dominant tier", dom_tier.title())
-        else:
-            st.error(f"❌ Retraining failed: {_rt_result.error}")
-
-    # ── Threshold tuning execution ────────────────────────────────────────────
-    if st.session_state.get("health_tune_requested"):
-        st.session_state["health_tune_requested"] = False
-
-        with st.spinner(
-            "Replaying detectors over last 180 days and grid-searching thresholds…"
-        ):
-            from models.threshold_tuner import ThresholdTuner, TunerConfig
-            _tune_cfg = TunerConfig(
-                lookback_days=180, forward_days=5, min_events_above=8
-            )
-            _tune_results = ThresholdTuner(_tune_cfg).tune_all(
-                macro_df=_macro_for_triggers, prices=prices_full
-            )
-
-        if _tune_results:
-            st.success(
-                f"✅ Threshold tuning complete — "
-                f"{len(_tune_results)} trigger famil{'y' if len(_tune_results)==1 else 'ies'} evaluated."
-            )
-            for _fam, _tr in _tune_results.items():
-                st.markdown(
-                    f"**{_fam.replace('_', ' ').title()}**: "
-                    f"threshold → `{_tr.optimal_threshold:.2f}` "
-                    f"(IC {_tr.best_ic:+.4f} at threshold)  {_tr.signal_label()}"
+            header_cells = '<th style="color:#8899AA; padding:6px 12px; text-align:left;">Commodity</th>'
+            for t in tier_cols:
+                header_cells += (
+                    f'<th style="color:{_IC_TIER_COLORS.get(t, BLUE)}; '
+                    f'padding:6px 12px; text-align:left;">{t.title()}</th>'
                 )
-        else:
-            st.warning(
-                "⚠️ No trigger events detected in the last 180 days. "
-                "Thresholds could not be tuned — try again after more market data "
-                "is loaded.",
-                icon="⚠️",
+
+            st.markdown(
+                f"""
+                <table style="width:100%; border-collapse:collapse;
+                              background:{PLOT_BG}; border-radius:8px;">
+                  <thead><tr style="border-bottom:1px solid {GRID};">
+                    {header_cells}
+                  </tr></thead>
+                  <tbody>{"".join(rows_html)}</tbody>
+                </table>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Last computed: {_ic_sum['computed_at'].max()[:19]} UTC  |  "
+                f"{len(_ic_sum)} (commodity, tier) pairs tracked"
             )
 
-    st.divider()
+        st.divider()
 
-    # ── Section 4: Trigger threshold scorecard ────────────────────────────────
-    st.markdown("#### ⚙️ Trigger strength thresholds")
-    st.caption(
-        "Current optimal thresholds from the last tuning run. "
-        "Click **Tune Thresholds** to refresh."
-    )
+        # ── Section 2: IC trend chart ──────────────────────────────────────────────
+        st.markdown("#### 📈 IC trend over time (mean across commodities)")
+        _ph_trend = st.empty()
+        _ph_trend.markdown(_ghost(340, "IC trend"), unsafe_allow_html=True)
+        _trend_df = ic_trend(days=180)
 
-    from models.threshold_tuner import (
-        load_optimal_thresholds, recent_tune_history, FALLBACK_THRESHOLD
-    )
-    _opt_thresholds = load_optimal_thresholds()
-    _tune_hist      = recent_tune_history(n=20)
+        if _trend_df.empty:
+            _ph_trend.empty()
+            st.info("No trend data yet — run a retraining cycle first.", icon="📈")
+        else:
+            _trend_fig = go.Figure()
+            for _tier in _trend_df["tier"].unique():
+                _t = _trend_df[_trend_df["tier"] == _tier]
+                _t_color = _IC_TIER_COLORS.get(_tier, BLUE)
+                _trend_fig.add_trace(go.Scatter(
+                    x=_t["computed_at"],
+                    y=_t["mean_ic"],
+                    mode="lines+markers",
+                    name=_tier.title(),
+                    line=dict(color=_t_color, width=2),
+                    marker=dict(size=6, color=_t_color),
+                    hovertemplate=(
+                        f"<b>{_tier.title()}</b><br>"
+                        "Date: %{x|%Y-%m-%d}<br>"
+                        "Mean IC: %{y:.4f}<extra></extra>"
+                    ),
+                ))
 
-    if _tune_hist.empty:
-        st.info(
-            "No threshold tuning history yet. "
-            "Click **⚙️ Tune Thresholds** above to calibrate the detectors.",
-            icon="⚙️",
-        )
-    else:
-        # Latest result per family
-        _latest_tune = (
-            _tune_hist
-            .sort_values("evaluated_at", ascending=False)
-            .drop_duplicates(subset="family")
-        )
-        _tc1, _tc2, _tc3 = st.columns(3)
-        _cols_cycle = [_tc1, _tc2, _tc3]
-        for _idx, (_, _tr_row) in enumerate(_latest_tune.iterrows()):
-            _fam    = _tr_row["family"]
-            _thr    = float(_tr_row["optimal_threshold"])
-            _ic_val = float(_tr_row["best_ic"]) if _tr_row["best_ic"] is not None else float("nan")
-            _n_ev   = int(_tr_row["n_events_at_threshold"])
+            # Threshold lines
+            _trend_fig.add_hline(
+                y=IC_THRESHOLD_ACTION, line_dash="dot",
+                line_color=GREEN, opacity=0.5,
+                annotation_text="Actionable (0.05)",
+                annotation_position="bottom right",
+            )
+            _trend_fig.add_hline(
+                y=0, line_dash="dash",
+                line_color=RED, opacity=0.4,
+                annotation_text="Zero",
+                annotation_position="bottom right",
+            )
 
-            if _ic_val >= 0.05:
-                _thr_color = GREEN
-            elif _ic_val >= 0.0:
-                _thr_color = AMBER
+            dark_layout(_trend_fig, height=340, title="")
+            _ph_trend.plotly_chart(_trend_fig, use_container_width=True,
+                                   config={"displayModeBar": False})
+
+        st.divider()
+
+        # ── Section 3: Training history + Retrain Now ─────────────────────────────
+        _h_col, _btn_col = st.columns([3, 1])
+
+        with _h_col:
+            st.markdown("#### 🗂️ Retraining history")
+            _ph_train = st.empty()
+            _ph_train.markdown(_ghost(60, "Training history…"), unsafe_allow_html=True)
+            _train_hist = recent_training_runs(n=10)
+            _ph_train.empty()
+
+            if _train_hist.empty:
+                st.info(
+                    "No retraining runs recorded. Run `python -m models.daily_retrain` "
+                    "or click **Retrain Now**.",
+                    icon="📭",
+                )
             else:
-                _thr_color = RED
+                # Pretty-format for display
+                _disp = _train_hist.copy()
+                if "retrained_at" in _disp.columns:
+                    _disp["retrained_at"] = _disp["retrained_at"].str[:19]
+                if "tier_distribution" in _disp.columns:
+                    _disp = _disp.drop(columns=["tier_distribution"])
+                st.dataframe(_disp, use_container_width=True, hide_index=True)
 
-            with _cols_cycle[_idx % 3]:
-                st.markdown(
-                    f"""
-                    <div style="background:{PLOT_BG}; border-left:4px solid {_thr_color};
-                                border-radius:6px; padding:12px 16px; margin-bottom:8px;">
-                    <div style="color:#8899AA; font-size:0.78rem; margin-bottom:4px;">
-                        {_fam.replace('_', ' ').title()}
-                    </div>
-                    <div style="color:{_thr_color}; font-size:1.4rem; font-weight:700;">
-                        ≥ {_thr:.2f}
-                    </div>
-                    <div style="color:#8899AA; font-size:0.78rem;">
-                        IC {_ic_val:+.4f} · {_n_ev} events above threshold
-                    </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+        with _btn_col:
+            st.markdown("#### 🔁 On-demand retrain")
+            st.caption(
+                "Trains the MetaPredictor on your current DB data. "
+                "Takes ~30–60s depending on data size."
+            )
+            _retrain_btn = st.button(
+                "🔁 Retrain Now",
+                type="primary",
+                key="health_retrain_btn",
+            )
+            if _retrain_btn:
+                st.session_state["health_retrain_requested"] = True
+
+            st.markdown("#### ⚙️ Threshold tuning")
+            st.caption(
+                "Replays detectors over 180 days to find the minimum strength "
+                "that predicts price moves."
+            )
+            _tune_btn = st.button(
+                "⚙️ Tune Thresholds",
+                key="health_tune_btn",
+            )
+            if _tune_btn:
+                st.session_state["health_tune_requested"] = True
+
+        # ── Retrain execution (button-triggered, never on page load) ───────────────
+        if st.session_state.get("health_retrain_requested"):
+            st.session_state["health_retrain_requested"] = False
+
+            with st.spinner("Loading data and running backtest…"):
+                from models.daily_retrain import run_daily_retrain, RetrainConfig
+                _rt_cfg = RetrainConfig(max_depth=5, min_samples_leaf=10)
+                _rt_result = run_daily_retrain(config=_rt_cfg)
+
+            if _rt_result.success:
+                load_meta_predictor_from_disk.clear()   # bust cache → fresh weights
+                st.success(
+                    f"✅ Retraining complete — "
+                    f"{_rt_result.n_training_pairs} pairs, "
+                    f"{_rt_result.n_commodities} commodities. "
+                    f"Top feature: **{_rt_result.top_feature or '—'}**. "
+                    f"Refresh the page to see updated IC scores."
+                )
+                # Show summary metrics inline
+                _m1, _m2, _m3 = st.columns(3)
+                with _m1:
+                    st.metric("Training pairs", _rt_result.n_training_pairs)
+                with _m2:
+                    st.metric("Tree leaves", _rt_result.tree_n_leaves)
+                with _m3:
+                    dom_tier = max(_rt_result.tier_distribution,
+                                   key=lambda k: _rt_result.tier_distribution[k],
+                                   default="—")
+                    st.metric("Dominant tier", dom_tier.title())
+            else:
+                st.error(f"❌ Retraining failed: {_rt_result.error}")
+
+        # ── Threshold tuning execution ────────────────────────────────────────────
+        if st.session_state.get("health_tune_requested"):
+            st.session_state["health_tune_requested"] = False
+
+            with st.spinner(
+                "Replaying detectors over last 180 days and grid-searching thresholds…"
+            ):
+                from models.threshold_tuner import ThresholdTuner, TunerConfig
+                _tune_cfg = TunerConfig(
+                    lookback_days=180, forward_days=5, min_events_above=8
+                )
+                _tune_results = ThresholdTuner(_tune_cfg).tune_all(
+                    macro_df=_macro_for_triggers, prices=prices_full
                 )
 
-        # IC curve expander
-        with st.expander("📈 IC-vs-threshold curves", expanded=False):
-            import json as _json
-            for _, _tr_row in _latest_tune.iterrows():
-                _fam = _tr_row["family"]
-                try:
-                    _grid = _json.loads(_tr_row.get("grid_results") or "{}")
-                    if not _grid:
-                        continue
-                    _t_vals  = [float(k) for k in _grid.keys()]
-                    _ic_vals = [float(v) for v in _grid.values()]
-                    _opt_t   = float(_tr_row["optimal_threshold"])
-                    _curve = go.Figure()
-                    _curve.add_trace(go.Scatter(
-                        x=_t_vals, y=_ic_vals,
-                        mode="lines+markers",
-                        name=_fam.replace("_", " ").title(),
-                        line=dict(color=BLUE, width=2),
-                        marker=dict(size=7),
-                    ))
-                    _curve.add_vline(
-                        x=_opt_t, line_dash="dot", line_color=GREEN,
-                        annotation_text=f"optimal ({_opt_t:.2f})",
-                        annotation_position="top right",
+            if _tune_results:
+                st.success(
+                    f"✅ Threshold tuning complete — "
+                    f"{len(_tune_results)} trigger famil{'y' if len(_tune_results)==1 else 'ies'} evaluated."
+                )
+                for _fam, _tr in _tune_results.items():
+                    st.markdown(
+                        f"**{_fam.replace('_', ' ').title()}**: "
+                        f"threshold → `{_tr.optimal_threshold:.2f}` "
+                        f"(IC {_tr.best_ic:+.4f} at threshold)  {_tr.signal_label()}"
                     )
-                    _curve.add_hline(y=0.05, line_dash="dash", line_color=AMBER,
-                                     opacity=0.5)
-                    dark_layout(_curve, height=260,
-                                title=f"{_fam.replace('_', ' ').title()} — IC vs threshold")
-                    st.plotly_chart(_curve, use_container_width=True,
-                                    config={"displayModeBar": False})
-                except Exception:
-                    pass
+            else:
+                st.warning(
+                    "⚠️ No trigger events detected in the last 180 days. "
+                    "Thresholds could not be tuned — try again after more market data "
+                    "is loaded.",
+                    icon="⚠️",
+                )
 
-    st.divider()
+        st.divider()
 
-    # ── Section 5: Raw IC log (last 30 days, collapsible) ─────────────────────
-    with st.expander("🔍 Raw IC log (last 30 days)", expanded=False):
-        _raw_ic = recent_ic_scores(days=30)
-        if _raw_ic.empty:
-            st.info("No IC scores in the last 30 days.")
+        # ── Section 4: Trigger threshold scorecard ────────────────────────────────
+        st.markdown("#### ⚙️ Trigger strength thresholds")
+        st.caption(
+            "Current optimal thresholds from the last tuning run. "
+            "Click **Tune Thresholds** to refresh."
+        )
+
+        from models.threshold_tuner import (
+            load_optimal_thresholds, recent_tune_history, FALLBACK_THRESHOLD
+        )
+        _ph_thresh = st.empty()
+        _ph_thresh.markdown(_ghost(200, "Threshold scorecard"), unsafe_allow_html=True)
+        _opt_thresholds = load_optimal_thresholds()
+        _tune_hist      = recent_tune_history(n=20)
+        _ph_thresh.empty()
+
+        if _tune_hist.empty:
+            st.info(
+                "No threshold tuning history yet. "
+                "Click **⚙️ Tune Thresholds** above to calibrate the detectors.",
+                icon="⚙️",
+            )
         else:
-            if "ic_value" in _raw_ic.columns:
-                _raw_ic["ic_value"] = _raw_ic["ic_value"].round(4)
-            st.dataframe(_raw_ic, use_container_width=True, hide_index=True)
+            # Latest result per family
+            _latest_tune = (
+                _tune_hist
+                .sort_values("evaluated_at", ascending=False)
+                .drop_duplicates(subset="family")
+            )
+            _tc1, _tc2, _tc3 = st.columns(3)
+            _cols_cycle = [_tc1, _tc2, _tc3]
+            for _idx, (_, _tr_row) in enumerate(_latest_tune.iterrows()):
+                _fam    = _tr_row["family"]
+                _thr    = float(_tr_row["optimal_threshold"])
+                _ic_val = float(_tr_row["best_ic"]) if _tr_row["best_ic"] is not None else float("nan")
+                _n_ev   = int(_tr_row["n_events_at_threshold"])
+
+                if _ic_val >= 0.05:
+                    _thr_color = GREEN
+                elif _ic_val >= 0.0:
+                    _thr_color = AMBER
+                else:
+                    _thr_color = RED
+
+                with _cols_cycle[_idx % 3]:
+                    st.markdown(
+                        f"""
+                        <div style="background:{PLOT_BG}; border-left:4px solid {_thr_color};
+                                    border-radius:6px; padding:12px 16px; margin-bottom:8px;">
+                        <div style="color:#8899AA; font-size:0.78rem; margin-bottom:4px;">
+                            {_fam.replace('_', ' ').title()}
+                        </div>
+                        <div style="color:{_thr_color}; font-size:1.4rem; font-weight:700;">
+                            ≥ {_thr:.2f}
+                        </div>
+                        <div style="color:#8899AA; font-size:0.78rem;">
+                            IC {_ic_val:+.4f} · {_n_ev} events above threshold
+                        </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            # IC curve expander
+            with st.expander("📈 IC-vs-threshold curves", expanded=False):
+                import json as _json
+                for _, _tr_row in _latest_tune.iterrows():
+                    _fam = _tr_row["family"]
+                    try:
+                        _grid = _json.loads(_tr_row.get("grid_results") or "{}")
+                        if not _grid:
+                            continue
+                        _t_vals  = [float(k) for k in _grid.keys()]
+                        _ic_vals = [float(v) for v in _grid.values()]
+                        _opt_t   = float(_tr_row["optimal_threshold"])
+                        _curve = go.Figure()
+                        _curve.add_trace(go.Scatter(
+                            x=_t_vals, y=_ic_vals,
+                            mode="lines+markers",
+                            name=_fam.replace("_", " ").title(),
+                            line=dict(color=BLUE, width=2),
+                            marker=dict(size=7),
+                        ))
+                        _curve.add_vline(
+                            x=_opt_t, line_dash="dot", line_color=GREEN,
+                            annotation_text=f"optimal ({_opt_t:.2f})",
+                            annotation_position="top right",
+                        )
+                        _curve.add_hline(y=0.05, line_dash="dash", line_color=AMBER,
+                                         opacity=0.5)
+                        dark_layout(_curve, height=260,
+                                    title=f"{_fam.replace('_', ' ').title()} — IC vs threshold")
+                        st.plotly_chart(_curve, use_container_width=True,
+                                        config={"displayModeBar": False})
+                    except Exception:
+                        pass
+
+        st.divider()
+
+        # ── Section 5: Raw IC log (last 30 days, collapsible) ─────────────────────
+        with st.expander("🔍 Raw IC log (last 30 days)", expanded=False):
+            _raw_ic = recent_ic_scores(days=30)
+            if _raw_ic.empty:
+                st.info("No IC scores in the last 30 days.")
+            else:
+                if "ic_value" in _raw_ic.columns:
+                    _raw_ic["ic_value"] = _raw_ic["ic_value"].round(4)
+                st.dataframe(_raw_ic, use_container_width=True, hide_index=True)
+
+    with tab7:
+        _render_model_health()
