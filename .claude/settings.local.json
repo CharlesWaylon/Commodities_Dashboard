@@ -57,7 +57,13 @@
       "Bash(python -c \"import ast, sys; ast.parse\\(open\\('pages/6_Causal_QS_Engine.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "mcp__Claude_in_Chrome__tabs_context_mcp",
       "Bash(grep -v \"^$\")",
-      "Bash(grep -v \"^\\\\s*$\")"
+      "Bash(grep -v \"^\\\\s*$\")",
+      "Bash(python -m pytest services/test_integration.py -v --tb=short)",
+      "Bash(python services/test_integration.py)",
+      "Bash(python -m pytest services/test_integration.py -v -s -k \"bench\")",
+      "Bash(git stash *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('pages/4_Models.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(grep -v \"^[0-9]\\\\{4,\\\\}:\")"
     ]
   }
 }
