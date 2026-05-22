@@ -558,12 +558,12 @@ def ic_trend(days: int = 180) -> pd.DataFrame:
         df = recent_ic_scores(days=days)
         if df.empty:
             return pd.DataFrame()
+        df["computed_at"] = pd.to_datetime(df["computed_at"]).dt.floor("D")
         grouped = (
             df.groupby(["computed_at", "tier"])["ic_value"]
             .agg(mean_ic="mean", n_commodities="count")
             .reset_index()
         )
-        grouped["computed_at"] = pd.to_datetime(grouped["computed_at"])
         return grouped.sort_values("computed_at")
     except Exception as exc:
         log.warning("ic_trend failed: %s", exc)

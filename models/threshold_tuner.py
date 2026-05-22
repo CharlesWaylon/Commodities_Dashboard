@@ -170,14 +170,14 @@ def save_tune_results(results: Dict[str, TuneResult]) -> int:
     for r in results.values():
         rows.append({
             "family":                r.family,
-            "optimal_threshold":     r.optimal_threshold,
-            "best_ic":               r.best_ic,
-            "continuous_ic":         r.continuous_ic,
-            "n_events_total":        r.n_events_total,
-            "n_events_at_threshold": r.n_events_at_threshold,
-            "lookback_days":         r.lookback_days,
-            "forward_days":          r.forward_days,
-            "grid_results":          json.dumps({str(k): v for k, v in r.grid_results.items()}),
+            "optimal_threshold":     float(r.optimal_threshold),
+            "best_ic":               float(r.best_ic),
+            "continuous_ic":         float(r.continuous_ic),
+            "n_events_total":        int(r.n_events_total),
+            "n_events_at_threshold": int(r.n_events_at_threshold),
+            "lookback_days":         int(r.lookback_days),
+            "forward_days":          int(r.forward_days),
+            "grid_results":          json.dumps({str(k): float(v) for k, v in r.grid_results.items()}),
             "evaluated_at":          r.evaluated_at,
         })
     sql = text("""
@@ -231,7 +231,7 @@ def recent_tune_history(n: int = 10) -> pd.DataFrame:
         sql = text(f"""
             SELECT family, optimal_threshold, best_ic, continuous_ic,
                    n_events_total, n_events_at_threshold,
-                   lookback_days, forward_days, evaluated_at
+                   lookback_days, forward_days, grid_results, evaluated_at
             FROM   threshold_config
             ORDER  BY evaluated_at DESC
             LIMIT  {int(n)}
