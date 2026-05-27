@@ -470,6 +470,35 @@ def test_direction_neutral_near_zero():
     _assert(sig.direction == "neutral",    f"direction={sig.direction!r}")
 
 
+def test_every_fred_series_name_resolves():
+    """
+    Regression guard: every FRED_SERIES[*]["name"] emitted by FREDPoller must
+    resolve to a registry trigger_type. Falling into the default bucket
+    (trigger_type is None) means the daemon would log the event but the
+    classifier would silently drop it.
+    """
+    print("test_every_fred_series_name_resolves")
+    from services.macro_ingestion import FRED_SERIES
+    clf = fresh_classifier()
+    for series_id, meta in FRED_SERIES.items():
+        name   = meta["name"]
+        impact = meta["impact"]
+        ev = make_event(
+            event_type      = name,
+            deviation_score = 1.5,   # well above noise; ensures we don't bail on actual_value
+            actual_value    = 100.0,
+            impact          = impact,
+            trigger_id      = _uuid(),
+        )
+        sig = clf.classify(ev)
+        _assert(
+            sig is not None and sig.trigger_type is not None,
+            f"FRED_SERIES[{series_id!r}].name={name!r} → "
+            f"{sig.trigger_type if sig else None!r}",
+            detail=f"impact={impact}",
+        )
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -499,6 +528,7 @@ if __name__ == "__main__":
         test_flush_dedup_cache,
         test_ppi_release_resolution,
         test_direction_neutral_near_zero,
+        test_every_fred_series_name_resolves,
     ]
 
     print()

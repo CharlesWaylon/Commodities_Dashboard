@@ -152,12 +152,17 @@ class TriggerSignal:
 # most-specific first), then returns None (event not in scope).
 
 _EXACT_MAP: Dict[str, str] = {
-    # ── FRED poller ───────────────────────────────────────────────────────────
+    # ── FRED poller (must cover every FRED_SERIES[*]["name"] in macro_ingestion.py) ─
     "CPI":                      "CPI_RELEASE",
     "Unemployment":             "NONFARM_PAYROLLS",
     "Fed_Funds_Rate":           "FOMC_RATE_DECISION",
+    "Yield_Curve_10Y2Y":        "RECESSION_FLAG",          # inverted curve = recession signal
+    "Real_Yield_10Y":           "FOMC_RATE_DECISION",      # real-rate moves = monetary stance
+    "Industrial_Production":    "RECESSION_FLAG",          # IP contraction = recession indicator
     "PPI_All_Commodities":      "PPI_RELEASE",
+    "M2_Money_Supply":          "FOMC_RATE_DECISION",      # money supply = monetary policy lever
     "USD_EUR":                  "DOLLAR_SHOCK",
+    "WTI_Spot":                 "OPEC_PRODUCTION_DECISION",# oil price surprise → OPEC family
     "USREC":                    "RECESSION_FLAG",
     # ── Alpha Vantage indicators ──────────────────────────────────────────────
     "CPI_AV":                   "CPI_RELEASE",

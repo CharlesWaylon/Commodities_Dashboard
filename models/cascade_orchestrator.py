@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import warnings
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timezone
@@ -74,6 +75,32 @@ UPSTREAM_MAP: Dict[str, List[str]] = {
 # ── Macro variable column names in macro_df ───────────────────────────────────
 _MACRO_RETURN_COLS = ["dxy_ret", "vix_ret5d", "tlt_ret", "tlt_yield_proxy"]
 
+# ── Trigger integration (Step 2 of macro_features spec) ───────────────────────
+# Maps live trigger families (config/trigger_registry.json) to the macro_snapshot
+# keys they should amplify. Families with no snapshot-level analogue (weather,
+# OPEC, energy_transition, etc.) propagate downstream via upstream_shocks in
+# Step 4 of the spec, not here.
+TRIGGER_FAMILY_TO_MACRO_FEATURES: Dict[str, List[str]] = {
+    "fed_tightening":     ["dxy_ret", "tlt_ret", "tlt_yield_proxy"],
+    "fomc_rate_decision": ["dxy_ret", "tlt_ret", "tlt_yield_proxy"],
+    "fed_chair_speech":   ["dxy_ret", "tlt_ret"],
+    "cpi_release":        ["dxy_ret", "tlt_yield_proxy"],
+    "ppi_release":        ["dxy_ret", "tlt_yield_proxy"],
+    "nonfarm_payrolls":   ["vix_ret5d", "tlt_ret"],
+    "recession_flag":     ["vix_ret5d", "tlt_ret", "tlt_yield_proxy"],
+    "geopolitical_shock": ["vix_ret5d"],
+}
+
+# Spec rule: amplify by (1 + AMPLIFY_COEFF * strength) for triggers ≥ MIN_STRENGTH.
+# 0.5 is the spec default; lower if backtest IC degrades.
+_TRIGGER_AMPLIFY_MIN_STRENGTH = 0.5
+_TRIGGER_AMPLIFY_COEFF        = 0.5
+
+
+def _macro_triggers_enabled() -> bool:
+    """Feature flag — set MACRO_TRIGGERS_ENABLED=false to rollback to pre-Step-2 behavior."""
+    return os.getenv("MACRO_TRIGGERS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
 
 
 
@@ -101,7 +128,9 @@ class CascadeResult:
     run_at:          str                                    = ""
     forecast_date:   Optional[date]                        = None
     regime:          str                                    = "neutral"
+    regime_hint:     str                                    = "neutral"   # trigger-derived; Step 3 will let it override `regime`
     macro_snapshot:  Dict[str, float]                      = field(default_factory=dict)
+    active_triggers: List[Dict]                            = field(default_factory=list)  # rows from trigger_events used to blend snapshot
     commodities:     Dict[str, CommodityForecast]          = field(default_factory=dict)
     n_written:       int                                    = 0
     errors:          Dict[str, str]                        = field(default_factory=dict)
@@ -115,6 +144,7 @@ class CascadeResult:
             f"  Run at         : {self.run_at}",
             f"  Forecast date  : {self.forecast_date}",
             f"  Regime         : {self.regime}",
+            f"  Regime hint    : {self.regime_hint}  ({len(self.active_triggers)} active trigger(s))",
             f"  Commodities    : {len(self.commodities)}",
             f"  DB rows written: {self.n_written}",
         ]
@@ -156,6 +186,8 @@ class CascadeForecaster:
         self._prices:         Optional[pd.DataFrame]     = None
         self._macro_snapshot: Dict[str, float]           = {}
         self._regime:         str                        = "neutral"
+        self._regime_hint:    str                        = "neutral"   # set during fit() from active triggers
+        self._active_triggers: List[Dict]                = []          # rows that drove the blending
         self._sector_members: Dict[str, List[str]]       = {}   # sector → [commodity, …]
 
     # ── Setup ─────────────────────────────────────────────────────────────────
@@ -179,15 +211,25 @@ class CascadeForecaster:
             members[sector].append(commodity)
         return members
 
-    def _extract_macro_snapshot(self, macro_df: pd.DataFrame) -> Dict[str, float]:
+    def _extract_macro_snapshot(
+        self,
+        macro_df: pd.DataFrame,
+        forecast_date: Optional[date] = None,
+    ) -> Dict[str, float]:
         """
-        Pull the most recent macro return values as a flat dict.
+        Pull the most recent macro return values as a flat dict, then blend in
+        trigger amplification when ``MACRO_TRIGGERS_ENABLED`` is on.
+
         Derives tlt_yield_proxy = −tlt_ret if not directly available.
+
+        When no active triggers meet the spec strength bar, output is
+        byte-identical to the pre-Step-2 implementation — guarded by the
+        regression test in test_cascade_orchestrator.py.
         """
         if macro_df is None or macro_df.empty:
             return {}
 
-        # Try to get the last non-null row for each column
+        # Last non-null observation per column (the legacy snapshot).
         snap: Dict[str, float] = {}
         for col in _MACRO_RETURN_COLS:
             if col in macro_df.columns:
@@ -195,17 +237,74 @@ class CascadeForecaster:
                 if not series.empty:
                     snap[col] = float(series.iloc[-1])
 
-        # Derive proxy if missing
         if "tlt_yield_proxy" not in snap and "tlt_ret" in snap:
             snap["tlt_yield_proxy"] = -snap["tlt_ret"]
 
+        # Trigger blending — additive layer on top of the legacy snapshot.
+        if _macro_triggers_enabled():
+            snap = self._apply_trigger_amplification(snap, forecast_date)
+
         return snap
+
+    def _apply_trigger_amplification(
+        self,
+        snap: Dict[str, float],
+        forecast_date: Optional[date],
+    ) -> Dict[str, float]:
+        """
+        Amplify macro_snapshot features whose family has an active high-strength
+        trigger, per the spec rule:
+
+            for trigger with strength ≥ MIN_STRENGTH:
+                feature *= (1 + COEFF * strength)   for each feature in family map
+
+        Also populates ``self._active_triggers``. Failure is non-fatal: on any
+        exception the snapshot is returned unchanged so the cascade keeps running.
+        """
+        try:
+            from features.macro_features import get_active_triggers
+
+            ts = pd.Timestamp(forecast_date) if forecast_date is not None else pd.Timestamp.now()
+            triggers = get_active_triggers(ts, lookback_days=5)
+            self._active_triggers = triggers
+            if not triggers:
+                return snap
+
+            amplified = dict(snap)
+            for t in triggers:
+                strength = float(t.get("strength", 0.0))
+                if strength < _TRIGGER_AMPLIFY_MIN_STRENGTH:
+                    continue
+                features = TRIGGER_FAMILY_TO_MACRO_FEATURES.get(t.get("family", ""), [])
+                factor = 1.0 + _TRIGGER_AMPLIFY_COEFF * strength
+                for feat in features:
+                    if feat in amplified:
+                        amplified[feat] = amplified[feat] * factor
+            return amplified
+        except Exception as exc:
+            log.warning("Trigger amplification skipped (%s) — using raw snapshot.", exc)
+            return snap
 
     def _infer_regime(self, macro_df: pd.DataFrame) -> str:
         """Classify today's regime from the macro DataFrame."""
         try:
             from models.macro_router import get_current_regime
             return get_current_regime(macro_df)
+        except Exception:
+            return "neutral"
+
+    def _derive_regime_hint(self, forecast_date: Optional[date]) -> str:
+        """
+        Trigger-derived regime hint. Re-uses the active_triggers list already
+        fetched by ``_apply_trigger_amplification`` to avoid a second DB query.
+        Returns "neutral" when the feature flag is off or no trigger meets the
+        spec's strength bar.
+        """
+        if not _macro_triggers_enabled() or not self._active_triggers:
+            return "neutral"
+        try:
+            from features.macro_features import regime_hint_from_triggers
+            return regime_hint_from_triggers(self._active_triggers)
         except Exception:
             return "neutral"
 
@@ -229,12 +328,20 @@ class CascadeForecaster:
 
         self._prices         = prices
         self._sector_members = self._build_sector_members(prices)
-        self._macro_snapshot = self._extract_macro_snapshot(macro_df)
+
+        # Forecast date drives the trigger lookup window in _extract_macro_snapshot.
+        last_idx = prices.index[-1] if len(prices.index) else None
+        forecast_date = last_idx.date() if hasattr(last_idx, "date") else None
+
+        self._macro_snapshot = self._extract_macro_snapshot(macro_df, forecast_date=forecast_date)
         self._regime         = self._infer_regime(macro_df) if macro_df is not None else "neutral"
+        self._regime_hint    = self._derive_regime_hint(forecast_date)
 
         log.info(
-            "Cascade fit: regime=%s  macro_snapshot=%s",
+            "Cascade fit: regime=%s  regime_hint=%s  triggers=%d  macro_snapshot=%s",
             self._regime,
+            self._regime_hint,
+            len(self._active_triggers),
             {k: f"{v:+.6f}" for k, v in self._macro_snapshot.items()},
         )
 
@@ -300,6 +407,7 @@ class CascadeForecaster:
                         macro_state=self._macro_snapshot,
                         upstream_shocks=upstream_shocks,
                         regime=self._regime,
+                        active_triggers=self._active_triggers,
                     )
                     bd = result["breakdown"]
                     cf = CommodityForecast(
@@ -504,8 +612,10 @@ def run_cascade(
         cascade = CascadeForecaster()
         cascade.fit(prices, macro_df)
 
-        result.regime        = cascade._regime
+        result.regime         = cascade._regime
+        result.regime_hint    = cascade._regime_hint
         result.macro_snapshot = cascade._macro_snapshot
+        result.active_triggers = list(cascade._active_triggers)
 
         if not cascade._models:
             raise RuntimeError("No commodity models could be fitted.")
@@ -518,6 +628,17 @@ def run_cascade(
         log.info("Cascade predict complete: %d commodity forecasts.", len(forecasts))
 
         # ── Store ──────────────────────────────────────────────────────────────
+        # Persist regime_hint + active trigger count inside each row's
+        # macro_detail JSON so anything reading cascade_forecasts can surface it
+        # without a schema change.
+        if forecasts and _macro_triggers_enabled():
+            for cf in forecasts.values():
+                cf.macro_detail = {
+                    **cf.macro_detail,
+                    "regime_hint":     result.regime_hint,
+                    "n_active_triggers": len(result.active_triggers),
+                }
+
         if not dry_run and forecasts:
             n = _write_cascade_forecasts(forecasts, forecast_date)
             result.n_written = n

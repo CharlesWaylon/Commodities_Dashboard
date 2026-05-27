@@ -21,7 +21,7 @@ from models.scenarios.providers import (
     prophet_band,
     quantum_kernel_band,
 )
-from models.scenarios.ripple import CausalRipple
+from models.scenarios.ripple import CausalRipple, HistoricalTriggerReplay
 from models.scenarios.narrative import build_narrative
 from models.scenarios.calibration import empirical_coverage
 from models.scenarios.conformal import ConformalCalibration, calibrate_from_model
@@ -39,6 +39,7 @@ __all__ = [
     "prophet_band",
     "quantum_kernel_band",
     "CausalRipple",
+    "HistoricalTriggerReplay",
     "build_narrative",
     "collapse_to_tail",
     "find_analogs",

@@ -305,6 +305,55 @@ def apply_theme():
     st.markdown(_CSS, unsafe_allow_html=True)
 
 
+def _macro_trigger_pill_html() -> str:
+    """
+    Build the MACRO topbar pill: "MACRO N/M" where N is the number of active
+    triggers (5-day lookback) and M is the count of trigger-aware modules in
+    this codebase. Hidden when MACRO_TRIGGERS_ENABLED is false.
+
+    Lives next to SIG in the topbar so the user always has a visible signal
+    that the trigger ecosystem is wired up.
+    """
+    import os
+    enabled = os.getenv("MACRO_TRIGGERS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return (
+            '<div style="margin-right:18px;flex-shrink:0;display:flex;align-items:center;gap:6px">'
+            '<span style="font-size:10px;color:rgba(238,242,255,0.28);letter-spacing:.1em">MACRO</span>'
+            f'<span style="font-size:11px;color:{DESCEND};font-weight:500">OFF</span>'
+            '</div>'
+        )
+
+    # Count of dashboard modules that read from features.macro_features.
+    # Update this if you wire a new module into the trigger surface.
+    n_modules = 6   # cascade_orchestrator, macro_router, sector_model, meta_predictor, portfolio_optimizer, ripple
+
+    try:
+        from utils.theme import _cached_active_trigger_count
+        n_active = _cached_active_trigger_count()
+    except Exception:
+        n_active = 0
+
+    color = ASCEND if n_active > 0 else "rgba(238,242,255,0.4)"
+    return (
+        '<div style="margin-right:18px;flex-shrink:0;display:flex;align-items:center;gap:6px">'
+        '<span style="font-size:10px;color:rgba(238,242,255,0.28);letter-spacing:.1em">MACRO</span>'
+        f'<span style="font-size:12px;color:{color};font-weight:500">{n_active}/{n_modules}</span>'
+        '</div>'
+    )
+
+
+@st.cache_data(ttl=120)
+def _cached_active_trigger_count() -> int:
+    """Fetch active-trigger count once per 2 minutes so the topbar stays cheap."""
+    try:
+        from features.macro_features import get_active_triggers
+        import pandas as _pd
+        return len(get_active_triggers(_pd.Timestamp.utcnow(), lookback_days=5))
+    except Exception:
+        return 0
+
+
 def render_topbar(df=None):
     """
     Render the fixed top context bar (44px, always visible):
@@ -382,6 +431,7 @@ def render_topbar(df=None):
     <span style="font-size:10px;color:rgba(238,242,255,0.28);letter-spacing:.1em">SIG</span>
     <span style="font-size:12px;color:{sig_color};font-weight:500">{n_sig}</span>
   </div>
+  {_macro_trigger_pill_html()}
   <div style="margin-right:14px;flex-shrink:0">{sessions}</div>
   <div style="flex-shrink:0">
     <span style="font-size:10px;color:rgba(238,242,255,0.22);letter-spacing:.06em;font-family:'Courier New',monospace">{ts}</span>

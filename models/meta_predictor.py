@@ -112,6 +112,18 @@ FEATURE_COLUMNS: Tuple[str, ...] = (
     "days_to_wasde",
     "wasde_post5",
     "enso_phase",              # −1 = La Niña, 0 = neutral, +1 = El Niño
+    # ── Step 5: FRED surprise features + trigger-derived regime hint ──────────
+    # Sourced via features.macro_features.build_macro_surprise_features() and
+    # get_macro_state_at(). Backfillable from raw FRED; for dates before the
+    # macro-feed daemon began running, regime_hint defaults to "neutral" and
+    # the one-hot regime indicators are all 0 — see module docstring.
+    "cpi_surprise_z",
+    "unrate_surprise_z",
+    "fedfunds_surprise_z",
+    "t10y2y_change_5d",
+    "regime_hint_onehot_rate_shock",
+    "regime_hint_onehot_growth_shock",
+    "regime_hint_onehot_commodity_shock",
     # ── Extension slots ───────────────────────────────────────────────────────
     # Uncomment as features become available:
     # "hmm_regime_bull",         # 1.0 if HMM state == "bull", else 0.0
@@ -162,6 +174,15 @@ class MetaFeatures:
     # ── Climate / ENSO ────────────────────────────────────────────────────
     enso_phase: float = 0.0                      # −1 = La Niña, 0 = neutral, +1 = El Niño
 
+    # ── Step 5: macro surprise features + trigger-derived regime hint ─────
+    cpi_surprise_z: float = 0.0                  # z-score vs trailing 24m of CPIAUCSL
+    unrate_surprise_z: float = 0.0               # z-score vs trailing 24m of UNRATE
+    fedfunds_surprise_z: float = 0.0             # z-score vs trailing 24m of FEDFUNDS
+    t10y2y_change_5d: float = 0.0                # absolute level change in T10Y2Y over 5 business days
+    regime_hint_onehot_rate_shock: float = 0.0   # 1.0 when regime_hint == "rate_shock"
+    regime_hint_onehot_growth_shock: float = 0.0
+    regime_hint_onehot_commodity_shock: float = 0.0
+
     # ── Extension slots (None until underlying features land) ─────────────
     hmm_regime: Optional[str] = None            # "bull" | "neutral" | "bear"
     days_since_regime_flip: Optional[int] = None
@@ -197,6 +218,13 @@ class MetaFeatures:
             "days_to_wasde": self.days_to_wasde,
             "wasde_post5": self.wasde_post5,
             "enso_phase": self.enso_phase,
+            "cpi_surprise_z":      self.cpi_surprise_z,
+            "unrate_surprise_z":   self.unrate_surprise_z,
+            "fedfunds_surprise_z": self.fedfunds_surprise_z,
+            "t10y2y_change_5d":    self.t10y2y_change_5d,
+            "regime_hint_onehot_rate_shock":      self.regime_hint_onehot_rate_shock,
+            "regime_hint_onehot_growth_shock":    self.regime_hint_onehot_growth_shock,
+            "regime_hint_onehot_commodity_shock": self.regime_hint_onehot_commodity_shock,
             "hmm_regime": self.hmm_regime,
             "days_since_regime_flip": self.days_since_regime_flip,
         }
@@ -314,6 +342,30 @@ def collect_meta_features(macro_df: pd.DataFrame) -> MetaFeatures:
             return default if pd.isna(val) else val
         return default
 
+    # ── Step 5: pull surprise + regime_hint features from macro_features. ─────
+    # Backfillable from raw FRED so historical training windows work. Wrapped in
+    # try/except so a missing FRED_API_KEY does not break inference — the
+    # surprise fields default to 0.0 (matches MetaFeatures defaults).
+    surprise = {}
+    state    = {}
+    regime_hint = "neutral"
+    try:
+        from features.macro_features import (
+            build_macro_surprise_features,
+            get_macro_state_at,
+        )
+        as_of = macro_df.index[-1]
+        surprise = build_macro_surprise_features(as_of)
+        state    = get_macro_state_at(as_of)
+        regime_hint = state.get("regime_hint", "neutral")
+    except Exception:
+        # Silent — historical-training paths must succeed even without FRED key.
+        pass
+
+    def _sf(d: dict, key: str) -> float:
+        v = d.get(key, 0.0)
+        return 0.0 if v is None or (isinstance(v, float) and math.isnan(v)) else float(v)
+
     return MetaFeatures(
         vix=_get("vix"),
         vix_level_z=_get("vix_level_z"),
@@ -329,6 +381,13 @@ def collect_meta_features(macro_df: pd.DataFrame) -> MetaFeatures:
         days_to_wasde=_get("days_to_wasde"),
         wasde_post5=float(_get("wasde_post5", 0.0)),
         enso_phase=float(_get("enso_phase", 0.0)),
+        cpi_surprise_z=_sf(surprise, "cpi_surprise_z"),
+        unrate_surprise_z=_sf(surprise, "unrate_surprise_z"),
+        fedfunds_surprise_z=_sf(surprise, "fedfunds_surprise_z"),
+        t10y2y_change_5d=_sf(state, "t10y2y_change_5d"),
+        regime_hint_onehot_rate_shock=1.0 if regime_hint == "rate_shock" else 0.0,
+        regime_hint_onehot_growth_shock=1.0 if regime_hint == "growth_shock" else 0.0,
+        regime_hint_onehot_commodity_shock=1.0 if regime_hint == "commodity_shock" else 0.0,
         # HMM regime not yet available — extension point
         hmm_regime=None,
         days_since_regime_flip=None,
@@ -564,12 +623,34 @@ class MetaPredictor:
         return p
 
     def load(self, path: Optional[Path] = None) -> "MetaPredictor":
-        """Load a persisted tree from disk. Silent no-op if file doesn't exist."""
+        """
+        Load a persisted tree from disk. Silent no-op if file doesn't exist.
+
+        Backwards-compat: if the saved feature_columns don't match the current
+        FEATURE_COLUMNS (e.g. after Step 5 added surprise-feature columns but
+        before the next daily_retrain has written a fresh pkl), we log a
+        warning and leave the predictor in the untrained state. Inference then
+        falls back to equal weights — page 4 keeps rendering — until the next
+        nightly retrain produces a compatible pkl.
+        """
         p = Path(path) if path else _DEFAULT_MODEL_PATH
         if not p.exists():
             return self
         with open(p, "rb") as fh:
             state = pickle.load(fh)
+
+        saved_cols = state.get("feature_columns")
+        if saved_cols is not None and tuple(saved_cols) != FEATURE_COLUMNS:
+            import logging
+            logging.getLogger(__name__).warning(
+                "MetaPredictor pkl at %s has %d feature columns; current "
+                "FEATURE_COLUMNS expects %d. Falling back to untrained "
+                "(equal-weight) state until the next daily_retrain produces "
+                "a compatible model.",
+                p, len(saved_cols), len(FEATURE_COLUMNS),
+            )
+            return self
+
         self._tree = state["tree"]
         self._classes = state["classes"]
         self._feature_importances = state.get("feature_importances", {})

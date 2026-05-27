@@ -18,6 +18,9 @@ backtest_cascade_vs_baseline(prices, macro_df, ...)
 
 from __future__ import annotations
 
+import logging
+import os
+
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -34,6 +37,13 @@ from models.quantum.qaoa_portfolio import (
     QAOA_LOOKBACK_DAYS,
     QAOA_OPT_STEPS,
 )
+
+log = logging.getLogger(__name__)
+
+
+def _macro_triggers_enabled() -> bool:
+    """Feature flag — mirror of cascade_orchestrator / macro_router / sector_model."""
+    return os.getenv("MACRO_TRIGGERS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ── Cascade coefficient tables ─────────────────────────────────────────────────
@@ -163,6 +173,14 @@ class CascadePortfolioResult:
     macro_state:           Dict[str, float]
     baseline_result:       Optional[QAOAResult] = None   # historical-mu QAOA for comparison
     causal_narrative:      str = ""
+    # ── Step 6 ────────────────────────────────────────────────────────────────
+    # When trigger risk gates fire, the optimizer stores the adjusted weights
+    # here. ``self.weights`` returns these in preference to qaoa_result.weights
+    # so downstream code automatically gets the gated portfolio without code
+    # changes. ``applied_gates`` is a human-readable log of what fired.
+    gated_weights:         Optional[Dict[str, float]] = None
+    applied_gates:         List[str]                  = field(default_factory=list)
+    active_triggers:       List[Dict]                 = field(default_factory=list)
 
     @property
     def selected_assets(self) -> List[str]:
@@ -170,7 +188,8 @@ class CascadePortfolioResult:
 
     @property
     def weights(self) -> Dict[str, float]:
-        return self.qaoa_result.weights
+        """Gated weights take precedence; falls back to raw QAOA weights."""
+        return self.gated_weights if self.gated_weights is not None else self.qaoa_result.weights
 
     @property
     def expected_return(self) -> float:
@@ -208,6 +227,134 @@ class BacktestSummary:
                 "Max Drawdown": f"{self.max_drawdowns.get(s, 0.0):.1%}",
             })
         return pd.DataFrame(rows)
+
+
+# ── Step 6: trigger risk gates ────────────────────────────────────────────────
+
+def apply_trigger_risk_gates(
+    weights:          Dict[str, float],
+    active_triggers:  List[Dict],
+    previous_weights: Optional[Dict[str, float]] = None,
+    asset_sectors:    Optional[Dict[str, str]]    = None,
+    gates:            Optional[dict]              = None,
+) -> Tuple[Dict[str, float], List[str]]:
+    """
+    Apply ``TRIGGER_RISK_GATES`` to a portfolio's post-QAOA weight dict.
+
+    Parameters
+    ----------
+    weights            : {asset_name: weight_fraction}. Should sum to ~1.0.
+    active_triggers    : list of trigger dicts (each must have 'family' and 'strength').
+    previous_weights   : prior-day weights, only used by the turnover_damper gate.
+    asset_sectors      : {asset_name: sector}. Defaults to models.config.COMMODITY_SECTORS.
+    gates              : override the gate dict (mostly for testing).
+
+    Returns
+    -------
+    (gated_weights, applied_log)  — log entries are human-readable strings naming
+    which gate ran and what it did, suitable for surfacing in the dashboard.
+
+    The function is intentionally pure: it doesn't fetch triggers or read env
+    flags. Callers decide whether to invoke it. The cascade pipeline calls this
+    once per portfolio refresh; tests call it directly.
+    """
+    if not active_triggers:
+        return dict(weights), []
+
+    if gates is None:
+        try:
+            from models.config import TRIGGER_RISK_GATES
+            gates = TRIGGER_RISK_GATES
+        except Exception:
+            return dict(weights), []
+    if asset_sectors is None:
+        try:
+            from models.config import COMMODITY_SECTORS
+            asset_sectors = COMMODITY_SECTORS
+        except Exception:
+            asset_sectors = {}
+
+    out_weights = dict(weights)
+    applied:    List[str] = []
+    selected_assets = [a for a, w in out_weights.items() if w > 1e-9]
+    k = max(1, len(selected_assets))
+
+    # Helper that re-normalises so the dict still sums to 1.
+    def _renormalize(w: Dict[str, float]) -> Dict[str, float]:
+        total = sum(v for v in w.values() if v > 0)
+        if total <= 0:
+            return w
+        return {a: max(0.0, v) / total for a, v in w.items()}
+
+    # ── Per-family gates ──────────────────────────────────────────────────────
+    for trigger in active_triggers:
+        family   = trigger.get("family", "")
+        strength = float(trigger.get("strength", 0.0))
+        gate     = gates.get(family)
+        if gate is None or strength < gate.get("min_strength", 1.0):
+            continue
+        action = gate.get("action")
+        params = gate.get("params", {})
+
+        if action == "sector_cap":
+            target_sector  = params.get("sector", "").lower()
+            cap_multiplier = float(params.get("cap_multiplier", 1.5))
+            cap = cap_multiplier / k
+            sector_assets = [
+                a for a in selected_assets
+                if (asset_sectors.get(a, "") or "").lower() == target_sector
+            ]
+            sector_total = sum(out_weights.get(a, 0.0) for a in sector_assets)
+            non_sector_assets = [a for a in selected_assets if a not in sector_assets]
+            non_sector_total  = sum(out_weights.get(a, 0.0) for a in non_sector_assets)
+
+            if sector_total > cap and sector_total > 0 and non_sector_total > 0:
+                # Scale sector down to exactly `cap`; redistribute the freed
+                # weight proportionally across non-sector assets so the total
+                # stays at 1.0 and the cap actually holds post-renormalisation.
+                scale_sector  = cap / sector_total
+                freed         = sector_total - cap
+                scale_others  = (non_sector_total + freed) / non_sector_total
+                for a in sector_assets:
+                    out_weights[a] = out_weights[a] * scale_sector
+                for a in non_sector_assets:
+                    out_weights[a] = out_weights[a] * scale_others
+                applied.append(
+                    f"sector_cap[{target_sector}]: scaled {sector_total:.3f} → {cap:.3f} "
+                    f"({family} @ {strength:.2f})"
+                )
+
+        elif action == "flatten_toward_equal":
+            blend = float(params.get("blend", 0.20))
+            equal = 1.0 / k
+            for a in selected_assets:
+                out_weights[a] = (1 - blend) * out_weights[a] + blend * equal
+            out_weights = _renormalize(out_weights)
+            applied.append(
+                f"flatten_toward_equal[blend={blend:.2f}]: ({family} @ {strength:.2f})"
+            )
+
+    # ── __any_strong__ turnover damper (single application, max-strength wins) ─
+    any_gate = gates.get("__any_strong__")
+    if any_gate is not None:
+        top_strength = max((float(t.get("strength", 0.0)) for t in active_triggers), default=0.0)
+        if top_strength >= any_gate.get("min_strength", 1.0):
+            if any_gate.get("action") == "turnover_damper" and previous_weights:
+                damp = float(any_gate.get("params", {}).get("damp", 0.30))
+                # damp fraction of yesterday blended with (1-damp) of today
+                blended: Dict[str, float] = {}
+                all_assets = set(out_weights) | set(previous_weights)
+                for a in all_assets:
+                    blended[a] = (
+                        (1 - damp) * out_weights.get(a, 0.0)
+                        + damp     * previous_weights.get(a, 0.0)
+                    )
+                out_weights = _renormalize(blended)
+                applied.append(
+                    f"turnover_damper[damp={damp:.2f}]: top trigger strength {top_strength:.2f}"
+                )
+
+    return out_weights, applied
 
 
 # ── Cascade signal helpers ─────────────────────────────────────────────────────
@@ -409,7 +556,12 @@ class CascadePortfolioOptimizer:
         self._is_fit        = True
         return self
 
-    def optimize(self, n_shots: int = 512) -> CascadePortfolioResult:
+    def optimize(
+        self,
+        n_shots:          int                              = 512,
+        active_triggers:  Optional[List[Dict]]             = None,
+        previous_weights: Optional[Dict[str, float]]       = None,
+    ) -> CascadePortfolioResult:
         if not self._is_fit:
             raise RuntimeError("Call fit() before optimize().")
 
@@ -427,6 +579,32 @@ class CascadePortfolioOptimizer:
             except Exception:
                 pass
 
+        # ── Step 6: trigger risk gates ────────────────────────────────────────
+        gated_weights: Optional[Dict[str, float]] = None
+        applied_gates: List[str] = []
+        triggers_for_audit: List[Dict] = []
+        if _macro_triggers_enabled():
+            # Auto-fetch triggers when caller doesn't supply them.
+            if active_triggers is None:
+                try:
+                    from features.macro_features import get_active_triggers
+                    as_of = (self._prices_ref.index[-1] if self._prices_ref is not None
+                             else pd.Timestamp.utcnow())
+                    active_triggers = get_active_triggers(pd.Timestamp(as_of), lookback_days=5)
+                except Exception as exc:
+                    log.warning("portfolio_optimizer: trigger fetch skipped (%s)", exc)
+                    active_triggers = []
+            triggers_for_audit = list(active_triggers or [])
+
+            if triggers_for_audit:
+                gated_weights, applied_gates = apply_trigger_risk_gates(
+                    cascade_res.weights,
+                    triggers_for_audit,
+                    previous_weights=previous_weights,
+                )
+                if applied_gates:
+                    log.info("Trigger risk gates applied: %s", applied_gates)
+
         return CascadePortfolioResult(
             qaoa_result           = cascade_res,
             cascade_forecasts     = self._cascade_fcast,
@@ -439,6 +617,9 @@ class CascadePortfolioOptimizer:
                 self._cascade_fcast,
                 cascade_res.selected_assets,
             ),
+            gated_weights         = gated_weights,
+            applied_gates         = applied_gates,
+            active_triggers       = triggers_for_audit,
         )
 
 
@@ -459,6 +640,8 @@ def run_cascade_portfolio(
     opt_steps:         int   = QAOA_OPT_STEPS,
     run_baseline:      bool  = False,
     n_shots:           int   = 512,
+    active_triggers:   Optional[List[Dict]]       = None,
+    previous_weights:  Optional[Dict[str, float]] = None,
 ) -> CascadePortfolioResult:
     """
     One-call entry: fit cascade-informed optimizer and return allocation.
@@ -477,7 +660,11 @@ def run_cascade_portfolio(
         lookback=lookback, opt_steps=opt_steps, run_baseline=run_baseline,
     )
     opt.fit(prices, cascade_forecasts, confidences, channel_contribs, macro_row)
-    return opt.optimize(n_shots=n_shots)
+    return opt.optimize(
+        n_shots=n_shots,
+        active_triggers=active_triggers,
+        previous_weights=previous_weights,
+    )
 
 
 # ── Walk-forward backtest ──────────────────────────────────────────────────────

@@ -15,8 +15,10 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timezone, timedelta
 
+import os
+from pathlib import Path
+
 from services.price_data import fetch_current_prices
-from services.macro_ingestion import MacroIngestionService
 from services.trigger_config import REGISTRY as _TRIGGER_REGISTRY
 from utils.macro_narrative import load_macro, get_macro_state, compute_forecasts, build_narrative
 from utils.theme import (
@@ -26,19 +28,83 @@ from utils.theme import (
 )
 
 
-@st.cache_resource(show_spinner=False)
-def _start_macro_service() -> MacroIngestionService:
-    """
-    Start the macro ingestion service exactly once for the lifetime of the
-    Streamlit process. cache_resource persists across reruns and page
-    navigations — the background threads keep running silently.
-    """
-    svc = MacroIngestionService.from_env()
-    svc.start()
-    return svc
+_MACRO_QUEUE_PATH = Path(os.getenv("MACRO_QUEUE_PATH", "logs/macro_events.jsonl"))
+# LIVE threshold = 2× the slowest poller interval. The economic-calendar
+# poller runs every 30 min (see DEFAULT_CONFIG in services/macro_ingestion.py),
+# so we expect a fresh JSONL line at least once per hour. Override with
+# MACRO_FRESHNESS_SECONDS if you change the poll cadence.
+_MACRO_FRESHNESS_SECONDS = int(os.getenv("MACRO_FRESHNESS_SECONDS", "3600"))
 
 
-_macro_svc = _start_macro_service()
+@st.cache_data(ttl=30, show_spinner=False)
+def _read_macro_feed_status() -> dict:
+    """
+    Read-only status snapshot for the out-of-process macro feed daemon
+    (pipeline/run_macro_feed.py).
+
+    Liveness is inferred from the persistence JSONL mtime; recent activity
+    is corroborated by the latest trigger_events row. This function never
+    starts threads or touches the queue object.
+    """
+    from datetime import datetime, timezone
+
+    status: dict = {
+        "running": False,                  # JSONL mtime within freshness window
+        "queue_path_exists": False,
+        "jsonl_age_seconds": None,         # how stale is the daemon's persistence file
+        "last_trigger_at": None,           # ISO string from trigger_events.detected_at
+        "last_trigger_family": None,
+        "last_trigger_age_seconds": None,  # age of that detected_at, in seconds
+    }
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+
+    # (a) Liveness probe: JSONL mtime. Anything within 2× the slowest poll
+    # interval counts as LIVE; older than that, the daemon is presumed dead.
+    if _MACRO_QUEUE_PATH.exists():
+        status["queue_path_exists"] = True
+        mtime = _MACRO_QUEUE_PATH.stat().st_mtime
+        age = now_ts - mtime
+        status["jsonl_age_seconds"] = age
+        status["running"] = age <= _MACRO_FRESHNESS_SECONDS
+
+    # (b) Last DB-written event: from trigger_events.detected_at. This is what
+    # downstream models actually consume, so surface it in the subtext.
+    try:
+        from database.db import get_db
+        from database.models import TriggerEvent as DBTriggerEvent
+
+        with get_db() as session:
+            row = (
+                session.query(DBTriggerEvent)
+                .order_by(DBTriggerEvent.detected_at.desc())
+                .first()
+            )
+            if row is not None:
+                status["last_trigger_at"] = row.detected_at
+                status["last_trigger_family"] = row.family
+                try:
+                    dt = datetime.fromisoformat(row.detected_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    status["last_trigger_age_seconds"] = now_ts - dt.timestamp()
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+
+    return status
+
+
+def _format_age(seconds: float) -> str:
+    """Human-readable age string for the sidebar subtext."""
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h ago"
+    return f"{int(seconds // 86400)}d ago"
 
 st.set_page_config(
     page_title="Accendio",
@@ -225,20 +291,33 @@ with st.sidebar:
     st.page_link("pages/9_Scenarios.py",             label="Scenarios")
     st.divider()
 
-    # ── Macro feed status ─────────────────────────────────────────────────────
-    _running = _macro_svc.is_running()
+    # ── Macro feed status (read-only; daemon runs via pipeline/run_macro_feed.py) ─
+    # Freshness probe = JSONL mtime (<60m → LIVE). Subtext shows the age of
+    # the most recent trigger_events.detected_at — the row downstream models
+    # actually consume.
+    _status  = _read_macro_feed_status()
+    _running = _status["running"]
     _dot     = f'<span style="color:{"#4ADE80" if _running else "#F87171"}">●</span>'
     _label   = "LIVE" if _running else "OFFLINE"
-    _n_queued = _macro_svc.queue.qsize()
-    _no_keys  = not _running and not any([
-        __import__("os").getenv("FRED_API_KEY"),
-        __import__("os").getenv("ALPHA_VANTAGE_KEY"),
+    _no_keys = not any([
+        os.getenv("FRED_API_KEY"),
+        os.getenv("ALPHA_VANTAGE_KEY"),
     ])
-    _sub = (
-        "Set FRED_API_KEY / ALPHA_VANTAGE_KEY in .env"
-        if _no_keys
-        else f"{_n_queued} events queued"
-    )
+
+    if _no_keys:
+        _sub = "Set FRED_API_KEY / ALPHA_VANTAGE_KEY in .env"
+    elif not _status["queue_path_exists"]:
+        _sub = "Daemon not started — run: python -m pipeline.run_macro_feed"
+    elif _status["last_trigger_age_seconds"] is not None:
+        _sub = f"Last event: {_format_age(_status['last_trigger_age_seconds'])}"
+        if _status["last_trigger_family"]:
+            _sub += f" · {_status['last_trigger_family']}"
+    elif _status["jsonl_age_seconds"] is not None:
+        # No DB-written triggers yet — fall back to JSONL freshness so the
+        # user still sees something useful while the gate filters everything.
+        _sub = f"Feed active · queue updated {_format_age(_status['jsonl_age_seconds'])}"
+    else:
+        _sub = "Awaiting first event…"
     st.markdown(
         f'<div style="padding:8px 10px;background:{DEPTH};border:0.5px solid {BORDER};'
         f'border-radius:6px;margin-bottom:8px">'

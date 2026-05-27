@@ -41,6 +41,7 @@ Public API
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import uuid
@@ -54,6 +55,24 @@ log = logging.getLogger(__name__)
 
 # ── Minimum severity to even attempt rule evaluation ──────────────────────────
 _MIN_EVAL_SEVERITY = SeverityTier.HIGH   # LOW and MEDIUM signals skip evaluation entirely
+
+
+# ── Macro feed silence canary ──────────────────────────────────────────────────
+# Families that the FRED/AV daemon should be writing into trigger_events on a
+# regular cadence. If none of these has arrived in MACRO_FEED_SILENCE_HOURS,
+# the daemon is presumed dead and a CRITICAL alert fires. Keep this list in
+# sync with FRED_SERIES / AV_INDICATORS in services/macro_ingestion.py.
+MACRO_FAMILIES: Tuple[str, ...] = (
+    "CPI", "Unemployment", "Fed_Funds_Rate",
+    "Yield_Curve_10Y2Y", "Real_Yield_10Y", "Industrial_Production",
+    "PPI_All_Commodities", "M2_Money_Supply", "USD_EUR", "WTI_Spot",
+    # AV indicator family names
+    "CPI_AV", "NFP", "Unemployment_AV", "Fed_Funds_AV",
+    "Treasury_10Y", "Inflation_YoY",
+)
+MACRO_FEED_SILENCE_HOURS = float(os.getenv("MACRO_FEED_SILENCE_HOURS", "24"))
+_FEED_SILENCE_RULE_ID    = "macro_feed_silence"
+_FEED_SILENCE_RULE_NAME  = "Macro Feed Silent"
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -275,6 +294,8 @@ class AlertEngine:
         self._lock = threading.Lock()
         # Thread-safe queue for Streamlit integration (drains on page render)
         self.pending_queue: queue.Queue[Alert] = queue.Queue()
+        # Silence-canary dedup — suppress re-fires for one window.
+        self._last_silence_alert_at: Optional[datetime] = None
 
     # ── Rule management ───────────────────────────────────────────────────────
 
@@ -396,6 +417,131 @@ class AlertEngine:
             for k in stale:
                 del self._dedup[k]
         return len(stale)
+
+    # ── Macro feed silence canary ────────────────────────────────────────────
+
+    def check_macro_feed_silence(
+        self,
+        window_hours: float = MACRO_FEED_SILENCE_HOURS,
+        families: Tuple[str, ...] = MACRO_FAMILIES,
+    ) -> Optional[Alert]:
+        """
+        Fire a CRITICAL alert if no trigger_events row whose family is in
+        `families` has arrived within the last `window_hours`. This is the
+        canary that proves the macro feed daemon is alive end-to-end:
+        if the daemon dies, no FRED/AV rows land, and this check fires.
+
+        Returns the Alert if newly fired, None otherwise (no problem detected,
+        or already alerted within this window — i.e. deduped).
+
+        Safe to call on a timer (e.g. once per Streamlit page render) — the
+        per-window dedup prevents repeated firing while the feed stays silent.
+        """
+        now = _utcnow()
+
+        # Dedup: if we already raised the silence alarm inside this window,
+        # don't raise it again until the window passes.
+        with self._lock:
+            last = self._last_silence_alert_at
+            if last is not None and (now - last) < timedelta(hours=window_hours):
+                return None
+
+        # Probe the DB for the most recent row in any of the macro families.
+        try:
+            from database.db import get_db
+            from database.models import TriggerEvent as DBTriggerEvent
+            from sqlalchemy import func
+
+            with get_db() as session:
+                latest_str = (
+                    session.query(func.max(DBTriggerEvent.detected_at))
+                    .filter(DBTriggerEvent.family.in_(families))
+                    .scalar()
+                )
+        except Exception as exc:
+            log.warning("Macro silence check: DB read failed (%s)", exc)
+            return None
+
+        is_silent = True
+        latest_dt: Optional[datetime] = None
+        if latest_str:
+            try:
+                dt = datetime.fromisoformat(latest_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                latest_dt = dt
+                if (now - dt) < timedelta(hours=window_hours):
+                    is_silent = False
+            except ValueError:
+                pass    # fall through — unparseable timestamp counts as silent
+
+        if not is_silent:
+            return None
+
+        # Build the synthetic alert. No TriggerSignal here — this is a
+        # health-check fire, not a rule match.
+        if latest_dt is None:
+            age_str = "ever"
+            detail = (
+                "No row in trigger_events matches any tracked macro family — "
+                "the feed has never written. Confirm pipeline/run_macro_feed.py "
+                "is running and FRED_API_KEY / ALPHA_VANTAGE_KEY are set."
+            )
+        else:
+            age_h  = (now - latest_dt).total_seconds() / 3600.0
+            age_str = f"{age_h:.1f}h ago"
+            detail = (
+                f"Last macro trigger_events row: {latest_dt.isoformat()} "
+                f"({age_str}). Threshold is {window_hours:.0f}h. "
+                "Check launchd: `launchctl list | grep macrofeed`."
+            )
+
+        alert = Alert(
+            alert_id      = str(uuid.uuid4()),
+            rule_id       = _FEED_SILENCE_RULE_ID,
+            rule_name     = _FEED_SILENCE_RULE_NAME,
+            signal_id     = "",                    # synthetic — no source signal
+            trigger_type  = "MACRO_FEED_SILENCE",
+            severity      = "CRITICAL",
+            headline      = f"🚨 CRITICAL  Macro feed silent · last event {age_str}",
+            message       = (
+                f"The macro ingestion daemon appears to be silent.\n\n"
+                f"{detail}\n\n"
+                f"Logs: logs/macro_feed.log · logs/macro_feed.error.log\n"
+                f"Restart: launchctl kickstart -k gui/$(id -u)/com.accendio.macrofeed"
+            ),
+            fired_at      = now.isoformat(),
+            expires_at    = (now + timedelta(hours=window_hours)).isoformat(),
+            affected_commodities = (),
+            magnitude_score = 1.0,
+            direction       = "neutral",
+            is_critical     = True,
+            matched_commodities = (),
+            matched_clusters    = (),
+            metadata = {
+                "kind":                "feed_silence_canary",
+                "window_hours":         window_hours,
+                "last_macro_event_at":  latest_str,
+                "families_checked":     list(families),
+            },
+        )
+
+        with self._lock:
+            self._last_silence_alert_at = now
+            self.pending_queue.put(alert)
+            handlers_snapshot = list(self._handlers)
+
+        for handler in handlers_snapshot:
+            try:
+                handler([alert])
+            except Exception:
+                log.exception("Silence-canary handler raised")
+
+        log.warning(
+            "Macro feed silence alert fired: last_event=%s (window=%.0fh)",
+            latest_str, window_hours,
+        )
+        return alert
 
     # ── TriggerBus integration ────────────────────────────────────────────────
 
@@ -548,3 +694,10 @@ for _rule in DEFAULT_RULES:
 def evaluate_signal(signal: TriggerSignal) -> List[Alert]:
     """Convenience wrapper — evaluates via the module-level ENGINE."""
     return ENGINE.evaluate(signal)
+
+
+def check_macro_feed_silence(
+    window_hours: float = MACRO_FEED_SILENCE_HOURS,
+) -> Optional[Alert]:
+    """Convenience wrapper — runs the canary against the module-level ENGINE."""
+    return ENGINE.check_macro_feed_silence(window_hours=window_hours)

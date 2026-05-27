@@ -52,6 +52,7 @@ Entry points
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 import warnings
 from dataclasses import dataclass, field
@@ -84,6 +85,22 @@ WTI_MOM_WINDOW = 63     # ~3 trading months
 
 REGIME_LABELS: List[str] = ["bull", "bear", "high_vol", "neutral"]
 REGIME_ALL    = "all"    # sentinel for regime-agnostic fit
+
+# ── Trigger-derived shock regimes (Step 3 of macro_features spec) ─────────────
+# These override the price-derived label on any historical day where a trigger
+# from the matching family fired at strength ≥ TRIGGER_REGIME_MIN_STRENGTH.
+# Live override (get_current_regime) uses the same rule.
+SHOCK_REGIMES: List[str] = ["rate_shock", "growth_shock", "commodity_shock"]
+ALL_REGIME_LABELS: List[str] = REGIME_LABELS + SHOCK_REGIMES
+
+TRIGGER_REGIME_MIN_STRENGTH = 0.8
+TRIGGER_LOOKBACK_DAYS       = 5    # live override window for get_current_regime
+
+# Shrinkage threshold for shock-regime β: below this n_obs, blend toward neutral.
+# Documented hyperparameter per spec's risk note ("New regimes have less
+# training data than the original four. Floor β estimates by shrinking toward
+# the neutral β when sample size < 30").
+SHOCK_REGIME_SHRINKAGE_N = MIN_OBS_REGIME    # 30 by default
 
 # ── Macro variables ────────────────────────────────────────────────────────────
 # Keys must match column names produced by features.macro_overlays.macro_features()
@@ -139,6 +156,81 @@ VALIDATION_CHECKS: List[Tuple[str, str, int, str]] = [
 
 # Zero-tolerance margin: checks with expected_sign==0 pass if |slope| < this
 NEAR_ZERO_THRESHOLD = 0.05
+
+
+# ── Feature flag + trigger history helpers ────────────────────────────────────
+
+def _macro_triggers_enabled() -> bool:
+    """Mirror of cascade_orchestrator's flag — rollback is one env var."""
+    return os.getenv("MACRO_TRIGGERS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_trigger_history(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """
+    Pull all rows from trigger_events whose trigger_date falls in [start, end].
+
+    Returns
+    -------
+    DataFrame with columns: trigger_date (datetime), family (str), strength (float).
+    Empty DataFrame on any DB error so the rest of the pipeline keeps moving.
+    """
+    try:
+        from database.db import get_db
+        from database.models import TriggerEvent
+
+        start_s = pd.Timestamp(start).strftime("%Y-%m-%d")
+        end_s   = pd.Timestamp(end).strftime("%Y-%m-%d")
+
+        with get_db() as db:
+            rows = (
+                db.query(TriggerEvent.trigger_date, TriggerEvent.family, TriggerEvent.strength)
+                .filter(TriggerEvent.trigger_date >= start_s,
+                        TriggerEvent.trigger_date <= end_s)
+                .all()
+            )
+        if not rows:
+            return pd.DataFrame(columns=["trigger_date", "family", "strength"])
+        df = pd.DataFrame(rows, columns=["trigger_date", "family", "strength"])
+        df["trigger_date"] = pd.to_datetime(df["trigger_date"])
+        df["strength"]     = df["strength"].astype(float)
+        return df
+    except Exception as exc:
+        log.warning("_load_trigger_history: DB query failed (%s) — no shock-regime overrides applied", exc)
+        return pd.DataFrame(columns=["trigger_date", "family", "strength"])
+
+
+def _top_shock_per_date(triggers: pd.DataFrame,
+                         min_strength: float = TRIGGER_REGIME_MIN_STRENGTH) -> pd.Series:
+    """
+    Reduce a trigger_events frame to one shock-regime label per date.
+
+    For each ``trigger_date`` we take the row with maximum strength; if that
+    strength is ≥ ``min_strength`` and its family maps to a non-neutral shock
+    regime, that date gets the shock label. Other dates are dropped.
+
+    Returns
+    -------
+    pd.Series  (index=DatetimeIndex of trigger_date, values=shock_regime str)
+    """
+    if triggers.empty:
+        return pd.Series(dtype=str)
+
+    try:
+        from features.macro_features import family_to_regime
+    except Exception:
+        return pd.Series(dtype=str)
+
+    # Per-date max-strength row
+    idx_max = triggers.groupby("trigger_date")["strength"].idxmax()
+    tops    = triggers.loc[idx_max].set_index("trigger_date")
+
+    qualifying = tops[tops["strength"] >= min_strength]
+    if qualifying.empty:
+        return pd.Series(dtype=str)
+
+    regimes = qualifying["family"].map(family_to_regime)
+    # Keep only shock regimes (drop "neutral" mappings).
+    return regimes[regimes.isin(SHOCK_REGIMES)]
 
 
 # ── Sector membership ─────────────────────────────────────────────────────────
@@ -300,6 +392,20 @@ class MacroRouter:
             if n_rec:
                 log.debug("Regime override: %d days forced to 'bear' via USREC flag", n_rec)
 
+        # ── Trigger-derived shock-regime override (Step 3) ────────────────────
+        # On any historical day where the top trigger fired at strength ≥ 0.8
+        # AND maps to a shock regime, replace the price-derived label. trigger
+        # history only exists from when the macro-feed daemon started; older
+        # dates are untouched and continue to use the price-derived label.
+        if _macro_triggers_enabled() and len(idx) > 0:
+            shocks = _top_shock_per_date(_load_trigger_history(idx[0], idx[-1]))
+            if not shocks.empty:
+                shocks = shocks.reindex(idx).dropna()
+                regimes.loc[shocks.index] = shocks.values
+                log.info("Shock-regime overrides applied to %d day(s): %s",
+                         len(shocks),
+                         {r: int((shocks == r).sum()) for r in SHOCK_REGIMES})
+
         return regimes
 
     # ── Sector return index ───────────────────────────────────────────────────
@@ -416,7 +522,7 @@ class MacroRouter:
         # ── 2. Build regime labels ────────────────────────────────────────────
         regimes = self._classify_regimes(prices, macro_df)
 
-        n_by_regime = {r: int((regimes == r).sum()) for r in REGIME_LABELS}
+        n_by_regime = {r: int((regimes == r).sum()) for r in ALL_REGIME_LABELS}
         n_by_regime[REGIME_ALL] = len(regimes)
         log.info("Regime distribution over %d days: %s", len(regimes), n_by_regime)
 
@@ -461,23 +567,57 @@ class MacroRouter:
                     r_squared=r2, p_value=pval, n_obs=n,
                 ))
 
+                # Fit the neutral regime first so shock-regime shrinkage can
+                # reference its β.
+                neutral_mask = (reg_aligned == "neutral").values
+                if neutral_mask.sum() >= self.min_obs_regime:
+                    s_n, i_n, _, _, _ = self._fit_ols(X_all[neutral_mask], y_all[neutral_mask])
+                else:
+                    s_n, i_n = slope, intercept   # fall back to full-window if neutral too sparse
+
                 # Per-regime fits
-                for regime in REGIME_LABELS:
+                for regime in ALL_REGIME_LABELS:
                     mask     = (reg_aligned == regime).values
                     X_r, y_r = X_all[mask], y_all[mask]
+                    n_r      = int(mask.sum())
 
-                    if mask.sum() < self.min_obs_regime:
-                        # Not enough data → copy the "all" coefficient
+                    if regime in SHOCK_REGIMES:
+                        # Spec risk note: shrink shock-regime β toward the
+                        # neutral β when n_obs is small. At n=0 we use the
+                        # neutral β; at n≥SHOCK_REGIME_SHRINKAGE_N we use the
+                        # raw fit; linear blend in between.
+                        if n_r == 0:
+                            s_blended, i_blended = s_n, i_n
+                            r2_b, p_b = 0.0, 1.0
+                        else:
+                            s_raw, i_raw, r2_b, p_b, _ = self._fit_ols(X_r, y_r)
+                            w = min(1.0, n_r / float(SHOCK_REGIME_SHRINKAGE_N))
+                            s_blended = w * s_raw + (1.0 - w) * s_n
+                            i_blended = w * i_raw + (1.0 - w) * i_n
+                            if w < 1.0:
+                                log.debug(
+                                    "Shrinkage applied: %s/%s/%s n=%d w=%.2f raw_β=%.4f → blended_β=%.4f",
+                                    macro_col, sector, regime, n_r, w, s_raw, s_blended,
+                                )
+                        self._results.append(RegressionResult(
+                            macro_var=macro_col, sector=sector, regime=regime,
+                            slope=s_blended, intercept=i_blended,
+                            r_squared=r2_b, p_value=p_b, n_obs=n_r,
+                        ))
+                        continue
+
+                    if n_r < self.min_obs_regime:
+                        # Original-regime fallback: copy the "all" coefficient.
                         self._results.append(RegressionResult(
                             macro_var=macro_col, sector=sector, regime=regime,
                             slope=slope, intercept=intercept,
                             r_squared=r2, p_value=pval,
-                            n_obs=int(mask.sum()),
+                            n_obs=n_r,
                         ))
                         log.debug(
                             "Regime '%s' has only %d obs for %s/%s — "
                             "using full-window coefficient.",
-                            regime, mask.sum(), macro_col, sector,
+                            regime, n_r, macro_col, sector,
                         )
                         continue
 
@@ -490,7 +630,7 @@ class MacroRouter:
 
             log.info(
                 "Regressions done for macro_var=%s across %d sectors × %d regimes",
-                macro_col, len(sect_ret.columns), len(REGIME_LABELS) + 1,
+                macro_col, len(sect_ret.columns), len(ALL_REGIME_LABELS) + 1,
             )
 
         # ── 7. Store metadata ─────────────────────────────────────────────────
@@ -629,7 +769,7 @@ class MacroRouter:
                 "validation":    {"passed": bool, "checks": [...]},
             }
         """
-        all_regimes = REGIME_LABELS + [REGIME_ALL]
+        all_regimes = ALL_REGIME_LABELS + [REGIME_ALL]
         macro_cols  = {r.macro_var for r in self._results}
 
         coefficients: Dict = {mv: {rg: {} for rg in all_regimes} for mv in macro_cols}
@@ -851,6 +991,11 @@ def get_current_regime(macro_df: pd.DataFrame) -> str:
     """
     Classify the most recent date in macro_df into a regime label.
 
+    Step 3 override: if a trigger in the last ``TRIGGER_LOOKBACK_DAYS`` fired
+    at strength ≥ ``TRIGGER_REGIME_MIN_STRENGTH`` and maps to a shock regime,
+    return that label instead of the price-derived one. Controlled by the
+    MACRO_TRIGGERS_ENABLED env var (defaults on).
+
     Parameters
     ----------
     macro_df : pd.DataFrame
@@ -859,8 +1004,24 @@ def get_current_regime(macro_df: pd.DataFrame) -> str:
     Returns
     -------
     str
-        One of: "bull", "bear", "high_vol", "neutral"
+        One of: "bull", "bear", "high_vol", "neutral",
+                "rate_shock", "growth_shock", "commodity_shock"
     """
+    # ── Trigger override (pre-empts the price-derived classification) ─────────
+    if _macro_triggers_enabled():
+        try:
+            from features.macro_features import get_active_triggers, regime_hint_from_triggers
+            as_of = (macro_df.index[-1] if (not macro_df.empty and len(macro_df.index))
+                     else pd.Timestamp.utcnow().normalize())
+            triggers = get_active_triggers(pd.Timestamp(as_of), lookback_days=TRIGGER_LOOKBACK_DAYS)
+            hint     = regime_hint_from_triggers(triggers, min_strength=TRIGGER_REGIME_MIN_STRENGTH)
+            if hint in SHOCK_REGIMES:
+                log.debug("get_current_regime: trigger override → %s", hint)
+                return hint
+        except Exception as exc:
+            log.warning("get_current_regime: trigger override skipped (%s)", exc)
+
+    # ── Existing price-derived classifier ─────────────────────────────────────
     if macro_df.empty or "vix" not in macro_df.columns:
         return "neutral"
 

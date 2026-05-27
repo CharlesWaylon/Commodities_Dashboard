@@ -933,6 +933,50 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ── Trigger-derived regime hint badge (Step 3 of macro_features spec) ─────────
+# Reads the latest cascade_forecasts row's macro_detail JSON, which the
+# cascade orchestrator now stamps with `regime_hint` + `n_active_triggers`.
+# Hidden when there is no cascade data yet or no triggers are active.
+try:
+    from models.cascade_orchestrator import load_cascade_forecasts as _load_cf
+    _cf_df = _load_cf()
+    if not _cf_df.empty and "macro_detail" in _cf_df.columns:
+        _md = _cf_df["macro_detail"].iloc[0] if isinstance(_cf_df["macro_detail"].iloc[0], dict) else {}
+        _hint  = (_md or {}).get("regime_hint", "neutral")
+        _n_act = int((_md or {}).get("n_active_triggers", 0))
+        if _hint != "neutral" or _n_act > 0:
+            _hint_color = {
+                "rate_shock":      RED,
+                "growth_shock":    AMBER,
+                "commodity_shock": AMBER,
+                "neutral":         GREEN,
+            }.get(_hint, GREEN)
+            _hint_label = _hint.replace("_", " ").title() if _hint != "neutral" else "Neutral"
+            st.markdown(
+                f"""
+<div style="
+  background:{DEPTH};border:0.5px solid {_hex_rgba(_hint_color, 0.4)};
+  border-left:3px solid {_hint_color};border-radius:8px;
+  padding:10px 18px;margin-bottom:14px;
+  display:flex;align-items:center;gap:16px;
+">
+  <div>
+    <div style="font-size:9px;color:{_hex_rgba(ICE, 0.35)};letter-spacing:.12em;
+                text-transform:uppercase;margin-bottom:3px">Trigger-derived regime hint</div>
+    <div style="font-size:1rem;font-weight:600;color:{_hint_color}">{_hint_label}</div>
+  </div>
+  <div style="font-size:11px;color:{_hex_rgba(ICE, 0.55)};line-height:1.5">
+    {_n_act} active trigger(s) in the last 5 days at the strength threshold.
+    When a shock-regime trigger fires, downstream cascade fits, macro routing,
+    and upstream damping all switch into the matching shock mode automatically.
+  </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+except Exception:
+    pass
+
 with st.expander("🔢 Causal weight matrix", expanded=False):
     # Column header definitions — shown as subtext inside the header cells
     _COL_DEFS = {

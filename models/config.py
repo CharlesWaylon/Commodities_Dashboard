@@ -190,3 +190,48 @@ SECTOR_RF_DEFAULTS: dict[str, dict] = {
     "livestock":   dict(n_estimators=200, max_depth=4,  min_samples_leaf=20, max_features="sqrt"),
     "digital":     dict(n_estimators=300, max_depth=4,  min_samples_leaf=8,  max_features="sqrt"),
 }
+
+
+# ── Portfolio risk gates (Step 6 of macro_features spec) ──────────────────────
+# Post-QAOA weight adjustments applied when a trigger of the specified family
+# fires at or above ``min_strength``. Edit these to tune behavior without
+# touching the optimizer code.
+#
+# action types:
+#   "sector_cap"            — cap the sector's total weight at
+#                             cap_multiplier × (1/k) (1/k = equal-weight share).
+#   "flatten_toward_equal"  — blend `blend` fraction of weight toward equal
+#                             weight to force diversification.
+#   "turnover_damper"       — blend `damp` fraction of yesterday's portfolio
+#                             into today's weights. Skipped if previous_weights
+#                             is unavailable.
+#
+# The special key "__any_strong__" matches any trigger whose strength is at
+# or above its own ``min_strength``, regardless of family.
+TRIGGER_RISK_GATES: dict = {
+    "fed_tightening": {
+        "min_strength": 0.7,
+        "action":       "flatten_toward_equal",
+        "params":       {"blend": 0.20},
+        "description":  "Force diversification under rate-shock (blend 20% toward equal weight).",
+    },
+    "weather_shock": {
+        "min_strength": 0.7,
+        "action":       "sector_cap",
+        "params":       {"sector": "agriculture", "cap_multiplier": 1.5},
+        "description":  "Cap Agriculture allocation at 1.5× equal weight.",
+    },
+    "opec_action": {
+        "min_strength": 0.7,
+        "action":       "sector_cap",
+        "params":       {"sector": "energy", "cap_multiplier": 1.5},
+        "description":  "Cap Energy allocation at 1.5× equal weight.",
+    },
+    "__any_strong__": {
+        "min_strength": 0.9,
+        "action":       "turnover_damper",
+        "params":       {"damp": 0.30},
+        "description":  "Damp 30% toward yesterday's portfolio for any trigger at strength ≥ 0.9.",
+    },
+}
+

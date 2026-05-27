@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+  <!-- Unique label — must match the filename and is the handle launchctl uses -->
+  <key>Label</key>
+  <string>com.accendio.macrofeed</string>
+
+  <!-- Long-running daemon: pipeline/run_macro_feed.py blocks on the queue and
+       handles SIGTERM cleanly. `/usr/bin/env python3` defers to the user's
+       active python (works with conda, pyenv, system python) so the agent
+       doesn't pin to a single interpreter path. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>-m</string>
+    <string>pipeline.run_macro_feed</string>
+  </array>
+
+  <!-- Project root: `python -m pipeline.run_macro_feed` needs to resolve here,
+       and the daemon's load_dotenv() reads .env relative to cwd. -->
+  <key>WorkingDirectory</key>
+  <string>/Users/charlesmerkel/Desktop/Future_of_Commodities/Commodities_Dashboard</string>
+
+  <!-- Start as soon as the agent is loaded (login + bootstrap). -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Long-running supervision: restart unconditionally if the process exits
+       for any reason (crash, kill, OOM). ThrottleInterval caps the restart
+       rate to once per 30s so a crash-loop can't spin the CPU. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!-- stdout / stderr separated so daemon log noise stays out of error triage. -->
+  <key>StandardOutPath</key>
+  <string>/Users/charlesmerkel/Desktop/Future_of_Commodities/Commodities_Dashboard/logs/macro_feed.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/charlesmerkel/Desktop/Future_of_Commodities/Commodities_Dashboard/logs/macro_feed.error.log</string>
+
+  <!-- FRED_API_KEY / ALPHA_VANTAGE_KEY are loaded from .env at the project
+       root by pipeline/run_macro_feed.py via python-dotenv, so no
+       EnvironmentVariables block is needed here. PATH is set so
+       /usr/bin/env can resolve a non-system python3 if you're using conda. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+</dict>
+</plist>

@@ -758,6 +758,121 @@ else:
         st.warning(f"Causal ripple unavailable: {e}")
 
 
+# ── Historical Trigger Replay (Step 7 of macro_features spec) ────────────────
+st.divider()
+st.markdown("### Historical Trigger Replay — *what actually happened* after similar shocks?")
+st.caption(
+    "Pick a trigger family and a strength threshold. We pull every historical "
+    "day where that family fired at or above the threshold and aggregate the "
+    "realised next-N-day log returns into a bear / median / bull envelope. "
+    "Empirical, not model-based — no smoothing, no assumptions, just past data."
+)
+
+_TRIGGER_FAMILIES = [
+    "opec_action", "weather_shock", "fed_tightening", "fomc_rate_decision",
+    "cpi_release", "ppi_release", "nonfarm_payrolls", "geopolitical_shock",
+    "eia_crude_inventory", "eia_gas_storage", "usda_wasde_report",
+    "fed_chair_speech", "recession_flag", "energy_transition",
+]
+
+tr_col1, tr_col2, tr_col3 = st.columns([2, 1, 1])
+with tr_col1:
+    _replay_family = st.selectbox(
+        "Trigger family",
+        _TRIGGER_FAMILIES,
+        index=0,
+        help="Which historical event family to replay. Families come from "
+             "config/trigger_registry.json.",
+        key="trigger_replay_family",
+    )
+with tr_col2:
+    _replay_strength = st.slider(
+        "Min strength", min_value=0.50, max_value=0.99,
+        value=0.80, step=0.05,
+        help="Only events at or above this strength contribute. Higher = "
+             "fewer events but more decisive shocks.",
+        key="trigger_replay_strength",
+    )
+with tr_col3:
+    _replay_horizon = st.slider(
+        "Horizon (days)", min_value=3, max_value=30, value=10, step=1,
+        key="trigger_replay_horizon",
+    )
+
+try:
+    from models.scenarios import HistoricalTriggerReplay
+    _replay = HistoricalTriggerReplay(prices_full)
+    _replay_band = _replay.build_band(
+        commodity=commodity,
+        family=_replay_family,
+        min_strength=_replay_strength,
+        horizon=_replay_horizon,
+        bear_q=bear_q,
+        bull_q=bull_q,
+    )
+
+    if _replay_band is None:
+        st.info(
+            f"No historical events match `{_replay_family} ≥ {_replay_strength:.2f}` "
+            f"with at least {_replay_horizon} business days of follow-up data for {commodity}. "
+            "Lower the strength threshold or pick a different family — trigger_events only "
+            "began populating after the macro-feed daemon started running, so very recent "
+            "or very specific filters can yield an empty set."
+        )
+    else:
+        n_events = _replay_band.diagnostics["n_events"]
+        last_price_replay = float(prices_full[commodity].dropna().iloc[-1])
+        last_date_replay  = prices_full[commodity].dropna().index[-1]
+        _replay_paths = returns_to_price_paths(last_price_replay, _replay_band)
+        _replay_paths = attach_business_dates(_replay_paths, anchor=last_date_replay)
+
+        rfig = go.Figure()
+        # Historical context (last ~60 business days)
+        _hist_recent = prices_full[commodity].dropna().iloc[-60:]
+        rfig.add_trace(go.Scatter(
+            x=_hist_recent.index, y=_hist_recent.values,
+            mode="lines", name=f"{commodity} (observed)",
+            line=dict(color=BLUE, width=2),
+        ))
+        rfig.add_trace(go.Scatter(
+            x=_replay_paths.index, y=_replay_paths["bull"],
+            mode="lines", name=f"Bull (P{int(bull_q*100)})",
+            line=dict(color=GREEN, width=1, dash="dot"),
+        ))
+        rfig.add_trace(go.Scatter(
+            x=_replay_paths.index, y=_replay_paths["bear"],
+            mode="lines", name=f"Bear (P{int(bear_q*100)})",
+            line=dict(color=RED, width=1, dash="dot"),
+            fill="tonexty", fillcolor="rgba(245, 158, 11, 0.18)",
+        ))
+        rfig.add_trace(go.Scatter(
+            x=_replay_paths.index, y=_replay_paths["mean"],
+            mode="lines+markers", name="Empirical median",
+            line=dict(color=AMBER, width=2.5),
+            marker=dict(size=5),
+        ))
+        rfig.update_layout(
+            **PLOTLY_LAYOUT,
+            title=f"{commodity} — {_replay_horizon}-day replay of {n_events} historical {_replay_family} event(s)",
+            xaxis_title="", yaxis_title="Price",
+            height=440,
+            legend_orientation="h", legend_yanchor="bottom", legend_y=1.02,
+            legend_xanchor="right", legend_x=1,
+        )
+        st.plotly_chart(rfig, use_container_width=True)
+
+        # Quick summary metrics
+        _net_log = float(np.sum(_replay_band.mean))
+        _net_pct = (np.exp(_net_log) - 1.0) * 100.0
+        st.caption(
+            f"Across **{n_events}** historical event(s), {commodity} moved **{_net_pct:+.2f}%** "
+            f"over the next {_replay_horizon} business days on the median path. "
+            f"Bear/bull are the {int(bear_q*100)}th/{int(bull_q*100)}th percentiles of realised outcomes."
+        )
+except Exception as _replay_err:
+    st.warning(f"Historical trigger replay unavailable: {_replay_err}")
+
+
 # ── Stress test (Phase 5) ─────────────────────────────────────────────────────
 st.divider()
 st.markdown("### Stress test — *if* the tail plays out, what happens to the complex?")

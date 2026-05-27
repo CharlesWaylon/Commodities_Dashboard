@@ -110,6 +110,52 @@ class FREDPoller:
         self._last_seen: Dict[str, str] = {}          # series_id → last obs date
         self._history: Dict[str, List[float]] = {s: [] for s in FRED_SERIES}
 
+    def seed_last_seen(self, days: int) -> int:
+        """
+        Backfill _last_seen from trigger_events so a restart does not re-emit
+        releases the DB already has. For each FRED series, finds the most
+        recent trigger_date (family=meta['name']) within the lookback window
+        and seeds _last_seen[series_id] to it. Series with no rows in the
+        window get seeded to `today - days` so we never replay ancient data.
+
+        Returns the number of series seeded from DB (vs floor).
+        """
+        from datetime import date as _date_type
+        floor_date = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+        seeded_from_db = 0
+
+        try:
+            from database.db import get_db
+            from database.models import TriggerEvent as DBTriggerEvent
+            from sqlalchemy import func
+
+            with get_db() as session:
+                for series_id, meta in FRED_SERIES.items():
+                    family = meta["name"]
+                    most_recent = (
+                        session.query(func.max(DBTriggerEvent.trigger_date))
+                        .filter(DBTriggerEvent.family == family)
+                        .filter(DBTriggerEvent.trigger_date >= floor_date)
+                        .scalar()
+                    )
+                    if most_recent:
+                        # trigger_date is stored as ISO date string ("YYYY-MM-DD").
+                        seed = most_recent if isinstance(most_recent, str) else most_recent.isoformat()
+                        self._last_seen[series_id] = seed
+                        seeded_from_db += 1
+                    else:
+                        self._last_seen[series_id] = floor_date
+        except Exception as exc:
+            logger.warning("FRED seed_last_seen: DB read failed (%s) — falling back to floor", exc)
+            for series_id in FRED_SERIES:
+                self._last_seen.setdefault(series_id, floor_date)
+
+        logger.info(
+            "FRED backfill: seeded %d/%d series from DB; floor=%s (lookback=%dd)",
+            seeded_from_db, len(FRED_SERIES), floor_date, days,
+        )
+        return seeded_from_db
+
     def poll(self) -> List[MacroEvent]:
         start = (datetime.now(timezone.utc) - timedelta(days=120)).strftime("%Y-%m-%d")
         events: List[MacroEvent] = []
@@ -144,7 +190,11 @@ class FREDPoller:
             except ValueError:
                 continue
 
-            if self._last_seen.get(series_id) == latest_date:
+            # Emit only when the FRED publish-date is strictly newer than the
+            # last release we've already counted (seeded from trigger_events on
+            # startup so restarts don't replay history).
+            prev = self._last_seen.get(series_id)
+            if prev is not None and latest_date <= prev:
                 continue
             self._last_seen[series_id] = latest_date
 
@@ -204,7 +254,113 @@ AV_INDICATORS: Dict[str, dict] = {
 }
 
 _AV_BASE = "https://www.alphavantage.co/query"
-_AV_CALL_DELAY = 13.0  # seconds between calls — free tier: 5 req/min
+
+# Free tier: 5 req/min, 25 req/day. The token bucket below enforces both
+# limits across all AV pollers sharing this limiter instance.
+_AV_PER_MINUTE = 5
+_AV_PER_DAY    = 25
+_AV_BACKOFF_LADDER_SECONDS = (60, 300, 900)  # 1m → 5m → 15m
+
+
+class AVRateLimiter:
+    """
+    Thread-safe token bucket shared by every AV-backed poller.
+
+    Enforces both the per-minute (5) and per-day (25) caps via sliding-window
+    accounting. On a 429 / "Note: API call frequency" response, callers should
+    invoke .register_throttled() to walk up the backoff ladder; .register_ok()
+    resets the ladder on the next successful call.
+    """
+
+    def __init__(
+        self,
+        per_minute: int = _AV_PER_MINUTE,
+        per_day:    int = _AV_PER_DAY,
+        ladder:     tuple = _AV_BACKOFF_LADDER_SECONDS,
+    ):
+        self._per_minute   = per_minute
+        self._per_day      = per_day
+        self._ladder       = ladder
+        self._lock         = threading.Lock()
+        self._cond         = threading.Condition(self._lock)
+        self._calls: List[float] = []          # unix timestamps of recent acquires
+        self._backoff_step = -1                # -1 = no active backoff
+        self._backoff_until_ts = 0.0           # unix timestamp; no calls before this
+
+    def acquire(self, label: str = "AV") -> bool:
+        """
+        Block until a token is available. Returns True on success, False if
+        the daily cap has been exhausted (caller should give up this cycle).
+        """
+        with self._cond:
+            while True:
+                now = time.time()
+                # Purge events older than 24h so the day window slides.
+                cutoff_day = now - 86_400
+                self._calls = [t for t in self._calls if t >= cutoff_day]
+
+                if len(self._calls) >= self._per_day:
+                    # Hard cap: wait until the oldest call falls off the day window.
+                    wait_s = (self._calls[0] + 86_400) - now
+                    logger.warning(
+                        "%s: daily cap (%d) hit — sleeping %.0fs until window resets",
+                        label, self._per_day, max(wait_s, 0),
+                    )
+                    self._cond.wait(timeout=max(wait_s, 1.0))
+                    continue
+
+                if now < self._backoff_until_ts:
+                    wait_s = self._backoff_until_ts - now
+                    logger.warning(
+                        "%s: in backoff — sleeping %.0fs", label, wait_s,
+                    )
+                    self._cond.wait(timeout=wait_s)
+                    continue
+
+                cutoff_minute = now - 60.0
+                in_last_minute = sum(1 for t in self._calls if t >= cutoff_minute)
+                if in_last_minute >= self._per_minute:
+                    oldest_in_min = min(t for t in self._calls if t >= cutoff_minute)
+                    wait_s = (oldest_in_min + 60.0) - now
+                    self._cond.wait(timeout=max(wait_s, 0.5))
+                    continue
+
+                # Token granted.
+                self._calls.append(now)
+                return True
+
+    def register_ok(self) -> None:
+        """Reset the backoff ladder after a clean response."""
+        with self._cond:
+            self._backoff_step    = -1
+            self._backoff_until_ts = 0.0
+
+    def register_throttled(self, label: str = "AV") -> None:
+        """Walk up the backoff ladder (1m → 5m → 15m, capped at last rung)."""
+        with self._cond:
+            self._backoff_step = min(self._backoff_step + 1, len(self._ladder) - 1)
+            penalty = self._ladder[self._backoff_step]
+            self._backoff_until_ts = time.time() + penalty
+            logger.warning(
+                "%s: throttled — backing off %ds (step %d/%d)",
+                label, penalty, self._backoff_step + 1, len(self._ladder),
+            )
+            self._cond.notify_all()
+
+    def calls_in_last(self, seconds: float) -> int:
+        """Diagnostic helper: how many tokens acquired in the last N seconds."""
+        with self._lock:
+            cutoff = time.time() - seconds
+            return sum(1 for t in self._calls if t >= cutoff)
+
+
+def _is_throttled_response(resp) -> bool:
+    """True if AV signaled rate-limiting via 429 or the textual 'Note' field."""
+    if resp.status_code == 429:
+        return True
+    body = (resp.text or "")[:512].lower()
+    # AV returns 200 with a JSON {"Note": "...call frequency..."} on free-tier throttle.
+    return ("api call frequency" in body) or ('"note"' in body and "frequency" in body)
 
 
 class AlphaVantagePoller:
@@ -216,10 +372,49 @@ class AlphaVantagePoller:
     consensus is available.
     """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, limiter: Optional[AVRateLimiter] = None):
         self._api_key = api_key
+        self._limiter = limiter or AVRateLimiter()
         self._last_seen: Dict[str, str] = {}
         self._history: Dict[str, List[float]] = {fn: [] for fn in AV_INDICATORS}
+
+    def seed_last_seen(self, days: int) -> int:
+        """
+        Same contract as FREDPoller.seed_last_seen — for AV_INDICATORS.
+        Keys are AV function names; values are the latest observed date.
+        """
+        floor_date = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+        seeded_from_db = 0
+        try:
+            from database.db import get_db
+            from database.models import TriggerEvent as DBTriggerEvent
+            from sqlalchemy import func
+
+            with get_db() as session:
+                for function, meta in AV_INDICATORS.items():
+                    family = meta["name"]
+                    most_recent = (
+                        session.query(func.max(DBTriggerEvent.trigger_date))
+                        .filter(DBTriggerEvent.family == family)
+                        .filter(DBTriggerEvent.trigger_date >= floor_date)
+                        .scalar()
+                    )
+                    if most_recent:
+                        seed = most_recent if isinstance(most_recent, str) else most_recent.isoformat()
+                        self._last_seen[function] = seed
+                        seeded_from_db += 1
+                    else:
+                        self._last_seen[function] = floor_date
+        except Exception as exc:
+            logger.warning("AV seed_last_seen: DB read failed (%s) — falling back to floor", exc)
+            for function in AV_INDICATORS:
+                self._last_seen.setdefault(function, floor_date)
+
+        logger.info(
+            "AV backfill: seeded %d/%d functions from DB; floor=%s (lookback=%dd)",
+            seeded_from_db, len(AV_INDICATORS), floor_date, days,
+        )
+        return seeded_from_db
 
     def _fetch(self, function: str, interval: str) -> Optional[List[dict]]:
         params: dict = {"function": function, "apikey": self._api_key}
@@ -227,9 +422,17 @@ class AlphaVantagePoller:
             params["interval"] = interval
         if function == "TREASURY_YIELD":
             params["maturity"] = "10year"
+
+        # Token-bucket gate: blocks until a per-minute slot is free; aborts
+        # if the daily 25-call cap is already exhausted.
+        self._limiter.acquire(label=f"AV/{function}")
         try:
             resp = requests.get(_AV_BASE, params=params, timeout=20)
+            if _is_throttled_response(resp):
+                self._limiter.register_throttled(label=f"AV/{function}")
+                return None
             resp.raise_for_status()
+            self._limiter.register_ok()
             return resp.json().get("data", [])
         except Exception as exc:
             logger.warning("AV %s: fetch failed — %s", function, exc)
@@ -240,7 +443,6 @@ class AlphaVantagePoller:
 
         for function, meta in AV_INDICATORS.items():
             records = self._fetch(function, meta["interval"])
-            time.sleep(_AV_CALL_DELAY)  # rate-limit guard before next call
 
             if not records:
                 continue
@@ -256,7 +458,8 @@ class AlphaVantagePoller:
             except (ValueError, KeyError):
                 continue
 
-            if self._last_seen.get(function) == latest_date:
+            prev = self._last_seen.get(function)
+            if prev is not None and latest_date <= prev:
                 continue
             self._last_seen[function] = latest_date
 
@@ -322,9 +525,15 @@ class EconomicCalendarPoller:
     a consensus estimate is available; else (actual − previous) / |previous|.
     """
 
-    def __init__(self, api_key: str, horizon: str = "3month"):
+    def __init__(
+        self,
+        api_key: str,
+        horizon: str = "3month",
+        limiter: Optional[AVRateLimiter] = None,
+    ):
         self._api_key = api_key
         self._horizon = horizon
+        self._limiter = limiter or AVRateLimiter()
         self._seen: Set[str] = set()
         self._surprise_history: Dict[str, List[float]] = {}
 
@@ -340,6 +549,7 @@ class EconomicCalendarPoller:
             return None
 
     def poll(self) -> List[MacroEvent]:
+        self._limiter.acquire(label="AV/ECONOMIC_CALENDAR")
         try:
             resp = requests.get(
                 _AV_BASE,
@@ -350,7 +560,11 @@ class EconomicCalendarPoller:
                 },
                 timeout=20,
             )
+            if _is_throttled_response(resp):
+                self._limiter.register_throttled(label="AV/ECONOMIC_CALENDAR")
+                return []
             resp.raise_for_status()
+            self._limiter.register_ok()
         except Exception as exc:
             logger.warning("Economic calendar fetch failed: %s", exc)
             return []
@@ -449,11 +663,14 @@ DEFAULT_CONFIG: dict = {
         "enabled": True,
         "poll_interval_minutes": 30,
     },
-    # Write high-impact events (|deviation| >= 1σ) to trigger_events DB table
-    # so downstream cascade/routing models pick them up automatically.
+    # Write events to trigger_events DB table so downstream cascade/routing
+    # models pick them up automatically. Defaults are deliberately permissive
+    # (medium impact, ≥0.5σ deviation) — earlier high/1.0σ defaults produced
+    # zero rows from the 10 FRED series. Override via MACRO_MIN_DEV /
+    # MACRO_MIN_IMPACT env vars when running pipeline/run_macro_feed.py.
     "db_write_enabled": True,
-    "db_write_min_deviation": 1.0,
-    "db_write_min_impact": "high",
+    "db_write_min_deviation": float(os.getenv("MACRO_MIN_DEV", "0.5")),
+    "db_write_min_impact": os.getenv("MACRO_MIN_IMPACT", "medium"),
 }
 
 
@@ -486,9 +703,19 @@ class MacroIngestionService:
         self._stop_event = threading.Event()
         self._threads: List[threading.Thread] = []
 
+        # One token bucket shared by both AV-backed pollers so the 5/min
+        # and 25/day caps are enforced across the whole service, not per-poller.
+        self._av_limiter = AVRateLimiter() if av_api_key else None
+
         self._fred = FREDPoller(fred_api_key) if fred_api_key else None
-        self._av = AlphaVantagePoller(av_api_key) if av_api_key else None
-        self._calendar = EconomicCalendarPoller(av_api_key) if av_api_key else None
+        self._av = (
+            AlphaVantagePoller(av_api_key, limiter=self._av_limiter)
+            if av_api_key else None
+        )
+        self._calendar = (
+            EconomicCalendarPoller(av_api_key, limiter=self._av_limiter)
+            if av_api_key else None
+        )
 
         if not fred_api_key:
             logger.warning("FRED_API_KEY not set — FRED poller disabled.")
@@ -543,6 +770,21 @@ class MacroIngestionService:
     def is_running(self) -> bool:
         return any(t.is_alive() for t in self._threads)
 
+    def backfill(self, days: int = 7) -> None:
+        """
+        Seed each poller's _last_seen cache from the trigger_events table so
+        the first poll cycle after a restart does not re-emit releases the
+        DB already has. Call before start().
+        """
+        if self._fred is not None:
+            self._fred.seed_last_seen(days)
+        if self._av is not None:
+            self._av.seed_last_seen(days)
+        # EconomicCalendarPoller maintains its own dedup set keyed by
+        # "date|event_name" — there's no clean reverse mapping from the
+        # underscore-normalized family back to that key, so the calendar
+        # is deliberately left to self-deduplicate on its first poll.
+
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _run_poller(self, poller, interval_seconds: int, label: str) -> None:
@@ -568,13 +810,23 @@ class MacroIngestionService:
         thresholds. Uses the family+trigger_date unique constraint to merge
         same-day re-fires.
         """
-        min_dev = self._config.get("db_write_min_deviation", 1.0)
-        min_impact = self._config.get("db_write_min_impact", "high")
+        min_dev = self._config.get("db_write_min_deviation", 0.5)
+        min_impact = self._config.get("db_write_min_impact", "medium")
         impact_rank = {"low": 0, "medium": 1, "high": 2}
 
-        if impact_rank.get(event.impact, 0) < impact_rank.get(min_impact, 2):
+        if impact_rank.get(event.impact, 0) < impact_rank.get(min_impact, 1):
+            logger.info(
+                "below threshold (dev=%.2f, impact=%s) — %s/%s skipped (min_dev=%.2f, min_impact=%s)",
+                event.deviation_score, event.impact,
+                event.source, event.event_type, min_dev, min_impact,
+            )
             return
         if abs(event.deviation_score) < min_dev:
+            logger.info(
+                "below threshold (dev=%.2f, impact=%s) — %s/%s skipped (min_dev=%.2f, min_impact=%s)",
+                event.deviation_score, event.impact,
+                event.source, event.event_type, min_dev, min_impact,
+            )
             return
 
         try:
@@ -601,6 +853,7 @@ class MacroIngestionService:
                 if existing:
                     existing.strength = strength
                     existing.trigger_metadata = meta_json
+                    action = "updated"
                 else:
                     session.add(DBTriggerEvent(
                         detected_at=datetime.now(timezone.utc).isoformat(),
@@ -615,6 +868,12 @@ class MacroIngestionService:
                         trigger_metadata=meta_json,
                         inserted_at=datetime.now(timezone.utc).isoformat(),
                     ))
+                    action = "inserted"
+            logger.info(
+                "wrote to DB (%s) — %s/%s dev=%+.2fσ impact=%s strength=%.2f date=%s",
+                action, event.source, event.event_type,
+                event.deviation_score, event.impact, strength, trigger_date,
+            )
         except Exception as exc:
             logger.warning("DB write for MacroEvent failed: %s", exc)
 

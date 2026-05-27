@@ -15,17 +15,26 @@ This is a linear, first-order approximation — fine for visualising how
 much of a source scenario "leaks" into related commodities, not a joint
 distribution. The IRF is computed once at fit time, so propagation across
 many targets is essentially free.
+
+HistoricalTriggerReplay — Step 7 of the macro_features spec.
+Builds a ScenarioBand by REPLAYING historical days where a chosen trigger
+family fired above a strength threshold, rather than synthesising shocks
+from a model. The resulting envelope is the empirical bear/mean/bull range
+of what actually happened after similar shocks in the past.
 """
 
 from __future__ import annotations
 
+import logging
 import warnings
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 
 from models.scenarios.band import ScenarioBand
+
+log = logging.getLogger(__name__)
 
 
 class CausalRipple:
@@ -154,3 +163,122 @@ class CausalRipple:
             denom = diag0[j] if abs(diag0[j]) > 1e-12 else 1.0
             out[:, j] = self._cube[:horizon, :, j].mean(axis=0) / denom
         return pd.DataFrame(out, index=self._cols, columns=self._cols).round(3)
+
+
+# ── Step 7: Historical Trigger Replay ─────────────────────────────────────────
+
+class HistoricalTriggerReplay:
+    """
+    Build a ScenarioBand from real history.
+
+    Instead of synthesising shocks via a model (ARIMA / VAR / XGBoost), this
+    class queries ``trigger_events`` for historical days where a chosen family
+    fired at or above ``min_strength``, then aggregates the realised next-H
+    daily log returns of the target commodity into a bear/mean/bull envelope.
+
+    The result is the empirical shock-and-decay profile from past episodes —
+    no model assumptions, just "here's what actually happened last time."
+
+    Example
+    -------
+    >>> replay = HistoricalTriggerReplay(prices)
+    >>> band = replay.build_band(
+    ...     commodity="WTI Crude Oil",
+    ...     family="opec_action",
+    ...     min_strength=0.8,
+    ...     horizon=10,
+    ... )
+    >>> if band is not None:
+    ...     print(band.diagnostics["n_events"], "historical events used")
+    """
+
+    def __init__(self, prices: pd.DataFrame):
+        if prices is None or prices.empty:
+            raise ValueError("HistoricalTriggerReplay: prices DataFrame is empty.")
+        self._prices = prices.sort_index()
+        # Daily log returns (vectorised across all columns).
+        self._logret = np.log(self._prices / self._prices.shift(1))
+
+    # ── trigger lookup ────────────────────────────────────────────────────────
+
+    def _fetch_event_dates(self, family: str, min_strength: float) -> List[pd.Timestamp]:
+        """Pull trigger_events rows matching (family, ≥ strength). [] on DB error."""
+        try:
+            from database.db import get_db
+            from database.models import TriggerEvent
+            with get_db() as db:
+                rows = (
+                    db.query(TriggerEvent.trigger_date)
+                    .filter(TriggerEvent.family == family)
+                    .filter(TriggerEvent.strength >= min_strength)
+                    .all()
+                )
+            return [pd.Timestamp(r[0]) for r in rows]
+        except Exception as exc:
+            log.warning("HistoricalTriggerReplay: trigger lookup failed (%s)", exc)
+            return []
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def build_band(
+        self,
+        commodity:    str,
+        family:       str,
+        min_strength: float = 0.8,
+        horizon:      int   = 10,
+        bear_q:       float = 0.10,
+        bull_q:       float = 0.90,
+    ) -> Optional[ScenarioBand]:
+        """
+        Build a ScenarioBand from historical trigger occurrences.
+
+        Returns
+        -------
+        ScenarioBand or None when no events match (so the caller can fall back
+        to a synthetic model gracefully).
+        """
+        if commodity not in self._logret.columns:
+            log.info("HistoricalTriggerReplay: %r not in prices", commodity)
+            return None
+
+        event_dates = self._fetch_event_dates(family, min_strength)
+        if not event_dates:
+            return None
+
+        series = self._logret[commodity].dropna()
+        if series.empty:
+            return None
+
+        # For each event date, take the H business days that follow.
+        paths: List[np.ndarray] = []
+        for ev in event_dates:
+            after = series[series.index > ev].iloc[:horizon]
+            if len(after) == horizon:
+                paths.append(after.values)
+
+        if not paths:
+            return None
+
+        path_mat = np.vstack(paths)            # shape (n_events, horizon)
+        mean_path = np.median(path_mat, axis=0)
+        bear_path = np.quantile(path_mat, bear_q, axis=0)
+        bull_path = np.quantile(path_mat, bull_q, axis=0)
+
+        return ScenarioBand(
+            commodity=commodity,
+            source_model=f"HistoricalTriggerReplay[{family}≥{min_strength:.2f}]",
+            asof=self._prices.index[-1] if len(self._prices.index) else pd.Timestamp.utcnow(),
+            horizon=horizon,
+            bear_q=bear_q,
+            bull_q=bull_q,
+            mean=mean_path,
+            bear=bear_path,
+            bull=bull_path,
+            diagnostics={
+                "family":       family,
+                "min_strength": min_strength,
+                "n_events":     len(paths),
+                "n_events_db":  len(event_dates),
+                "horizon":      horizon,
+            },
+        )

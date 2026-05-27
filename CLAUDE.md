@@ -48,3 +48,32 @@ Every new model, selectbox, or data-loading path added to this project **must** 
   launchctl load ~/Library/LaunchAgents/com.accendio.commodities.ingest.plist    # re-enable
   ```
 - **Network note:** yfinance is blocked in the Cowork sandbox. Ingestion must run on the user's Mac directly (launchd handles this).
+- **Macro feed daemon (separate from ingest):** `pipeline/run_macro_feed.py` is supervised by `ops/com.accendio.macrofeed.plist` (`KeepAlive=true`, restarts on crash). Bootstrap once with `launchctl bootstrap gui/$(id -u) ops/com.accendio.macrofeed.plist` (run from repo root); check with `launchctl list | grep macrofeed`; logs at `logs/macro_feed.log` and `logs/macro_feed.error.log`.
+
+---
+
+## Macro trigger integration (shipped 2026-05-27)
+
+### Where features live
+- **`features/macro_features.py`** is the single source of truth for "what was the macro state on date X?" Every downstream model reads from here rather than re-deriving its own snapshot.
+- **Public API:** `get_macro_state_at(date)`, `get_active_triggers(date, lookback_days)`, `build_macro_surprise_features(date)`, `family_to_regime(family)`, `regime_hint_from_triggers(triggers)`.
+
+### Feature flag
+- `MACRO_TRIGGERS_ENABLED` (env var, default `true`) gates every trigger-aware code path.
+- Rollback for the whole stack: `export MACRO_TRIGGERS_ENABLED=false`. All affected modules (`cascade_orchestrator`, `macro_router`, `sector_model`, `meta_predictor`, `portfolio_optimizer`) check this independently and fall back to pre-trigger behavior.
+
+### Adding a new trigger family
+1. **Register the family** in `config/trigger_registry.json` (the existing pattern) and write its detector in `features/trigger_detectors.py` or a `services/` ingestor.
+2. **Map it to a regime** by adding an entry to `_FAMILY_TO_REGIME` in `features/macro_features.py`. The regime must be one of `rate_shock`, `growth_shock`, `commodity_shock`. If the family doesn't fit cleanly, the `family_to_regime` prefix-substring fallback handles `fed_*`, `cpi_*`, `ppi_*`, `opec_*`, `weather_*`, `eia_*`, `usda_*`, `energy_*`, `geo*`, `unemployment_*`, `gdp_*`, `nonfarm_*`, `recession_*` automatically.
+3. **(Optional) macro-snapshot amplification** — if this family should boost specific snapshot features in cascade fits, add it to `TRIGGER_FAMILY_TO_MACRO_FEATURES` at the top of `models/cascade_orchestrator.py`.
+4. **(Optional) upstream-sector boost** — if this family should intensify a specific upstream sector path in `sector_model.predict_with_context`, add it to `TRIGGER_FAMILY_TO_UPSTREAM_SECTOR` at the top of `models/sector_model.py`.
+5. **(Optional) portfolio risk gate** — if this family should reshape allocations, add an entry to `TRIGGER_RISK_GATES` in `models/config.py` (data-driven; non-engineers can tune without touching code).
+
+### Per-step audit (where to inspect that triggers are flowing)
+- **Step 1 surface:** `features/macro_features.py` + `features/test_macro_features.py`.
+- **Step 2 cascade snapshot blending:** `models/cascade_orchestrator.py` — see `_extract_macro_snapshot`, `_apply_trigger_amplification`. Result carries `regime_hint` + `active_triggers`. Per-row macro_detail JSON includes `regime_hint` + `n_active_triggers`.
+- **Step 3 regime override:** `models/macro_router.py` — `get_current_regime` is overridden by triggers when `MACRO_TRIGGERS_ENABLED`. Backtest classifier `_classify_regimes` writes shock-regime labels into the historical regime series; `fit()` learns separate β coefficients for `rate_shock` / `growth_shock` / `commodity_shock` with linear shrinkage toward neutral β when `n_obs < SHOCK_REGIME_SHRINKAGE_N` (=30).
+- **Step 4 dynamic upstream damping:** `models/sector_model.py` — `_compute_upstream_adjustment` reads `active_triggers` (caller-supplied by cascade, otherwise auto-fetched) and boosts the damping on upstream paths whose sector matches `TRIGGER_FAMILY_TO_UPSTREAM_SECTOR`.
+- **Step 5 meta-predictor features:** `models/meta_predictor.py` — `FEATURE_COLUMNS` now includes 7 trigger-derived columns (`cpi_surprise_z`, `unrate_surprise_z`, `fedfunds_surprise_z`, `t10y2y_change_5d`, and three `regime_hint_onehot_*` indicators). After this change, the next `daily_retrain` rewrites `data/meta_predictor.pkl`; old pkls are detected by feature-count mismatch in `load()` and the predictor falls back to equal-weights instead of crashing.
+- **Step 6 portfolio risk gates:** `models/portfolio_optimizer.py::apply_trigger_risk_gates` — pure function applied post-QAOA. Rules live in `models/config.py::TRIGGER_RISK_GATES`. `CascadePortfolioResult.weights` returns `gated_weights` when any gate fires (transparent to existing callers).
+- **Step 7 historical replay scenarios:** `models/scenarios/ripple.py::HistoricalTriggerReplay` — surfaceable on `pages/9_Scenarios.py` as a new scenario type.

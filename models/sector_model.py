@@ -61,10 +61,37 @@ log = logging.getLogger(__name__)
 
 # Upstream shocks are multiplied by correlation × this factor before adding to
 # the base forecast.  Keeps upstream propagation from dominating the signal.
-UPSTREAM_DAMPING = 0.25
+#
+# Step 4 of the macro_features spec: this is now a baseline; when a high-strength
+# trigger is active whose family points to a given upstream sector, the damping
+# on that path is boosted to UPSTREAM_DAMPING + TRIGGER_BOOST_COEFF * strength
+# (range [UPSTREAM_DAMPING, UPSTREAM_DAMPING + TRIGGER_BOOST_COEFF]). Per-path
+# boost — not all upstream paths uniformly.
+UPSTREAM_DAMPING       = 0.25
+TRIGGER_BOOST_COEFF    = 0.25     # spec range: dynamic ∈ [0.25, 0.50]
+
+# Per-family mapping from trigger family → the UPSTREAM sector it intensifies.
+# Energy is upstream of metals/ag/livestock/digital; agriculture is upstream of
+# livestock. Rate-shock families (cpi/ppi/fomc/fed_*) are handled via the macro
+# routing layer (Step 2), not here, so they intentionally have no entry.
+TRIGGER_FAMILY_TO_UPSTREAM_SECTOR: Dict[str, str] = {
+    "opec_action":         "energy",
+    "eia_crude_inventory": "energy",
+    "eia_gas_storage":     "energy",
+    "energy_transition":   "energy",
+    "geopolitical_shock":  "energy",   # oil price spikes are the dominant channel
+    "weather_shock":       "agriculture",
+    "usda_wasde_report":   "agriculture",
+}
 
 # Minimum IC to treat as a useable base confidence
 MIN_IC = 0.0
+
+
+def _macro_triggers_enabled() -> bool:
+    """Mirror of the cascade_orchestrator / macro_router flag."""
+    import os
+    return os.getenv("MACRO_TRIGGERS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 # Default intra-sector correlation used when the DB snapshot is unavailable
 _DEFAULT_INTRA_SECTOR_CORR  = 0.50
@@ -328,6 +355,7 @@ class SectorSpecificModel(SignalBroadcaster):
         upstream_shocks: Optional[Dict[str, float]] = None,
         regime: Optional[str] = None,
         horizon: int = 1,
+        active_triggers: Optional[List[Dict]] = None,
     ) -> Dict:
         """
         Full layered forecast combining base XGBoost prediction with macro
@@ -390,9 +418,14 @@ class SectorSpecificModel(SignalBroadcaster):
         )
 
         # ── 3. Upstream shock propagation ─────────────────────────────────────
+        # Resolve triggers: caller-supplied (cascade pre-fetches them) wins;
+        # otherwise fetch via macro_features so this method is useful in
+        # isolation. None when the flag is off.
+        triggers = active_triggers if active_triggers is not None else self._fetch_triggers(prices)
         upstream_adj, upstream_detail = self._compute_upstream_adjustment(
             upstream_shocks=upstream_shocks or {},
             prices=prices,
+            active_triggers=triggers,
         )
 
         # ── 4. Final forecast ──────────────────────────────────────────────────
@@ -505,14 +538,23 @@ class SectorSpecificModel(SignalBroadcaster):
         self,
         upstream_shocks: Dict[str, float],
         prices: pd.DataFrame,
+        active_triggers: Optional[List[Dict]] = None,
     ) -> Tuple[float, Dict[str, float]]:
         """
         Propagate upstream commodity forecasts via pairwise correlation.
 
         For each upstream commodity with a forecast, the contribution is:
-            corr(this_commodity, upstream_commodity) × forecast × upstream_damping
+            corr(this_commodity, upstream_commodity) × forecast × damping
 
-        Uses the most recent correlation snapshot from the DB.  Falls back to
+        ``damping`` is normally ``self.upstream_damping`` (0.25). When
+        ``active_triggers`` contains a high-strength trigger whose family maps
+        to the upstream commodity's sector via TRIGGER_FAMILY_TO_UPSTREAM_SECTOR,
+        the damping on THAT path is boosted to
+        ``self.upstream_damping + TRIGGER_BOOST_COEFF * top_match_strength``
+        (range [0.25, 0.50]). Other upstream paths are untouched — spec rule:
+        "boost only that path rather than all upstream paths uniformly."
+
+        Uses the most recent correlation snapshot from the DB. Falls back to
         default intra/cross-sector correlations when the snapshot is unavailable.
 
         NOTE: When models/dependency_graph.py is built, pass its sorted causal
@@ -524,9 +566,22 @@ class SectorSpecificModel(SignalBroadcaster):
         corr_mat = _get_corr()
         detail:   Dict[str, float] = {}
 
+        # Pre-compute per-sector max trigger strength so we look it up cheaply.
+        sector_boost: Dict[str, float] = {}
+        if active_triggers:
+            for t in active_triggers:
+                upstream_sector = TRIGGER_FAMILY_TO_UPSTREAM_SECTOR.get(t.get("family", ""))
+                if not upstream_sector:
+                    continue
+                strength = float(t.get("strength", 0.0))
+                if strength > sector_boost.get(upstream_sector, 0.0):
+                    sector_boost[upstream_sector] = strength
+
         for upstream_commodity, upstream_forecast in upstream_shocks.items():
             if upstream_commodity == self.commodity:
                 continue
+
+            upstream_sector = COMMODITY_SECTORS.get(upstream_commodity, "")
 
             # Resolve pairwise correlation
             if (
@@ -537,7 +592,6 @@ class SectorSpecificModel(SignalBroadcaster):
                 corr = float(corr_mat.loc[self.commodity, upstream_commodity])
             else:
                 # Default: same-sector = 0.50, cross-sector = 0.10
-                upstream_sector = COMMODITY_SECTORS.get(upstream_commodity, "")
                 corr = (
                     _DEFAULT_INTRA_SECTOR_CORR
                     if upstream_sector == self.sector
@@ -548,11 +602,34 @@ class SectorSpecificModel(SignalBroadcaster):
                     self.commodity, upstream_commodity, corr,
                 )
 
-            contribution = corr * float(upstream_forecast) * self.upstream_damping
+            # Per-path dynamic damping (Step 4 of macro_features spec).
+            top_strength = sector_boost.get(upstream_sector, 0.0)
+            damping = self.upstream_damping + TRIGGER_BOOST_COEFF * top_strength
+
+            contribution = corr * float(upstream_forecast) * damping
             detail[upstream_commodity] = round(contribution, 6)
 
         total = sum(detail.values())
         return total, detail
+
+    # ── Trigger fetching ──────────────────────────────────────────────────────
+
+    def _fetch_triggers(self, prices: pd.DataFrame) -> List[Dict]:
+        """
+        Pull active triggers for the latest date in ``prices`` so callers that
+        don't pre-fetch them (single-commodity inference paths) still get
+        per-path damping when MACRO_TRIGGERS_ENABLED is on. Returns [] on any
+        failure so prediction never depends on this layer.
+        """
+        if not _macro_triggers_enabled():
+            return []
+        try:
+            from features.macro_features import get_active_triggers
+            as_of = prices.index[-1] if len(prices.index) else pd.Timestamp.utcnow()
+            return get_active_triggers(pd.Timestamp(as_of), lookback_days=5)
+        except Exception as exc:
+            log.debug("predict_with_context: trigger fetch skipped (%s)", exc)
+            return []
 
     def _compute_confidence(self, regime: str) -> float:
         """
