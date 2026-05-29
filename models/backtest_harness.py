@@ -527,7 +527,6 @@ class BacktestHarness:
         forward_days_primary: int = 5,
         forward_days_secondary: int = 10,
         save: bool = True,
-        db_path=None,
     ) -> "ValidationReport":
         """
         Validate the causal-chain cascade against historical macro shock events.
@@ -550,7 +549,6 @@ class BacktestHarness:
             forward_days_primary  = forward_days_primary,
             forward_days_secondary= forward_days_secondary,
             save                  = save,
-            db_path               = db_path,
         )
 
     # ── Private helpers ────────────────────────────────────────────────────────
@@ -830,7 +828,6 @@ def validate_causal_chains(
     forward_days_primary: int = 5,
     forward_days_secondary: int = 10,
     save: bool = True,
-    db_path=None,
 ) -> "ValidationReport":
     """
     Validate the causal-chain cascade against historical macro shock events.
@@ -854,9 +851,7 @@ def validate_causal_chains(
     forward_days_secondary : int
         Secondary horizon for the 10-day actual return. Default 10.
     save : bool
-        If True, persist the report to the cascade_validation_log SQLite table.
-    db_path : Path-like, optional
-        Custom DB path; defaults to data/commodities.db.
+        If True, persist the report to the cascade_validation_log table (Postgres).
 
     Returns
     -------
@@ -883,7 +878,7 @@ def validate_causal_chains(
     shocks = []
     try:
         from models.trigger_log import recent_trigger_events
-        log_df = recent_trigger_events(days=shock_window_days, db_path=db_path)
+        log_df = recent_trigger_events(days=shock_window_days)
         if not log_df.empty:
             for _, row in log_df.iterrows():
                 dt = pd.Timestamp(row["trigger_date"])
@@ -919,7 +914,7 @@ def validate_causal_chains(
             overall_status="insufficient_data",
         )
         if save:
-            save_validation_report(empty, db_path=db_path)
+            save_validation_report(empty)
         return empty
 
     # ── 2. Evaluate each shock ─────────────────────────────────────────────────
@@ -1008,7 +1003,7 @@ def validate_causal_chains(
             overall_status="insufficient_data",
         )
         if save:
-            save_validation_report(empty, db_path=db_path)
+            save_validation_report(empty)
         return empty
 
     # ── 3. Aggregate metrics ───────────────────────────────────────────────────
@@ -1115,7 +1110,7 @@ def validate_causal_chains(
     )
 
     if save:
-        save_validation_report(report, db_path=db_path)
+        save_validation_report(report)
 
     return report
 

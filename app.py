@@ -29,11 +29,13 @@ from utils.theme import (
 
 
 _MACRO_QUEUE_PATH = Path(os.getenv("MACRO_QUEUE_PATH", "logs/macro_events.jsonl"))
-# LIVE threshold = 2× the slowest poller interval. The economic-calendar
-# poller runs every 30 min (see DEFAULT_CONFIG in services/macro_ingestion.py),
-# so we expect a fresh JSONL line at least once per hour. Override with
-# MACRO_FRESHNESS_SECONDS if you change the poll cadence.
-_MACRO_FRESHNESS_SECONDS = int(os.getenv("MACRO_FRESHNESS_SECONDS", "3600"))
+_MACRO_HEARTBEAT_PATH = Path(os.getenv("MACRO_HEARTBEAT_PATH", "logs/macro_feed.heartbeat"))
+# LIVE threshold for the daemon heartbeat. The daemon touches the heartbeat
+# file every ~60s regardless of whether events are emitted, so a tight window
+# is correct here. (The old JSONL-mtime probe false-flagged OFFLINE during
+# quiet markets because the JSONL only updates on a NEW event.) Override with
+# MACRO_HEARTBEAT_MAX_AGE if you change MACRO_HEARTBEAT_INTERVAL.
+_MACRO_HEARTBEAT_MAX_AGE = int(os.getenv("MACRO_HEARTBEAT_MAX_AGE", "300"))
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -42,16 +44,18 @@ def _read_macro_feed_status() -> dict:
     Read-only status snapshot for the out-of-process macro feed daemon
     (pipeline/run_macro_feed.py).
 
-    Liveness is inferred from the persistence JSONL mtime; recent activity
-    is corroborated by the latest trigger_events row. This function never
-    starts threads or touches the queue object.
+    Liveness comes from the daemon's heartbeat file (touched every ~60s,
+    independent of event flow). "Last event" comes from the latest
+    trigger_events row. The two are deliberately separate: a healthy daemon in
+    a quiet market is LIVE even if the last event was hours ago. This function
+    never starts threads or touches the queue object.
     """
     from datetime import datetime, timezone
 
     status: dict = {
-        "running": False,                  # JSONL mtime within freshness window
-        "queue_path_exists": False,
-        "jsonl_age_seconds": None,         # how stale is the daemon's persistence file
+        "running": False,                  # heartbeat within MAX_AGE window
+        "queue_path_exists": False,        # has the daemon ever written events?
+        "heartbeat_age_seconds": None,     # age of the daemon heartbeat
         "last_trigger_at": None,           # ISO string from trigger_events.detected_at
         "last_trigger_family": None,
         "last_trigger_age_seconds": None,  # age of that detected_at, in seconds
@@ -59,14 +63,14 @@ def _read_macro_feed_status() -> dict:
 
     now_ts = datetime.now(timezone.utc).timestamp()
 
-    # (a) Liveness probe: JSONL mtime. Anything within 2× the slowest poll
-    # interval counts as LIVE; older than that, the daemon is presumed dead.
-    if _MACRO_QUEUE_PATH.exists():
-        status["queue_path_exists"] = True
-        mtime = _MACRO_QUEUE_PATH.stat().st_mtime
-        age = now_ts - mtime
-        status["jsonl_age_seconds"] = age
-        status["running"] = age <= _MACRO_FRESHNESS_SECONDS
+    # (a) Liveness probe: daemon heartbeat mtime. Touched every ~60s while the
+    # daemon is up, so this is a true "is it alive?" signal — unaffected by
+    # whether any macro event was emitted recently.
+    if _MACRO_HEARTBEAT_PATH.exists():
+        hb_age = now_ts - _MACRO_HEARTBEAT_PATH.stat().st_mtime
+        status["heartbeat_age_seconds"] = hb_age
+        status["running"] = hb_age <= _MACRO_HEARTBEAT_MAX_AGE
+    status["queue_path_exists"] = _MACRO_QUEUE_PATH.exists()
 
     # (b) Last DB-written event: from trigger_events.detected_at. This is what
     # downstream models actually consume, so surface it in the subtext.
@@ -292,9 +296,9 @@ with st.sidebar:
     st.divider()
 
     # ── Macro feed status (read-only; daemon runs via pipeline/run_macro_feed.py) ─
-    # Freshness probe = JSONL mtime (<60m → LIVE). Subtext shows the age of
-    # the most recent trigger_events.detected_at — the row downstream models
-    # actually consume.
+    # LIVE/OFFLINE dot = daemon heartbeat freshness (touched every ~60s, so it
+    # stays green in quiet markets). Subtext shows the age of the most recent
+    # trigger_events.detected_at — the row downstream models actually consume.
     _status  = _read_macro_feed_status()
     _running = _status["running"]
     _dot     = f'<span style="color:{"#4ADE80" if _running else "#F87171"}">●</span>'
@@ -306,18 +310,16 @@ with st.sidebar:
 
     if _no_keys:
         _sub = "Set FRED_API_KEY / ALPHA_VANTAGE_KEY in .env"
-    elif not _status["queue_path_exists"]:
+    elif _status["heartbeat_age_seconds"] is None and not _status["queue_path_exists"]:
         _sub = "Daemon not started — run: python -m pipeline.run_macro_feed"
     elif _status["last_trigger_age_seconds"] is not None:
         _sub = f"Last event: {_format_age(_status['last_trigger_age_seconds'])}"
         if _status["last_trigger_family"]:
             _sub += f" · {_status['last_trigger_family']}"
-    elif _status["jsonl_age_seconds"] is not None:
-        # No DB-written triggers yet — fall back to JSONL freshness so the
-        # user still sees something useful while the gate filters everything.
-        _sub = f"Feed active · queue updated {_format_age(_status['jsonl_age_seconds'])}"
+    elif _running:
+        _sub = "Feed live · awaiting first event"
     else:
-        _sub = "Awaiting first event…"
+        _sub = "No recent activity — check logs/macro_feed.error.log"
     st.markdown(
         f'<div style="padding:8px 10px;background:{DEPTH};border:0.5px solid {BORDER};'
         f'border-radius:6px;margin-bottom:8px">'

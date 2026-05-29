@@ -62,6 +62,16 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from sqlalchemy import text
+
+# Load .env BEFORE importing anything that reads API keys at import time. The
+# launchd retrain agent does not inherit the shell environment, so without this
+# FRED_API_KEY is absent → macro features collapse to constants → the
+# meta-predictor trains a degenerate (depth-0) model. This is the root-cause fix
+# for that bug; the DegenerateModelError guard in MetaPredictor.fit() is the
+# backstop.
+from dotenv import load_dotenv
+load_dotenv()
+
 from database.db import get_engine
 
 import numpy as np
@@ -978,22 +988,32 @@ def run_daily_retrain(
             )
 
         # ── 6. Fit MetaPredictor ───────────────────────────────────────────────
-        from models.meta_predictor import MetaPredictor
+        # A DegenerateModelError here (feature collapse / all-zero importances)
+        # propagates to the outer except, so save() is skipped and the previous
+        # good pkl is preserved rather than overwritten with a useless model.
+        from models.meta_predictor import DegenerateModelError, MetaPredictor
         pairs = [r.to_training_pair() for r in records]
         meta = MetaPredictor()
-        meta.fit(
-            pairs,
-            max_depth=cfg.max_depth,
-            min_samples_leaf=cfg.min_samples_leaf,
-        )
+        try:
+            meta.fit(
+                pairs,
+                max_depth=cfg.max_depth,
+                min_samples_leaf=cfg.min_samples_leaf,
+            )
+        except DegenerateModelError as exc:
+            log.error(
+                "Refusing to save degenerate MetaPredictor: %s — keeping the "
+                "existing model on disk.", exc,
+            )
+            raise
 
-        # Capture tree stats
-        if meta.is_trained and meta._tree is not None:
-            summary.tree_n_leaves = int(meta._tree.get_n_leaves())
+        # Capture model stats (works for both RandomForest and legacy tree)
+        if meta.is_trained:
+            summary.tree_n_leaves = meta.n_leaves
         summary.top_feature = meta._top_feature()
         log.info(
-            "MetaPredictor fitted: %d leaves, top feature=%r",
-            summary.tree_n_leaves, summary.top_feature,
+            "MetaPredictor fitted: model=%s, %d leaves, top feature=%r",
+            meta._model_type, summary.tree_n_leaves, summary.top_feature,
         )
 
         # ── 7. Save ───────────────────────────────────────────────────────────

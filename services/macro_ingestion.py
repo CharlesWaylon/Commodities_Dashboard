@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import threading
+from pathlib import Path
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -92,6 +93,10 @@ FRED_SERIES: Dict[str, dict] = {
 }
 
 _ZSCORE_WINDOW = 20  # rolling observations for baseline mean/std
+# How far back to fetch on each poll. ~2.7y so monthly series (CPI, UNRATE,
+# INDPRO, …) return ≥ _ZSCORE_WINDOW observations and yield a real z-score on
+# the first poll — not 0.0 until an in-memory buffer warms up across restarts.
+_FRED_HISTORY_DAYS = 1000
 _FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
 
@@ -157,7 +162,10 @@ class FREDPoller:
         return seeded_from_db
 
     def poll(self) -> List[MacroEvent]:
-        start = (datetime.now(timezone.utc) - timedelta(days=120)).strftime("%Y-%m-%d")
+        # Fetch a long window so even monthly series (CPI, UNRATE, …) come back
+        # with enough observations to build a real z-score baseline on the very
+        # first poll — daily series are capped to _ZSCORE_WINDOW below anyway.
+        start = (datetime.now(timezone.utc) - timedelta(days=_FRED_HISTORY_DAYS)).strftime("%Y-%m-%d")
         events: List[MacroEvent] = []
 
         for series_id, meta in FRED_SERIES.items():
@@ -179,16 +187,23 @@ class FREDPoller:
                 logger.warning("FRED %s: fetch failed — %s", series_id, exc)
                 continue
 
+            # Parse the full returned series into floats (ascending by date).
+            # Computing the baseline from THIS list — not an in-memory buffer —
+            # is what makes deviation work on the first poll after any restart.
             valid = [o for o in obs if o.get("value") not in (".", "")]
-            if not valid:
+            numeric: List[float] = []
+            valid_obs: List[dict] = []
+            for o in valid:
+                try:
+                    numeric.append(float(o["value"]))
+                    valid_obs.append(o)
+                except (ValueError, KeyError):
+                    continue
+            if not numeric:
                 continue
 
-            latest = valid[-1]
-            latest_date = latest["date"]
-            try:
-                latest_value = float(latest["value"])
-            except ValueError:
-                continue
+            latest_value = numeric[-1]
+            latest_date  = valid_obs[-1]["date"]
 
             # Emit only when the FRED publish-date is strictly newer than the
             # last release we've already counted (seeded from trigger_events on
@@ -198,12 +213,16 @@ class FREDPoller:
                 continue
             self._last_seen[series_id] = latest_date
 
+            # Keep the rolling buffer updated for any other consumers, but the
+            # deviation below is derived from the API window, not this buffer.
             hist = self._history[series_id]
             hist.append(latest_value)
             if len(hist) > _ZSCORE_WINDOW + 1:
                 hist.pop(0)
 
-            baseline = hist[:-1]
+            # Baseline = up to _ZSCORE_WINDOW observations immediately preceding
+            # the latest, taken straight from the API response.
+            baseline = numeric[-(_ZSCORE_WINDOW + 1):-1]
             if len(baseline) >= 3:
                 mean = float(np.mean(baseline))
                 std = float(np.std(baseline, ddof=1))
@@ -211,7 +230,7 @@ class FREDPoller:
             else:
                 deviation = 0.0
 
-            previous = float(valid[-2]["value"]) if len(valid) >= 2 else None
+            previous = numeric[-2] if len(numeric) >= 2 else None
 
             rel_ts = (
                 datetime.strptime(latest_date, "%Y-%m-%d")
@@ -703,6 +722,18 @@ class MacroIngestionService:
         self._stop_event = threading.Event()
         self._threads: List[threading.Thread] = []
 
+        # Liveness heartbeat. The pollers only write to the events JSONL when a
+        # NEW release is emitted, so during quiet periods (nights/weekends,
+        # between releases) that file goes stale even though the daemon is
+        # perfectly healthy. The heartbeat is touched on a fixed timer
+        # regardless of events, giving the dashboard a true "is the daemon
+        # alive?" signal distinct from "when did the last event arrive?".
+        self._heartbeat_path = Path(
+            os.getenv("MACRO_HEARTBEAT_PATH", "logs/macro_feed.heartbeat")
+        )
+        self._heartbeat_interval = int(os.getenv("MACRO_HEARTBEAT_INTERVAL", "60"))
+        self._heartbeat_thread: Optional[threading.Thread] = None
+
         # One token bucket shared by both AV-backed pollers so the 5/min
         # and 25/day caps are enforced across the whole service, not per-poller.
         self._av_limiter = AVRateLimiter() if av_api_key else None
@@ -759,13 +790,44 @@ class MacroIngestionService:
                 label, poller_cfg["poll_interval_minutes"],
             )
 
+        # Liveness heartbeat thread — runs as long as the service is up,
+        # independent of whether any poller emits events. Tracked separately
+        # from _threads so it doesn't count toward is_running() (which gates
+        # the "no pollers started" check in the daemon entrypoint).
+        self._heartbeat_thread = threading.Thread(
+            target=self._run_heartbeat,
+            name="MacroHeartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
     def stop(self) -> None:
         """Signal all pollers to stop and join their threads."""
         self._stop_event.set()
         for t in self._threads:
             t.join(timeout=10)
         self._threads.clear()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=5)
+            self._heartbeat_thread = None
         logger.info("MacroIngestionService: stopped.")
+
+    def _run_heartbeat(self) -> None:
+        """
+        Touch the heartbeat file every _heartbeat_interval seconds while the
+        service is running. The dashboard reads this file's mtime to show
+        LIVE/OFFLINE — a signal that stays fresh even when no events are being
+        emitted (so quiet markets don't trigger a false OFFLINE).
+        """
+        self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+        while not self._stop_event.is_set():
+            try:
+                self._heartbeat_path.write_text(
+                    datetime.now(timezone.utc).isoformat() + "\n"
+                )
+            except Exception as exc:
+                logger.warning("Heartbeat write failed: %s", exc)
+            self._stop_event.wait(self._heartbeat_interval)
 
     def is_running(self) -> bool:
         return any(t.is_alive() for t in self._threads)

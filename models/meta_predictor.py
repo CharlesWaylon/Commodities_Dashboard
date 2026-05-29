@@ -82,7 +82,9 @@ Usage (live dashboard)
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,9 +93,30 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+_log = logging.getLogger(__name__)
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 KNOWN_TIERS: Tuple[str, ...] = ("statistical", "ml", "deep", "quantum")
+
+# Default learner. "rf" = RandomForest (tuned via Optuna on large datasets);
+# "tree" = legacy single DecisionTree. Override with META_MODEL env var.
+_META_MODEL_DEFAULT = os.getenv("META_MODEL", "rf").lower()
+# Optuna only runs when there are at least this many training rows — small
+# unit-test datasets skip tuning and train instantly.
+_TUNE_MIN_SAMPLES = int(os.getenv("META_TUNE_MIN_SAMPLES", "500"))
+# Number of Optuna trials for the nightly retrain.
+_TUNE_TRIALS_DEFAULT = int(os.getenv("META_TUNE_TRIALS", "40"))
+
+
+class DegenerateModelError(RuntimeError):
+    """
+    Raised by MetaPredictor.fit() when the training data or the fitted model is
+    degenerate (e.g. the feature matrix collapsed to constants because the
+    macro/price feature sources returned defaults). Callers — notably
+    daily_retrain — should catch this and KEEP the previous good model rather
+    than persisting a useless one.
+    """
 
 # Ordered list of feature columns fed to the DecisionTree.
 # Matches MetaFeatures field names exactly — order matters for sklearn.
@@ -394,6 +417,76 @@ def collect_meta_features(macro_df: pd.DataFrame) -> MetaFeatures:
     )
 
 
+# ── RandomForest tuning (Optuna) ───────────────────────────────────────────────
+
+def _tune_random_forest(
+    X: np.ndarray,
+    y: List[str],
+    n_trials: int = _TUNE_TRIALS_DEFAULT,
+    seed: int = 42,
+) -> Dict[str, object]:
+    """
+    Optuna search for RandomForest hyper-parameters that maximise stratified
+    5-fold CV accuracy. Returns the best param dict, or {} if optuna is missing
+    or the data can't support stratified CV (caller then uses sane defaults).
+
+    Matches the conventions in models/ml/sector_tuner.py (TPESampler, quiet
+    logging). Tuning is gated by sample count in fit(), so this only runs on
+    the nightly retrain, never in unit tests.
+    """
+    try:
+        import optuna
+    except ImportError:
+        _log.warning("optuna not installed — using default RandomForest params.")
+        return {}
+
+    from collections import Counter
+
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+    # Stratified CV needs each class to appear at least n_splits times.
+    min_class = min(Counter(y).values())
+    if min_class < 2:
+        _log.warning(
+            "Smallest tier class has %d sample(s) — skipping Optuna tuning.",
+            min_class,
+        )
+        return {}
+    n_splits = max(2, min(5, min_class))
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    def objective(trial: "optuna.Trial") -> float:
+        params = dict(
+            n_estimators=trial.suggest_int("n_estimators", 100, 500, step=50),
+            max_depth=trial.suggest_int("max_depth", 3, 14),
+            min_samples_leaf=trial.suggest_int("min_samples_leaf", 2, 30),
+            max_features=trial.suggest_categorical(
+                "max_features", ["sqrt", "log2", 0.5, 0.8]
+            ),
+            class_weight=trial.suggest_categorical(
+                "class_weight", [None, "balanced"]
+            ),
+        )
+        clf = RandomForestClassifier(random_state=seed, n_jobs=-1, **params)
+        return float(
+            cross_val_score(clf, X, y, cv=cv, scoring="accuracy").mean()
+        )
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    _log.info(
+        "MetaPredictor Optuna: best CV acc=%.4f params=%s",
+        study.best_value, study.best_params,
+    )
+    return dict(study.best_params)
+
+
 # ── Meta-Predictor ────────────────────────────────────────────────────────────
 
 class MetaPredictor:
@@ -422,10 +515,11 @@ class MetaPredictor:
     """
 
     def __init__(self, model_path: Optional[Path] = None):
-        self._tree = None          # sklearn DecisionTreeClassifier | None
+        self._tree = None          # sklearn estimator (RandomForest | DecisionTree) | None
         self._classes: List[str] = []
         self._feature_importances: Dict[str, float] = {}
         self._training_records: int = 0
+        self._model_type: str = _META_MODEL_DEFAULT
 
         if model_path is not None:
             self.load(model_path)
@@ -441,6 +535,22 @@ class MetaPredictor:
         """Ordered dict of feature → Gini importance (0 if untrained)."""
         return dict(self._feature_importances)
 
+    @property
+    def n_leaves(self) -> int:
+        """
+        Total leaf count of the fitted model — works for both the legacy
+        DecisionTree (its own leaves) and the RandomForest (summed across
+        estimators). 0 when untrained. Used by daily_retrain for logging.
+        """
+        t = self._tree
+        if t is None:
+            return 0
+        if hasattr(t, "get_n_leaves"):                 # DecisionTreeClassifier
+            return int(t.get_n_leaves())
+        if hasattr(t, "estimators_"):                  # RandomForestClassifier
+            return int(sum(e.get_n_leaves() for e in t.estimators_))
+        return 0
+
     # ── Training ──────────────────────────────────────────────────────────────
 
     def fit(
@@ -448,6 +558,11 @@ class MetaPredictor:
         records: List[Tuple["MetaFeatures", str]],
         max_depth: int = 5,
         min_samples_leaf: int = 10,
+        *,
+        model_type: Optional[str] = None,
+        tune: object = "auto",
+        n_trials: Optional[int] = None,
+        random_state: int = 42,
     ) -> "MetaPredictor":
         """
         Train the meta-predictor from historical (features, winning_tier) pairs.
@@ -456,25 +571,49 @@ class MetaPredictor:
         ----------
         records : list of (MetaFeatures, str)
             Each tuple is (market_state_on_date, tier_that_had_lowest_error).
-        max_depth : int
-            Cap on tree depth.  Keep shallow for interpretability.
-        min_samples_leaf : int
-            Prevents overfitting on small backtests.
+        max_depth, min_samples_leaf : int
+            Used directly for the legacy "tree" model and as the floor for the
+            "rf" model when Optuna tuning is skipped.
+        model_type : {"rf", "tree"}, optional
+            "rf" (default) = RandomForest; "tree" = legacy single DecisionTree.
+            Defaults to the META_MODEL env var (→ "rf").
+        tune : bool | "auto"
+            Whether to Optuna-tune the RandomForest. "auto" (default) tunes only
+            when there are ≥ _TUNE_MIN_SAMPLES rows, so unit tests stay fast.
+        n_trials : int, optional
+            Optuna trial budget (default META_TUNE_TRIALS=40).
+        random_state : int
+            Seed for reproducibility.
 
         Returns
         -------
         self  (for chaining)
+
+        Raises
+        ------
+        ValueError
+            If records is empty or contains unknown tier labels.
+        DegenerateModelError
+            If the feature matrix has < 2 non-constant columns, or the fitted
+            model has all-zero feature importances. This is the guard that
+            prevents a broken (feature-collapsed) retrain from overwriting a
+            good model on disk.
         """
         if not records:
             raise ValueError("records is empty — nothing to train on")
 
         try:
+            from sklearn.ensemble import RandomForestClassifier
             from sklearn.tree import DecisionTreeClassifier
         except ImportError as exc:
             raise ImportError(
                 "scikit-learn is required for MetaPredictor.fit(). "
                 "Install with: pip install scikit-learn"
             ) from exc
+
+        model_type = (model_type or self._model_type or _META_MODEL_DEFAULT).lower()
+        if n_trials is None:
+            n_trials = _TUNE_TRIALS_DEFAULT
 
         X = np.array([mf.to_feature_vector() for mf, _ in records], dtype=float)
         y = [tier for _, tier in records]
@@ -486,21 +625,84 @@ class MetaPredictor:
                 f"Add them to KNOWN_TIERS first."
             )
 
-        clf = DecisionTreeClassifier(
-            max_depth=max_depth,
-            min_samples_leaf=min_samples_leaf,
-            random_state=42,
-        )
-        clf.fit(X, y)
-        self._tree = clf
-        self._classes = list(clf.classes_)
-        self._training_records = len(records)
+        # ── Degeneracy guard (input) ──────────────────────────────────────────
+        # Count feature columns that actually vary across rows. A matrix with
+        # < 2 non-constant columns cannot teach the model anything — this is the
+        # signature of the feature-collapse bug (e.g. missing FRED_API_KEY in
+        # the retrain environment producing all-default MetaFeatures).
+        n_nonconstant = 0
+        for j in range(X.shape[1]):
+            col = X[:, j]
+            col = col[~np.isnan(col)]
+            if col.size and np.unique(np.round(col, 9)).size > 1:
+                n_nonconstant += 1
+        if n_nonconstant < 2:
+            raise DegenerateModelError(
+                f"Training matrix has only {n_nonconstant} non-constant feature "
+                f"column(s) across {X.shape[0]} rows — refusing to train a "
+                "meaningless model. This usually means the macro/price feature "
+                "sources returned defaults (check FRED_API_KEY and macro overlay "
+                "loading in the retrain environment)."
+            )
 
-        # Store feature importances for the explain() surface
-        self._feature_importances = {
+        # Defensive NaN fill — feature builders default-fill, but guard anyway.
+        X = np.nan_to_num(X, nan=0.0)
+
+        # ── Choose + (optionally) tune the estimator ──────────────────────────
+        do_tune = (
+            model_type == "rf"
+            and (tune is True or (tune == "auto" and len(records) >= _TUNE_MIN_SAMPLES))
+        )
+
+        if model_type == "rf":
+            best_params: Dict[str, object] = {}
+            if do_tune:
+                best_params = _tune_random_forest(
+                    X, y, n_trials=n_trials, seed=random_state,
+                )
+            params = dict(
+                n_estimators=300,
+                max_depth=None,
+                min_samples_leaf=min_samples_leaf,
+                max_features="sqrt",
+                class_weight="balanced",
+                random_state=random_state,
+                n_jobs=-1,
+            )
+            params.update(best_params)
+            clf = RandomForestClassifier(**params)
+        else:  # legacy single tree
+            clf = DecisionTreeClassifier(
+                max_depth=max_depth,
+                min_samples_leaf=min_samples_leaf,
+                random_state=random_state,
+            )
+
+        clf.fit(X, y)
+
+        importances = {
             col: float(imp)
             for col, imp in zip(FEATURE_COLUMNS, clf.feature_importances_)
         }
+
+        # ── Degeneracy guard (output) ─────────────────────────────────────────
+        if sum(importances.values()) <= 0.0:
+            raise DegenerateModelError(
+                "Fitted model has all-zero feature importances — it learned "
+                "nothing (likely a single-node tree). Refusing to persist a "
+                "degenerate model; keeping the previous one."
+            )
+
+        self._tree = clf
+        self._classes = list(clf.classes_)
+        self._training_records = len(records)
+        self._feature_importances = importances
+        self._model_type = model_type
+
+        _log.info(
+            "MetaPredictor fitted: model=%s records=%d leaves=%d top=%s",
+            model_type, len(records), self.n_leaves, self._top_feature(),
+        )
         return self
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -617,6 +819,7 @@ class MetaPredictor:
                     "feature_importances": self._feature_importances,
                     "training_records": self._training_records,
                     "feature_columns": list(FEATURE_COLUMNS),
+                    "model_type": self._model_type,
                 },
                 fh,
             )
@@ -655,6 +858,7 @@ class MetaPredictor:
         self._classes = state["classes"]
         self._feature_importances = state.get("feature_importances", {})
         self._training_records = state.get("training_records", 0)
+        self._model_type = state.get("model_type", "tree")
         return self
 
     # ── Private helpers ───────────────────────────────────────────────────────

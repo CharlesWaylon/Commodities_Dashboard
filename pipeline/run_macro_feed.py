@@ -11,9 +11,13 @@ Stop with SIGINT (Ctrl+C) or SIGTERM (e.g. from launchd / systemd).
 """
 
 import argparse
+import errno
+import fcntl
 import logging
+import os
 import signal
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -22,6 +26,37 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from services.macro_ingestion import MacroIngestionService
+
+# Single-instance lock. A second daemon would run its own rate limiter against
+# the same Alpha Vantage key and collectively blow the 25/day cap, so we refuse
+# to start if another instance already holds this lock. The flock is released
+# automatically when the holding process exits — including SIGKILL — so there
+# is never a stale lock to clean up.
+_LOCK_PATH = Path(os.getenv("MACRO_FEED_LOCK_PATH", "logs/macro_feed.lock"))
+
+
+def _acquire_single_instance_lock(log: logging.Logger):
+    """
+    Try to take an exclusive, non-blocking lock. Returns the open file object
+    (keep a reference for the process lifetime) on success, or None if another
+    instance already holds it.
+    """
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(_LOCK_PATH, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            fh.close()
+            return None
+        raise
+    # Record our PID for humans inspecting the lock file. The lock itself is
+    # what matters; the PID is just a convenience.
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    return fh
 
 
 def main() -> int:
@@ -57,6 +92,19 @@ def main() -> int:
              "Prevents restart-induced duplicate floods. Set to 0 to disable.",
     )
     args = parser.parse_args()
+
+    # Refuse to start a second daemon — prevents overlapping API calls that
+    # would exhaust the shared Alpha Vantage daily cap. Hold `lock_fh` for the
+    # whole process lifetime so the flock stays held.
+    lock_fh = _acquire_single_instance_lock(log)
+    if lock_fh is None:
+        log.error(
+            "Another macro feed daemon already holds %s — refusing to start a "
+            "second instance (would double-spend the Alpha Vantage daily cap). "
+            "Stop the other process first, or check `pgrep -fl run_macro_feed`.",
+            _LOCK_PATH,
+        )
+        return 1
 
     service = MacroIngestionService.from_env()
     if args.backfill_days > 0:
