@@ -18,6 +18,7 @@ Usage
 from __future__ import annotations
 
 import json
+import streamlit as st
 import streamlit.components.v1 as components
 
 
@@ -440,6 +441,11 @@ def _build_html(ws_url: str, max_events: int) -> str:
     ws.onmessage = function(e) {{
       try {{
         const sig = JSON.parse(e.data);
+        if (sig._action === 'clear_synthetics') {{
+          events = events.filter(ev => ev.classification_method !== 'synthetic' && ev.source !== 'synthetic');
+          render();
+          return;
+        }}
         addEvent(sig);
       }} catch(err) {{
         console.warn('[ribbon] parse error', err);
@@ -479,4 +485,7 @@ def event_ribbon(
     max_events : Maximum number of cards displayed (default 10, oldest drop off).
     """
     html = _build_html(ws_url, max_events)
+    # Embed a nonce so Streamlit sees fresh HTML after a clear and recreates the iframe
+    nonce = st.session_state.get("_ribbon_nonce", 0)
+    html = html.replace("</html>", f"<!-- nonce:{nonce} -->\n</html>")
     components.html(html, height=height, scrolling=False)

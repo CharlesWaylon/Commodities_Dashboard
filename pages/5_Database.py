@@ -12,26 +12,12 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import date
-from utils.theme import apply_theme, render_topbar
+from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 
 st.set_page_config(page_title="Accendio | Database", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
 apply_theme()
 render_topbar()
-
-with st.sidebar:
-    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.divider()
-    st.page_link("app.py",                           label="Home")
-    st.page_link("pages/1_Pricing.py",               label="Pricing")
-    st.page_link("pages/2_Charts.py",                label="Charts")
-    st.page_link("pages/3_News.py",                  label="News")
-    st.page_link("pages/4_Models.py",                label="Models")
-    st.page_link("pages/5_Database.py",              label="Database")
-    st.divider()
-    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-    st.divider()
+render_sidebar_nav()
 
 st.title("Database Inspector")
 st.caption("Inspect the local data pipeline — what's stored, when it was ingested, and trigger manual runs")

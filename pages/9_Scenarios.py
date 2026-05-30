@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from utils.theme import apply_theme, render_topbar, PLOTLY_LAYOUT
+from utils.theme import apply_theme, render_topbar, render_sidebar_nav, PLOTLY_LAYOUT
 from models.config import MODELING_COMMODITIES
 from models.scenarios import (
     ScenarioAggregator,
@@ -141,21 +141,7 @@ def build_quantum_band(prices_records, commodity, horizon, bear_q, bull_q):
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.divider()
-    st.page_link("app.py",                           label="Home")
-    st.page_link("pages/1_Pricing.py",               label="Pricing")
-    st.page_link("pages/2_Charts.py",                label="Charts")
-    st.page_link("pages/3_News.py",                  label="News")
-    st.page_link("pages/4_Models.py",                label="Models")
-    st.page_link("pages/5_Database.py",              label="Database")
-    st.divider()
-    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-    st.page_link("pages/9_Scenarios.py",             label="Scenarios")
-    st.divider()
+render_sidebar_nav()
 
 st.title("Scenario Bands")
 st.caption(
@@ -597,8 +583,7 @@ if show_analogs:
             ))
 
 fig.update_layout(
-    **PLOTLY_LAYOUT,
-    title=f"{commodity} — {horizon}-day scenario fan",
+    **{**PLOTLY_LAYOUT, "title": f"{commodity} — {horizon}-day scenario fan"},
     xaxis_title="", yaxis_title="Price",
     height=520,
     legend_orientation="h", legend_yanchor="bottom", legend_y=1.02,
@@ -727,8 +712,7 @@ else:
                 marker=dict(size=5),
             ))
             fig_t.update_layout(
-                **PLOTLY_LAYOUT,
-                title=f"Ripple: {commodity} consensus → {target}",
+                **{**PLOTLY_LAYOUT, "title": f"Ripple: {commodity} consensus → {target}"},
                 xaxis_title="", yaxis_title="Price",
                 height=440,
                 legend_orientation="h", legend_yanchor="bottom", legend_y=1.02,
@@ -852,8 +836,7 @@ try:
             marker=dict(size=5),
         ))
         rfig.update_layout(
-            **PLOTLY_LAYOUT,
-            title=f"{commodity} — {_replay_horizon}-day replay of {n_events} historical {_replay_family} event(s)",
+            **{**PLOTLY_LAYOUT, "title": f"{commodity} — {_replay_horizon}-day replay of {n_events} historical {_replay_family} event(s)"},
             xaxis_title="", yaxis_title="Price",
             height=440,
             legend_orientation="h", legend_yanchor="bottom", legend_y=1.02,
@@ -952,8 +935,7 @@ else:
             annotation_position="top right",
         )
         fig_bar.update_layout(
-            **PLOTLY_LAYOUT,
-            title=f"Peer moves under {stress_side} stress (h={horizon}d, source forced to P{int((bear_q if stress_side=='bear' else bull_q)*100)})",
+            **{**PLOTLY_LAYOUT, "title": f"Peer moves under {stress_side} stress (h={horizon}d, source forced to P{int((bear_q if stress_side=='bear' else bull_q)*100)})"},
             yaxis_title="% move from spot",
             height=360,
             showlegend=False,
@@ -1062,8 +1044,7 @@ if run_cal:
             ),
         ))
         fig_c.update_layout(
-            **PLOTLY_LAYOUT,
-            title="Rolling 1-step bands vs realized log returns",
+            **{**PLOTLY_LAYOUT, "title": "Rolling 1-step bands vs realized log returns"},
             yaxis_title="Log return",
             height=380,
             legend_orientation="h", legend_yanchor="bottom", legend_y=1.02,

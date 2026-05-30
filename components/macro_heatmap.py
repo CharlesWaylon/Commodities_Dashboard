@@ -223,7 +223,7 @@ def cluster_exposure_strip(lifecycle=None) -> None:
     snap = lifecycle.state_snapshot()
     clusters = _compute_cluster_exposure(snap)
 
-    st.markdown(_STRIP_CSS, unsafe_allow_html=True)
+    st.html(_STRIP_CSS)
 
     tiles_html = '<div class="ac-strip">'
     for c in clusters:
@@ -266,7 +266,7 @@ def cluster_exposure_strip(lifecycle=None) -> None:
 </div>"""
 
     tiles_html += "</div>"
-    st.markdown(tiles_html, unsafe_allow_html=True)
+    st.html(tiles_html)
 
 
 # ── Component 2: Trigger Impact Matrix ────────────────────────────────────────
@@ -396,7 +396,7 @@ def trigger_impact_matrix(lifecycle=None) -> None:
     except Exception:
         registry_names = {}
 
-    st.markdown(_MATRIX_CSS, unsafe_allow_html=True)
+    st.html(_MATRIX_CSS)
 
     # Table header
     col_icons = [_CLUSTER_ICON[c] for c in _CLUSTER_ORDER]
@@ -510,7 +510,7 @@ def trigger_impact_matrix(lifecycle=None) -> None:
         + "".join(legend_parts) + "</div>"
     )
 
-    st.markdown(matrix_html + legend_html, unsafe_allow_html=True)
+    st.html(matrix_html + legend_html)
 
 
 # ── Combined renderer ──────────────────────────────────────────────────────────
@@ -527,10 +527,9 @@ def macro_exposure_heatmap(lifecycle=None) -> None:
         lifecycle = LIFECYCLE
 
     cluster_exposure_strip(lifecycle)
-    st.markdown(
+    st.html(
         '<div style="margin-top:18px;font-size:9px;letter-spacing:.16em;'
         'text-transform:uppercase;color:rgba(238,242,255,0.22);margin-bottom:2px">'
-        'Trigger impact matrix · primary scope vs secondary transmission</div>',
-        unsafe_allow_html=True,
+        'Trigger impact matrix · primary scope vs secondary transmission</div>'
     )
     trigger_impact_matrix(lifecycle)

@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import sys, os
-from utils.theme import apply_theme, render_topbar, PLOTLY_LAYOUT
+from utils.theme import apply_theme, render_topbar, render_sidebar_nav, PLOTLY_LAYOUT
 from features.trigger_detectors import detect_all
 from models.router import SignalRouter
 from models.trigger_log import log_trigger_events
@@ -82,20 +82,7 @@ REGIME_COLORS = {
 }
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.divider()
-    st.page_link("app.py",                           label="Home")
-    st.page_link("pages/1_Pricing.py",               label="Pricing")
-    st.page_link("pages/2_Charts.py",                label="Charts")
-    st.page_link("pages/3_News.py",                  label="News")
-    st.page_link("pages/4_Models.py",                label="Models")
-    st.page_link("pages/5_Database.py",              label="Database")
-    st.divider()
-    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-    st.divider()
+render_sidebar_nav()
 
 st.title("Analytics & Predictive Models")
 st.caption("Live model inference on real market data — Spearman IC is the primary accuracy metric")

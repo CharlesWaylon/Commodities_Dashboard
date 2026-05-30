@@ -22,7 +22,7 @@ PLOTLY_LAYOUT = dict(
     paper_bgcolor=DEPTH,
     plot_bgcolor=ABYSS,
     font=dict(color=ICE, size=11, family="Arial, Helvetica Neue, sans-serif"),
-    title_font=dict(color=ICE, size=13),
+    title=dict(text="", font=dict(color=ICE, size=13)),
     xaxis=dict(
         gridcolor="rgba(123,156,255,0.08)",
         zerolinecolor="rgba(123,156,255,0.15)",
@@ -444,6 +444,41 @@ def render_topbar(df=None):
   <span class="_ac_busy_e">📊</span>
 </div>
 """, unsafe_allow_html=True)
+
+
+def render_sidebar_nav():
+    """
+    Render the canonical Accendio sidebar directory.
+
+    Single source of truth for the page list. Call this at the top of every
+    page (inside or outside a `with st.sidebar:` block — it manages its own).
+    Page-specific filters/controls must live in the main page body, NOT here,
+    so the sidebar stays a clean directory across all pages.
+    """
+    with st.sidebar:
+        st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
+        st.divider()
+
+        # Group 1 — core data
+        st.page_link("app.py",                           label="Home")
+        st.page_link("pages/1_Pricing.py",               label="Pricing")
+        st.page_link("pages/2_Charts.py",                label="Charts")
+        st.page_link("pages/3_News.py",                  label="News")
+        st.page_link("pages/4_Models.py",                label="Models")
+        st.page_link("pages/5_Database.py",              label="Database")
+        st.divider()
+
+        # Group 2 — analytics
+        st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+        st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+        st.page_link("pages/8_Portfolio.py",             label="Portfolio")
+        st.page_link("pages/9_Scenarios.py",             label="Scenarios")
+        st.divider()
+
+        # Group 3 — live signals
+        st.page_link("pages/10_Event_Ribbon.py",         label="Event Ribbon")
+        st.page_link("pages/11_Macro_Exposure.py",       label="Macro Exposure")
+        st.page_link("pages/12_Alerts.py",               label="Alerts")
 
 
 def panel_header(title: str, badge: str = "", badge_color: str = SIGNAL):

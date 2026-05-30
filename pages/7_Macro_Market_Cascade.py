@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 from datetime import date, timedelta
 from typing import Dict, List, Optional
 
-from utils.theme import apply_theme, render_topbar, PLOTLY_LAYOUT
+from utils.theme import apply_theme, render_topbar, render_sidebar_nav, PLOTLY_LAYOUT
 from utils.macro_narrative import (
     SECTORS, MACRO_EFFECTS, MACRO_EFFECTS_RISK_ON, MACRO_EFFECTS_RISK_OFF,
     load_macro, get_macro_state, compute_forecasts, build_narrative,
@@ -613,21 +613,7 @@ def accuracy_scorecard(hist_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.divider()
-    st.page_link("app.py",                           label="Home")
-    st.page_link("pages/1_Pricing.py",               label="Pricing")
-    st.page_link("pages/2_Charts.py",                label="Charts")
-    st.page_link("pages/3_News.py",                  label="News")
-    st.page_link("pages/4_Models.py",                label="Models")
-    st.page_link("pages/5_Database.py",              label="Database")
-    st.divider()
-    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-    st.divider()
-    st.caption("Macro signals require network · price data from latest DB ingest")
+render_sidebar_nav()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -635,6 +621,14 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.title("Macro-Market Cascade")
+
+from utils.synthetic_triggers import cleanup_expired_synthetics, render_synthetic_banner
+cleanup_expired_synthetics()
+render_synthetic_banner(
+    page_context="Cascade forecasts, regime override, and macro-snapshot amplification "
+                 "are adjusted by the active scenario trigger.",
+)
+
 st.markdown(
     """
 <div style="background:#0C1228;border:0.5px solid rgba(249,158,11,0.25);

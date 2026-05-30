@@ -28,7 +28,7 @@ from services.alert_engine import (
     Alert, AlertRule, DEFAULT_RULES, ENGINE, SeverityTier,
 )
 from utils.theme import (
-    apply_theme, render_topbar, panel_header,
+    apply_theme, render_topbar, render_sidebar_nav, panel_header,
     SIGNAL, ASCEND, DESCEND, AMBER, ICE, ICE_MID,
     VOID, DEPTH, ABYSS, BORDER,
 )
@@ -43,6 +43,7 @@ st.set_page_config(
 )
 apply_theme()
 render_topbar()
+render_sidebar_nav()
 
 
 # ── Drain pending alerts from engine queue (runs on every render) ─────────────
@@ -50,40 +51,61 @@ render_topbar()
 new_count = drain_pending(ENGINE)
 
 
-# ── Sidebar — test event injector ─────────────────────────────────────────────
+# ── Page header ───────────────────────────────────────────────────────────────
 
-with st.sidebar:
+st.markdown(
+    f'<h1 style="margin-bottom:2px">Alerts</h1>'
+    f'<p style="font-size:12px;color:rgba(238,242,255,0.35);margin-bottom:0">'
+    f'HIGH / CRITICAL trigger notifications · rule management · alert history</p>',
+    unsafe_allow_html=True,
+)
+st.markdown("<div style='margin-top:16px'></div>", unsafe_allow_html=True)
+
+from utils.synthetic_triggers import cleanup_expired_synthetics, render_synthetic_banner
+cleanup_expired_synthetics()
+render_synthetic_banner(
+    page_context="Alert rules are evaluated against the active scenario trigger; "
+                 "new alerts may appear in the notification panel.",
+)
+
+
+# ── Engine status (moved out of sidebar) ──────────────────────────────────────
+
+rules_enabled = sum(1 for r in ENGINE.rules() if r.enabled)
+unread        = unread_count()
+status_color  = ASCEND if unread > 0 else "rgba(238,242,255,0.25)"
+
+_sb1, _sb2, _sb3, _sb4 = st.columns([1, 1, 1, 1])
+with _sb1:
     st.markdown(
-        f'<p style="font-size:10px;letter-spacing:.14em;color:{ICE_MID};'
-        f'text-transform:uppercase;margin-bottom:8px">Alert Engine</p>',
-        unsafe_allow_html=True,
-    )
-
-    # Engine status
-    rules_enabled = sum(1 for r in ENGINE.rules() if r.enabled)
-    unread        = unread_count()
-    status_color  = ASCEND if unread > 0 else "rgba(238,242,255,0.25)"
-
-    st.markdown(
+        f'<div style="padding:10px 14px;background:{DEPTH};border:0.5px solid {BORDER};'
+        f'border-radius:6px">'
         f'<div style="font-size:10px;color:rgba(238,242,255,0.32);letter-spacing:.1em;'
-        f'text-transform:uppercase;margin-bottom:6px">Status</div>'
+        f'text-transform:uppercase;margin-bottom:4px">Unread</div>'
         f'<div style="font-size:22px;font-weight:300;color:{status_color};line-height:1">'
         f'{unread}</div>'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.3)">'
-        f'unread alert{"s" if unread != 1 else ""}</div>'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.25);margin-top:4px">'
-        f'{rules_enabled} active rule{"s" if rules_enabled != 1 else ""}</div>',
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.3);margin-top:2px">'
+        f'{rules_enabled} active rule{"s" if rules_enabled != 1 else ""}</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
+with _sb2:
+    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+    if st.button("Reset Dedup Cache", use_container_width=True,
+                 help="Flush the alert engine deduplication store so the same trigger can fire again"):
+        ENGINE.flush_dedup_cache()
+        st.success("Dedup cache cleared.")
+with _sb3:
+    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+    if st.button("↻  Refresh", use_container_width=True):
+        st.rerun()
 
-    st.markdown("---")
+st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
-    st.markdown(
-        f'<p style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;'
-        f'color:rgba(238,242,255,0.22);margin-bottom:8px">Test Event Injector</p>',
-        unsafe_allow_html=True,
-    )
 
+# ── Test event injector (moved out of sidebar) ────────────────────────────────
+
+with st.expander("🧪 Test Event Injector", expanded=False):
     TRIGGER_TYPES = [
         "FOMC_RATE_DECISION", "CPI_RELEASE", "NONFARM_PAYROLLS",
         "OPEC_PRODUCTION_DECISION", "EIA_CRUDE_INVENTORY", "EIA_GAS_STORAGE",
@@ -92,21 +114,26 @@ with st.sidebar:
         "ENERGY_TRANSITION_SIGNAL", "PPI_RELEASE",
     ]
 
-    sel_trigger = st.selectbox(
-        "Trigger type", TRIGGER_TYPES, key="inj_trigger_type"
-    )
-    sel_severity = st.selectbox(
-        "Severity", ["HIGH", "CRITICAL"], key="inj_severity"
-    )
-    sel_direction = st.selectbox(
-        "Direction", ["downside_surprise", "upside_surprise", "neutral"],
-        key="inj_direction",
-    )
-    sel_magnitude = st.slider(
-        "Magnitude", 0.0, 1.0, 0.75, 0.05, key="inj_magnitude"
-    )
+    _ic1, _ic2, _ic3, _ic4 = st.columns(4)
+    with _ic1:
+        sel_trigger = st.selectbox(
+            "Trigger type", TRIGGER_TYPES, key="inj_trigger_type"
+        )
+    with _ic2:
+        sel_severity = st.selectbox(
+            "Severity", ["HIGH", "CRITICAL"], key="inj_severity"
+        )
+    with _ic3:
+        sel_direction = st.selectbox(
+            "Direction", ["downside_surprise", "upside_surprise", "neutral"],
+            key="inj_direction",
+        )
+    with _ic4:
+        sel_magnitude = st.slider(
+            "Magnitude", 0.0, 1.0, 0.75, 0.05, key="inj_magnitude"
+        )
 
-    if st.button("Inject Alert Event", type="primary", use_container_width=True):
+    if st.button("Inject Alert Event", type="primary"):
         # Build a minimal synthetic TriggerSignal and feed it to the engine
         try:
             from services.trigger_classifier import TriggerSignal, SeverityTier as ST
@@ -152,38 +179,17 @@ with st.sidebar:
                 new_count_after = drain_pending(ENGINE)
 
                 if fired:
-                    st.success(f"Fired {len(fired)} alert(s). Panel will show them above.")
+                    st.success(f"Fired {len(fired)} alert(s). See the Notifications tab below.")
                 else:
                     st.info(
                         "No alerts fired. Either no rules matched, or this "
                         "trigger+rule was already fired within its dedup window. "
-                        "Try a different trigger type or use 'Reset Dedup Cache' below."
+                        "Try a different trigger type or use 'Reset Dedup Cache' above."
                     )
                 st.rerun()
 
         except Exception as exc:
             st.error(f"Injection failed: {exc}")
-
-    st.markdown("---")
-
-    if st.button("Reset Dedup Cache", use_container_width=True,
-                 help="Flush the alert engine deduplication store so the same trigger can fire again"):
-        ENGINE.flush_dedup_cache()
-        st.success("Dedup cache cleared.")
-
-    if st.button("↻  Refresh", use_container_width=True):
-        st.rerun()
-
-
-# ── Page header ───────────────────────────────────────────────────────────────
-
-st.markdown(
-    f'<h1 style="margin-bottom:2px">Alerts</h1>'
-    f'<p style="font-size:12px;color:rgba(238,242,255,0.35);margin-bottom:0">'
-    f'HIGH / CRITICAL trigger notifications · rule management · alert history</p>',
-    unsafe_allow_html=True,
-)
-st.markdown("<div style='margin-top:16px'></div>", unsafe_allow_html=True)
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────

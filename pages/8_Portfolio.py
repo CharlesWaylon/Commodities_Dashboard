@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-from utils.theme import apply_theme, render_topbar, PLOTLY_LAYOUT
+from utils.theme import apply_theme, render_topbar, render_sidebar_nav, PLOTLY_LAYOUT
 
 st.set_page_config(
     page_title="Accendio | Portfolio",
@@ -36,59 +36,7 @@ TEAL    = "#26C6DA"
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.divider()
-    st.page_link("app.py",                           label="Home")
-    st.page_link("pages/1_Pricing.py",               label="Pricing")
-    st.page_link("pages/2_Charts.py",                label="Charts")
-    st.page_link("pages/3_News.py",                  label="News")
-    st.page_link("pages/4_Models.py",                label="Models")
-    st.page_link("pages/5_Database.py",              label="Database")
-    st.divider()
-    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-    st.divider()
-
-    st.subheader("QAOA Parameters")
-    n_assets = st.slider(
-        "Universe size (qubits)", 8, 15, 12, 1,
-        help="Top-Sharpe assets passed as qubits to the circuit",
-    )
-    k_assets = st.slider(
-        "Assets to hold (k)", 3, 8, 5, 1,
-        help="Budget constraint: exactly k assets in the final portfolio",
-    )
-    p_layers = st.slider(
-        "Circuit depth (p)", 1, 4, 2, 1,
-        help="QAOA layers — higher p = better solution, slower runtime",
-    )
-    lam = st.slider(
-        "λ risk–return", 0.5, 5.0, 2.0, 0.5,
-        help="Higher → optimizer chases return over variance reduction",
-    )
-    penalty = st.slider(
-        "Budget penalty P", 1.0, 10.0, 5.0, 0.5,
-        help="Lagrange multiplier enforcing exactly k assets",
-    )
-    st.divider()
-    st.caption(
-        "**Runtime:** QAOA at p=2, n=12 takes ~2–4 min on a laptop simulator. "
-        "Results are cached for this session."
-    )
-    st.divider()
-    st.subheader("🌊 Cascade Mode")
-    cascade_k = st.slider(
-        "Cascade assets to hold", 3, 8, k_assets, 1,
-        key="casc_k_slider",
-        help="Top-k assets selected by cascade signal for the optimized portfolio",
-    )
-    backtest_rebal = st.slider(
-        "Backtest rebalance (days)", 10, 63, 21, 1,
-        key="backtest_rebal_slider",
-        help="How often to rebalance in the walk-forward backtest",
-    )
+render_sidebar_nav()
 
 
 # ── Page header ────────────────────────────────────────────────────────────────
@@ -98,6 +46,64 @@ st.caption(
     "cross-asset correlation heatmap · "
     "forecast consistency flags"
 )
+
+from utils.synthetic_triggers import cleanup_expired_synthetics, render_synthetic_banner
+cleanup_expired_synthetics()
+render_synthetic_banner(
+    page_context="Portfolio risk gates, allocation constraints, and turnover "
+                 "damping are adjusted by the active scenario trigger.",
+)
+
+# ── Parameters (moved out of sidebar so the sidebar stays a clean directory) ──
+with st.expander("⚙️ QAOA & Cascade Parameters", expanded=False):
+    st.caption(
+        "**Runtime:** QAOA at p=2, n=12 takes ~2–4 min on a laptop simulator. "
+        "Results are cached for this session."
+    )
+
+    st.markdown("**QAOA Parameters**")
+    pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+    with pc1:
+        n_assets = st.slider(
+            "Universe size (qubits)", 8, 15, 12, 1,
+            help="Top-Sharpe assets passed as qubits to the circuit",
+        )
+    with pc2:
+        k_assets = st.slider(
+            "Assets to hold (k)", 3, 8, 5, 1,
+            help="Budget constraint: exactly k assets in the final portfolio",
+        )
+    with pc3:
+        p_layers = st.slider(
+            "Circuit depth (p)", 1, 4, 2, 1,
+            help="QAOA layers — higher p = better solution, slower runtime",
+        )
+    with pc4:
+        lam = st.slider(
+            "λ risk–return", 0.5, 5.0, 2.0, 0.5,
+            help="Higher → optimizer chases return over variance reduction",
+        )
+    with pc5:
+        penalty = st.slider(
+            "Budget penalty P", 1.0, 10.0, 5.0, 0.5,
+            help="Lagrange multiplier enforcing exactly k assets",
+        )
+
+    st.markdown("**🌊 Cascade Mode**")
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        cascade_k = st.slider(
+            "Cascade assets to hold", 3, 8, k_assets, 1,
+            key="casc_k_slider",
+            help="Top-k assets selected by cascade signal for the optimized portfolio",
+        )
+    with cc2:
+        backtest_rebal = st.slider(
+            "Backtest rebalance (days)", 10, 63, 21, 1,
+            key="backtest_rebal_slider",
+            help="How often to rebalance in the walk-forward backtest",
+        )
+
 st.divider()
 
 

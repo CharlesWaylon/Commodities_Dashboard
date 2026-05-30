@@ -136,14 +136,15 @@ class TriggerBroadcaster:
         payload = serialize_signal(signal)
         self._enqueue(payload)
 
-    def broadcast_raw(self, payload: str) -> None:
+    def broadcast_raw(self, payload: str, *, replay: bool = True) -> None:
         """Push a pre-serialised JSON string (useful for test/demo events)."""
         if not _WS_AVAILABLE or self._loop is None:
             return
-        self._enqueue(payload)
+        self._enqueue(payload, replay=replay)
 
-    def _enqueue(self, payload: str) -> None:
-        self._replay.append(payload)
+    def _enqueue(self, payload: str, *, replay: bool = True) -> None:
+        if replay:
+            self._replay.append(payload)
         asyncio.run_coroutine_threadsafe(self._send_all(payload), self._loop)
 
     # ── Properties ────────────────────────────────────────────────────────────
@@ -151,6 +152,22 @@ class TriggerBroadcaster:
     @property
     def client_count(self) -> int:
         return len(self._clients)
+
+    def purge_synthetic_replay(self) -> int:
+        """Remove synthetic events from the replay buffer. Returns count removed."""
+        before = len(self._replay)
+        kept: list[str] = []
+        for payload in self._replay:
+            try:
+                obj = json.loads(payload)
+                if obj.get("classification_method") == "synthetic" or obj.get("source") == "synthetic":
+                    continue
+            except (ValueError, AttributeError):
+                pass
+            kept.append(payload)
+        self._replay.clear()
+        self._replay.extend(kept)
+        return before - len(self._replay)
 
     @property
     def is_running(self) -> bool:

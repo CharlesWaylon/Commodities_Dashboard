@@ -23,7 +23,7 @@ from components.commodity_cards import commodity_cards_grid, recal_css
 from components.macro_heatmap import macro_exposure_heatmap
 from services.trigger_lifecycle import LIFECYCLE
 from utils.theme import (
-    apply_theme, render_topbar, panel_header,
+    apply_theme, render_topbar, render_sidebar_nav, panel_header,
     SIGNAL, ASCEND, DESCEND, AMBER, ICE, ICE_MID,
     VOID, DEPTH, ABYSS, BORDER,
 )
@@ -34,16 +34,19 @@ st.set_page_config(
     page_title="Accendio · Macro Exposure",
     page_icon="assets/accendio_icon_transparent_32.png",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 apply_theme()
 render_topbar()
+render_sidebar_nav()
 
 
 # ── Auto-refresh when triggers are active ─────────────────────────────────────
 
 snap = LIFECYCLE.state_snapshot()
 _has_active = snap["active_count"] > 0
+n_active   = snap["active_count"]
+n_elevated = len(snap["elevated_commodities"])
 
 # Streamlit fragment-based auto-refresh (Streamlit 1.33+)
 # Falls back gracefully on older versions.
@@ -60,83 +63,6 @@ if _has_active:
         pass
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.markdown(
-        f'<p style="font-size:10px;letter-spacing:.14em;color:{ICE_MID};'
-        f'text-transform:uppercase;margin-bottom:8px">Macro Exposure</p>',
-        unsafe_allow_html=True,
-    )
-
-    # Live status
-    n_active   = snap["active_count"]
-    n_elevated = len(snap["elevated_commodities"])
-    status_col = ASCEND if n_active > 0 else "rgba(238,242,255,0.25)"
-
-    st.markdown(
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.32);letter-spacing:.1em;'
-        f'text-transform:uppercase;margin-bottom:6px">Trigger Status</div>'
-        f'<div style="font-size:22px;font-weight:300;color:{status_col};line-height:1">'
-        f'{n_active}</div>'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.3)">'
-        f'active trigger{"s" if n_active != 1 else ""}</div>'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.25);margin-top:4px">'
-        f'{n_elevated} commodities elevated</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("---")
-
-    # Active trigger quick list
-    if snap["triggers"]:
-        st.markdown(
-            f'<div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;'
-            f'color:rgba(238,242,255,0.22);margin-bottom:6px">Active Triggers</div>',
-            unsafe_allow_html=True,
-        )
-        for t in snap["triggers"]:
-            sev_colors = {
-                "LOW": "rgba(238,242,255,0.4)",
-                "MEDIUM": "#F59E0B",
-                "HIGH": "#e07020",
-                "CRITICAL": "#D94F4F",
-            }
-            c = sev_colors.get(t["severity"], "#888")
-            ttl_min = t["remaining_ttl_seconds"] / 60
-            st.markdown(
-                f'<div style="font-size:10px;color:{c};margin-bottom:3px">'
-                f'● {t["display_name"]}</div>'
-                f'<div style="font-size:9px;color:rgba(238,242,255,0.22);'
-                f'margin-bottom:6px;padding-left:10px">'
-                f'{t["severity"]} · {ttl_min:.0f} min TTL</div>',
-                unsafe_allow_html=True,
-            )
-    else:
-        st.caption("No active triggers")
-
-    st.markdown("---")
-
-    # Force-expire control
-    if snap["triggers"]:
-        trigger_types = [t["trigger_type"] for t in snap["triggers"]]
-        to_expire = st.selectbox(
-            "Force-expire trigger", ["— select —"] + trigger_types, key="expire_sel"
-        )
-        if to_expire and to_expire != "— select —":
-            if st.button("Dismiss", type="secondary", use_container_width=True):
-                LIFECYCLE.force_expire(to_expire)
-                st.success(f"Expired: {to_expire}")
-                st.rerun()
-
-    # Manual refresh
-    if st.button("↻  Refresh", use_container_width=True):
-        st.rerun()
-
-    if _has_active:
-        st.caption(f"Auto-refreshing every {_REFRESH_INTERVAL}s while triggers are active.")
-
-
 # ── Page header ───────────────────────────────────────────────────────────────
 
 st.markdown(
@@ -146,6 +72,81 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown("<div style='margin-top:16px'></div>", unsafe_allow_html=True)
+
+from utils.synthetic_triggers import cleanup_expired_synthetics, render_synthetic_banner
+cleanup_expired_synthetics()
+render_synthetic_banner(
+    page_context="Cluster elevation levels and commodity ripple states reflect "
+                 "the active scenario trigger via LIFECYCLE.",
+)
+
+
+# ── Trigger controls (moved out of sidebar) ───────────────────────────────────
+
+with st.expander("🎛️ Trigger Status & Controls", expanded=_has_active):
+    _sc1, _sc2 = st.columns([2, 3])
+
+    with _sc1:
+        status_col = ASCEND if n_active > 0 else "rgba(238,242,255,0.25)"
+        st.markdown(
+            f'<div style="padding:12px 16px;background:{DEPTH};border:0.5px solid {BORDER};'
+            f'border-radius:6px">'
+            f'<div style="font-size:10px;color:rgba(238,242,255,0.32);letter-spacing:.1em;'
+            f'text-transform:uppercase;margin-bottom:6px">Trigger Status</div>'
+            f'<div style="font-size:22px;font-weight:300;color:{status_col};line-height:1">'
+            f'{n_active}</div>'
+            f'<div style="font-size:10px;color:rgba(238,242,255,0.3)">'
+            f'active trigger{"s" if n_active != 1 else ""}</div>'
+            f'<div style="font-size:10px;color:rgba(238,242,255,0.25);margin-top:4px">'
+            f'{n_elevated} commodities elevated</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        if snap["triggers"]:
+            st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;'
+                f'color:rgba(238,242,255,0.32);margin-bottom:6px">Active Triggers</div>',
+                unsafe_allow_html=True,
+            )
+            sev_colors = {
+                "LOW": "rgba(238,242,255,0.4)",
+                "MEDIUM": "#F59E0B",
+                "HIGH": "#e07020",
+                "CRITICAL": "#D94F4F",
+            }
+            for t in snap["triggers"]:
+                c = sev_colors.get(t["severity"], "#888")
+                ttl_min = t["remaining_ttl_seconds"] / 60
+                st.markdown(
+                    f'<div style="font-size:11px;color:{c};margin-bottom:3px">'
+                    f'● {t["display_name"]}</div>'
+                    f'<div style="font-size:10px;color:rgba(238,242,255,0.32);'
+                    f'margin-bottom:6px;padding-left:12px">'
+                    f'{t["severity"]} · {ttl_min:.0f} min TTL</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No active triggers")
+
+    with _sc2:
+        if snap["triggers"]:
+            trigger_types = [t["trigger_type"] for t in snap["triggers"]]
+            to_expire = st.selectbox(
+                "Force-expire trigger", ["— select —"] + trigger_types, key="expire_sel"
+            )
+            if to_expire and to_expire != "— select —":
+                if st.button("Dismiss", type="secondary"):
+                    LIFECYCLE.force_expire(to_expire)
+                    st.success(f"Expired: {to_expire}")
+                    st.rerun()
+
+        if st.button("↻  Refresh"):
+            st.rerun()
+
+        if _has_active:
+            st.caption(f"Auto-refreshing every {_REFRESH_INTERVAL}s while triggers are active.")
 
 
 # ── Panel A: Macro Exposure Heatmap ──────────────────────────────────────────

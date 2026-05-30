@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 from services.price_data import fetch_current_prices
 from utils.formatting import sector_emoji
-from utils.theme import apply_theme, render_topbar
+from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 
 st.set_page_config(page_title="Accendio | Pricing", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
 apply_theme()
@@ -19,27 +19,17 @@ with st.spinner(""):
     df = fetch_current_prices()
 
 render_topbar(df)
+render_sidebar_nav()
 
-with st.sidebar:
-    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.divider()
-    st.page_link("app.py",                           label="Home")
-    st.page_link("pages/1_Pricing.py",               label="Pricing")
-    st.page_link("pages/2_Charts.py",                label="Charts")
-    st.page_link("pages/3_News.py",                  label="News")
-    st.page_link("pages/4_Models.py",                label="Models")
-    st.page_link("pages/5_Database.py",              label="Database")
-    st.divider()
-    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-    st.divider()
+_title_col, _refresh_col = st.columns([6, 1])
+with _title_col:
+    st.title("Pricing")
+    st.caption("Sorted, filtered pricing data for all tracked commodities")
+with _refresh_col:
+    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
     if st.button("↻  Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-
-st.title("Pricing")
-st.caption("Sorted, filtered pricing data for all tracked commodities")
 
 if df.empty:
     st.error("Could not load price data.")

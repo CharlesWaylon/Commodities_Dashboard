@@ -22,7 +22,7 @@ from services.price_data import fetch_current_prices
 from services.trigger_config import REGISTRY as _TRIGGER_REGISTRY
 from utils.macro_narrative import load_macro, get_macro_state, compute_forecasts, build_narrative
 from utils.theme import (
-    apply_theme, render_topbar, panel_header, PLOTLY_LAYOUT,
+    apply_theme, render_topbar, render_sidebar_nav, panel_header, PLOTLY_LAYOUT,
     VOID, ABYSS, DEPTH, SIGNAL, ICE, ICE_MID,
     ASCEND, DESCEND, AMBER, BORDER,
 )
@@ -279,79 +279,7 @@ with st.spinner(""):
 render_topbar(df)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
-    st.divider()
-    st.page_link("app.py",                           label="Home")
-    st.page_link("pages/1_Pricing.py",               label="Pricing")
-    st.page_link("pages/2_Charts.py",                label="Charts")
-    st.page_link("pages/3_News.py",                  label="News")
-    st.page_link("pages/4_Models.py",                label="Models")
-    st.page_link("pages/5_Database.py",              label="Database")
-    st.divider()
-    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-    st.page_link("pages/9_Scenarios.py",             label="Scenarios")
-    st.divider()
-
-    # ── Macro feed status (read-only; daemon runs via pipeline/run_macro_feed.py) ─
-    # LIVE/OFFLINE dot = daemon heartbeat freshness (touched every ~60s, so it
-    # stays green in quiet markets). Subtext shows the age of the most recent
-    # trigger_events.detected_at — the row downstream models actually consume.
-    _status  = _read_macro_feed_status()
-    _running = _status["running"]
-    _dot     = f'<span style="color:{"#4ADE80" if _running else "#F87171"}">●</span>'
-    _label   = "LIVE" if _running else "OFFLINE"
-    _no_keys = not any([
-        os.getenv("FRED_API_KEY"),
-        os.getenv("ALPHA_VANTAGE_KEY"),
-    ])
-
-    if _no_keys:
-        _sub = "Set FRED_API_KEY / ALPHA_VANTAGE_KEY in .env"
-    elif _status["heartbeat_age_seconds"] is None and not _status["queue_path_exists"]:
-        _sub = "Daemon not started — run: python -m pipeline.run_macro_feed"
-    elif _status["last_trigger_age_seconds"] is not None:
-        _sub = f"Last event: {_format_age(_status['last_trigger_age_seconds'])}"
-        if _status["last_trigger_family"]:
-            _sub += f" · {_status['last_trigger_family']}"
-    elif _running:
-        _sub = "Feed live · awaiting first event"
-    else:
-        _sub = "No recent activity — check logs/macro_feed.error.log"
-    st.markdown(
-        f'<div style="padding:8px 10px;background:{DEPTH};border:0.5px solid {BORDER};'
-        f'border-radius:6px;margin-bottom:8px">'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.1em;'
-        f'margin-bottom:3px">MACRO FEED</div>'
-        f'<div style="font-size:12px;color:rgba(238,242,255,0.75)">'
-        f'{_dot}&nbsp;{_label}</div>'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.3);margin-top:2px">{_sub}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Trigger registry status ───────────────────────────────────────────────
-    _n_triggers = len(_TRIGGER_REGISTRY)
-    _p1_count   = len(_TRIGGER_REGISTRY.by_priority(max_priority=1))
-    st.markdown(
-        f'<div style="padding:8px 10px;background:{DEPTH};border:0.5px solid {BORDER};'
-        f'border-radius:6px;margin-bottom:8px">'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.1em;'
-        f'margin-bottom:3px">TRIGGER REGISTRY</div>'
-        f'<div style="font-size:12px;color:rgba(238,242,255,0.75)">'
-        f'<span style="color:#4ADE80">●</span>&nbsp;{_n_triggers} configs loaded</div>'
-        f'<div style="font-size:10px;color:rgba(238,242,255,0.3);margin-top:2px">'
-        f'{_p1_count} priority-1 triggers active</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.caption(f"Last refresh · {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
-    if st.button("↻  Refresh", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+render_sidebar_nav()
 
 if df.empty:
     st.error("Could not load price data. Check your internet connection.")
@@ -362,15 +290,79 @@ n_adv = int((df["Pct_Change"] > 0).sum())
 n_dec = int((df["Pct_Change"] < 0).sum())
 n_tot = len(df)
 
-st.markdown(
-    f'<h1 style="margin-bottom:4px">Command Centre</h1>'
-    f'<p style="color:rgba(238,242,255,0.28);font-size:12px;letter-spacing:.05em;margin-top:0">'
-    f'{n_tot} instruments &nbsp;·&nbsp;'
-    f'<span style="color:{ASCEND}">{n_adv} advancing</span>&nbsp;&nbsp;'
-    f'<span style="color:{DESCEND}">{n_dec} declining</span>'
-    f'</p>',
-    unsafe_allow_html=True,
-)
+_head_col, _refresh_col = st.columns([6, 1])
+with _head_col:
+    st.markdown(
+        f'<h1 style="margin-bottom:4px">Command Centre</h1>'
+        f'<p style="color:rgba(238,242,255,0.28);font-size:12px;letter-spacing:.05em;margin-top:0">'
+        f'{n_tot} instruments &nbsp;·&nbsp;'
+        f'<span style="color:{ASCEND}">{n_adv} advancing</span>&nbsp;&nbsp;'
+        f'<span style="color:{DESCEND}">{n_dec} declining</span>'
+        f'</p>',
+        unsafe_allow_html=True,
+    )
+with _refresh_col:
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    if st.button("↻  Refresh", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    st.caption(f"{datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+
+
+# ── System status (macro feed + trigger registry — moved from sidebar) ────────
+_status  = _read_macro_feed_status()
+_running = _status["running"]
+_dot     = f'<span style="color:{"#4ADE80" if _running else "#F87171"}">●</span>'
+_label   = "LIVE" if _running else "OFFLINE"
+_no_keys = not any([
+    os.getenv("FRED_API_KEY"),
+    os.getenv("ALPHA_VANTAGE_KEY"),
+])
+
+if _no_keys:
+    _sub = "Set FRED_API_KEY / ALPHA_VANTAGE_KEY in .env"
+elif _status["heartbeat_age_seconds"] is None and not _status["queue_path_exists"]:
+    _sub = "Daemon not started — run: python -m pipeline.run_macro_feed"
+elif _status["last_trigger_age_seconds"] is not None:
+    _sub = f"Last event: {_format_age(_status['last_trigger_age_seconds'])}"
+    if _status["last_trigger_family"]:
+        _sub += f" · {_status['last_trigger_family']}"
+elif _running:
+    _sub = "Feed live · awaiting first event"
+else:
+    _sub = "No recent activity — check logs/macro_feed.error.log"
+
+_n_triggers = len(_TRIGGER_REGISTRY)
+_p1_count   = len(_TRIGGER_REGISTRY.by_priority(max_priority=1))
+
+_ss1, _ss2 = st.columns(2)
+with _ss1:
+    st.markdown(
+        f'<div style="padding:10px 14px;background:{DEPTH};border:0.5px solid {BORDER};'
+        f'border-radius:6px">'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.1em">'
+        f'MACRO FEED</div>'
+        f'<div style="font-size:12px;color:rgba(238,242,255,0.75);margin-top:2px">'
+        f'{_dot}&nbsp;{_label}</div>'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.3);margin-top:2px">{_sub}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+with _ss2:
+    st.markdown(
+        f'<div style="padding:10px 14px;background:{DEPTH};border:0.5px solid {BORDER};'
+        f'border-radius:6px">'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.35);letter-spacing:.1em">'
+        f'TRIGGER REGISTRY</div>'
+        f'<div style="font-size:12px;color:rgba(238,242,255,0.75);margin-top:2px">'
+        f'<span style="color:#4ADE80">●</span>&nbsp;{_n_triggers} configs loaded</div>'
+        f'<div style="font-size:10px;color:rgba(238,242,255,0.3);margin-top:2px">'
+        f'{_p1_count} priority-1 triggers active</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+st.markdown("<div style='margin-top:12px'></div>", unsafe_allow_html=True)
 
 # ── How it works ─────────────────────────────────────────────────────────────
 with st.expander("How it works — the two analytical layers", expanded=False):
