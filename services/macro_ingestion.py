@@ -98,6 +98,11 @@ _ZSCORE_WINDOW = 20  # rolling observations for baseline mean/std
 # the first poll — not 0.0 until an in-memory buffer warms up across restarts.
 _FRED_HISTORY_DAYS = 1000
 _FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+# Pacing between back-to-back series requests. FRED's per-IP burst limiter
+# 429s on tight bursts even well under the 120 req/min ceiling.
+_FRED_INTER_REQUEST_SLEEP = 0.5
+# On a 429, sleep this long and retry once before giving up for the cycle.
+_FRED_BACKOFF_ON_429 = 5.0
 
 
 class FREDPoller:
@@ -168,23 +173,34 @@ class FREDPoller:
         start = (datetime.now(timezone.utc) - timedelta(days=_FRED_HISTORY_DAYS)).strftime("%Y-%m-%d")
         events: List[MacroEvent] = []
 
-        for series_id, meta in FRED_SERIES.items():
-            try:
-                resp = requests.get(
-                    _FRED_BASE,
-                    params={
-                        "series_id": series_id,
-                        "api_key": self._api_key,
-                        "file_type": "json",
-                        "observation_start": start,
-                        "sort_order": "asc",
-                    },
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                obs = resp.json().get("observations", [])
-            except Exception as exc:
-                logger.warning("FRED %s: fetch failed — %s", series_id, exc)
+        for idx, (series_id, meta) in enumerate(FRED_SERIES.items()):
+            if idx > 0:
+                time.sleep(_FRED_INTER_REQUEST_SLEEP)
+            params = {
+                "series_id": series_id,
+                "api_key": self._api_key,
+                "file_type": "json",
+                "observation_start": start,
+                "sort_order": "asc",
+            }
+            obs = None
+            for attempt in range(2):
+                try:
+                    resp = requests.get(_FRED_BASE, params=params, timeout=15)
+                    if resp.status_code == 429 and attempt == 0:
+                        logger.info(
+                            "FRED %s: 429 — backing off %.1fs before retry",
+                            series_id, _FRED_BACKOFF_ON_429,
+                        )
+                        time.sleep(_FRED_BACKOFF_ON_429)
+                        continue
+                    resp.raise_for_status()
+                    obs = resp.json().get("observations", [])
+                    break
+                except Exception as exc:
+                    logger.warning("FRED %s: fetch failed — %s", series_id, exc)
+                    break
+            if obs is None:
                 continue
 
             # Parse the full returned series into floats (ascending by date).
