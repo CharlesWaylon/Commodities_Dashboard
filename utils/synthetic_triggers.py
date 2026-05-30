@@ -115,12 +115,15 @@ def clear_all_synthetics():
         except Exception:
             pass
 
-        # Purge synthetic events from the WS replay buffer so reconnecting
-        # clients don't get them re-sent, then tell live clients to drop them.
+        # Purge ALL non-real events from the WS replay buffer unconditionally
+        # (the buffer is ephemeral UI state; real triggers will re-populate it).
+        # Also tell any live JS clients to drop their synthetic cards.
         try:
             from services.ws_broadcast import BROADCASTER
+            # Always purge the buffer — regardless of whether the server is
+            # running in this process — because it's the same module singleton.
+            BROADCASTER.purge_replay()
             if BROADCASTER.is_running:
-                BROADCASTER.purge_synthetic_replay()
                 BROADCASTER.broadcast_raw(
                     json.dumps({"_action": "clear_synthetics"}), replay=False,
                 )

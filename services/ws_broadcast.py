@@ -153,21 +153,11 @@ class TriggerBroadcaster:
     def client_count(self) -> int:
         return len(self._clients)
 
-    def purge_synthetic_replay(self) -> int:
-        """Remove synthetic events from the replay buffer. Returns count removed."""
-        before = len(self._replay)
-        kept: list[str] = []
-        for payload in self._replay:
-            try:
-                obj = json.loads(payload)
-                if obj.get("classification_method") == "synthetic" or obj.get("source") == "synthetic":
-                    continue
-            except (ValueError, AttributeError):
-                pass
-            kept.append(payload)
+    def purge_replay(self) -> int:
+        """Clear the entire replay buffer. Returns count removed."""
+        count = len(self._replay)
         self._replay.clear()
-        self._replay.extend(kept)
-        return before - len(self._replay)
+        return count
 
     @property
     def is_running(self) -> bool:

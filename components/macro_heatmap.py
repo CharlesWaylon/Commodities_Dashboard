@@ -223,9 +223,7 @@ def cluster_exposure_strip(lifecycle=None) -> None:
     snap = lifecycle.state_snapshot()
     clusters = _compute_cluster_exposure(snap)
 
-    st.html(_STRIP_CSS)
-
-    tiles_html = '<div class="ac-strip">'
+    tiles_html = _STRIP_CSS + '\n<div class="ac-strip">'
     for c in clusters:
         sev    = c["highest_severity"]
         cols   = _SEV_COLOURS[sev]
@@ -396,8 +394,6 @@ def trigger_impact_matrix(lifecycle=None) -> None:
     except Exception:
         registry_names = {}
 
-    st.html(_MATRIX_CSS)
-
     # Table header
     col_icons = [_CLUSTER_ICON[c] for c in _CLUSTER_ORDER]
     col_names = [_CLUSTER_DISPLAY[c] for c in _CLUSTER_ORDER]
@@ -510,7 +506,7 @@ def trigger_impact_matrix(lifecycle=None) -> None:
         + "".join(legend_parts) + "</div>"
     )
 
-    st.html(matrix_html + legend_html)
+    st.html(_MATRIX_CSS + matrix_html + legend_html)
 
 
 # ── Combined renderer ──────────────────────────────────────────────────────────

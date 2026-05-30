@@ -109,8 +109,26 @@ st.markdown("<div style='margin-top:16px'></div>", unsafe_allow_html=True)
 
 # ── Live ribbon ───────────────────────────────────────────────────────────────
 
-panel_header("LIVE EVENT FEED", badge=f"ws://{ws_url.replace('ws://', '')}")
-event_ribbon(ws_url=ws_url, height=200, max_events=max_events)
+_ribbon_header_col, _ribbon_clear_col = st.columns([8, 1])
+with _ribbon_header_col:
+    panel_header("LIVE EVENT FEED", badge=f"ws://{ws_url.replace('ws://', '')}")
+with _ribbon_clear_col:
+    if st.button("Clear ribbon", key="clear_ribbon_buf", help="Remove all cards from the live feed"):
+        from services.ws_broadcast import BROADCASTER
+        BROADCASTER.purge_replay()
+        # Phase 1: flag that we're clearing; next render omits the ribbon
+        # entirely so the iframe is truly destroyed by React.
+        st.session_state["_ribbon_clearing"] = True
+        st.rerun()
+
+# ── Ribbon render (phase-aware) ───────────────────────────────────────────────
+if st.session_state.get("_ribbon_clearing"):
+    # Phase 1 frame: no ribbon → React destroys the old iframe.
+    # Immediately schedule phase 2 so the ribbon comes back.
+    st.session_state["_ribbon_clearing"] = False
+    st.rerun()
+else:
+    event_ribbon(ws_url=ws_url, height=200, max_events=max_events)
 
 
 # ── Lifecycle state ───────────────────────────────────────────────────────────
