@@ -308,7 +308,9 @@ class CausalChain:
 
         # ── Layer 4: Ensemble — MetaPredictor decision ────────────────────────
         try:
-            ensemble_node = self._build_ensemble_node(macro_df, t_date)
+            ensemble_node = self._build_ensemble_node(
+                macro_df, t_date, prices=prices, commodity=commodity
+            )
             if ensemble_node:
                 result.nodes.append(ensemble_node)
         except Exception:
@@ -506,81 +508,115 @@ class CausalChain:
         t_date: pd.Timestamp,
     ) -> Optional[ChainNode]:
         """
-        Derive the macro regime state from VIX / DXY overlay columns.
-        Uses the macro_df flags that are already computed — no HMM re-fit.
+        Classify the macro regime at the trigger date.
+
+        Primary path: MacroRouter.get_current_regime() on macro_df sliced to
+        the trigger date — uses the trained regression model + trigger overrides,
+        matching what the Models page displays.
+        Fallback: VIX / DXY threshold rules (original behaviour).
         """
         if macro_df is None or macro_df.empty:
             return None
 
-        required = {"vix", "dxy_zscore63"}
+        # Slice macro_df to the trigger date so get_current_regime sees the
+        # same market state that existed on that day, not today's state.
+        macro_at_date = macro_df.loc[macro_df.index <= t_date]
+        if macro_at_date.empty:
+            macro_at_date = macro_df  # trigger predates macro data — use full frame
+
+        # ── Primary: MacroRouter.get_current_regime ───────────────────────────
+        router_regime: Optional[str] = None
+        try:
+            from models.macro_router import get_current_regime as _gcr
+            router_regime = _gcr(macro_at_date)
+        except Exception:
+            pass
+
+        # ── Read point-in-time VIX / DXY for display ─────────────────────────
+        required = {"vix"}
         if not required.issubset(macro_df.columns):
-            return None
+            if router_regime is None:
+                return None
 
-        # Closest row at/before trigger date
         aligned = macro_df.reindex(macro_df.index.union([t_date])).ffill()
-        if t_date not in aligned.index:
-            return None
-        row = aligned.loc[t_date]
-
+        row      = aligned.loc[t_date] if t_date in aligned.index else aligned.iloc[-1]
         vix      = _safe_float(row.get("vix"))
         dxy_z    = _safe_float(row.get("dxy_zscore63"))
         risk_off = bool(_safe_float(row.get("vix_risk_off", 0.0)) >= 0.5)
         crisis   = bool(_safe_float(row.get("vix_crisis",   0.0)) >= 0.5)
 
-        if math.isnan(vix) and math.isnan(dxy_z):
-            return None
+        # ── Map router regime to display label + direction ────────────────────
+        _ROUTER_TO_DISPLAY = {
+            "bull":            ("Bull Market",           BULLISH,        0.70),
+            "bear":            ("Bear Market",           BEARISH,        0.70),
+            "high_vol":        ("High Volatility",       HEIGHTENED_VOL, 0.75),
+            "neutral":         ("Neutral",               NEUTRAL,        0.40),
+            "rate_shock":      ("Rate Shock",            BEARISH,        0.85),
+            "growth_shock":    ("Growth Shock",          BEARISH,        0.80),
+            "commodity_shock": ("Commodity Shock",       HEIGHTENED_VOL, 0.80),
+        }
 
-        # Determine regime label
-        if crisis:
-            regime = "Crisis"
-            direction = HEIGHTENED_VOL
-            confidence = 0.9
-        elif risk_off:
-            regime = "Risk-Off"
-            direction = BEARISH
-            confidence = 0.7
-        elif not math.isnan(dxy_z) and dxy_z > 1.5:
-            regime = "Dollar-Stress"
-            direction = BEARISH
-            confidence = min(1.0, abs(dxy_z) / 3.0)
-        elif not math.isnan(dxy_z) and dxy_z < -1.0:
-            regime = "Risk-On / Weak Dollar"
-            direction = BULLISH
-            confidence = min(1.0, abs(dxy_z) / 3.0)
+        if router_regime and router_regime in _ROUTER_TO_DISPLAY:
+            regime_label, direction, confidence = _ROUTER_TO_DISPLAY[router_regime]
+            model_name = "MacroRouter (trained)"
         else:
-            regime = "Neutral"
-            direction = NEUTRAL
-            confidence = 0.4
+            # Fallback: threshold rules on VIX / DXY
+            if crisis:
+                regime_label, direction, confidence = "Crisis", HEIGHTENED_VOL, 0.90
+            elif risk_off:
+                regime_label, direction, confidence = "Risk-Off", BEARISH, 0.70
+            elif not math.isnan(dxy_z) and dxy_z > 1.5:
+                regime_label = "Dollar-Stress"
+                direction, confidence = BEARISH, min(1.0, abs(dxy_z) / 3.0)
+            elif not math.isnan(dxy_z) and dxy_z < -1.0:
+                regime_label = "Risk-On / Weak Dollar"
+                direction, confidence = BULLISH, min(1.0, abs(dxy_z) / 3.0)
+            else:
+                regime_label, direction, confidence = "Neutral", NEUTRAL, 0.40
+            model_name = "Macro Overlay (VIX/DXY fallback)"
 
         vix_str = f"VIX {vix:.1f}" if not math.isnan(vix) else ""
         dxy_str = f"DXY z={dxy_z:+.2f}" if not math.isnan(dxy_z) else ""
-        parts = [p for p in [vix_str, dxy_str] if p]
-        summary = f"Macro regime on trigger date: **{regime}** ({'; '.join(parts)})"
+        parts   = [p for p in [vix_str, dxy_str] if p]
+        suffix  = f" ({'; '.join(parts)})" if parts else ""
+        summary = f"Macro regime on trigger date: **{regime_label}**{suffix}"
 
         return ChainNode(
             layer="regime",
-            model_name="Macro Overlay (VIX/DXY)",
+            model_name=model_name,
             summary=summary,
             confidence=confidence,
             before_value=None,
             after_value=vix if not math.isnan(vix) else None,
             direction=direction,
-            metadata={"regime": regime, "vix": vix, "dxy_zscore63": dxy_z,
-                      "risk_off": risk_off, "crisis": crisis},
+            metadata={
+                "regime":        regime_label,
+                "router_regime": router_regime,
+                "vix":           vix,
+                "dxy_zscore63":  dxy_z,
+                "risk_off":      risk_off,
+                "crisis":        crisis,
+            },
         )
 
     def _build_ensemble_node(
         self,
         macro_df: pd.DataFrame,
         t_date: pd.Timestamp,
+        prices: Optional[pd.DataFrame] = None,
+        commodity: Optional[str] = None,
     ) -> Optional[ChainNode]:
         """
-        Load the MetaPredictor from disk (if trained) and produce a MetaDecision
-        snapshot for the trigger date's market state.
-        Falls back gracefully to equal-weight summary if untrained.
+        Load the MetaPredictor from disk and produce a MetaDecision snapshot
+        for the trigger date's market state, using live model votes.
+
+        Votes are gathered by fitting XGBoost and ARIMA on the price data up to
+        the trigger date — the same models the Models page uses — so the
+        ensemble reflects the actual trained-model consensus, not just the
+        meta-predictor's macro-state prior.
         """
         try:
-            from models.meta_predictor import MetaPredictor, collect_meta_features
+            from models.meta_predictor import MetaPredictor, collect_meta_features, ModelVote
         except ImportError:
             return None
 
@@ -588,7 +624,7 @@ class CausalChain:
         if macro_df is None or macro_df.empty:
             slice_df = pd.DataFrame()
         else:
-            aligned = macro_df.reindex(macro_df.index.union([t_date])).ffill()
+            aligned  = macro_df.reindex(macro_df.index.union([t_date])).ffill()
             slice_df = aligned.loc[:t_date].tail(1) if t_date in aligned.index else pd.DataFrame()
 
         meta_features = collect_meta_features(slice_df) if not slice_df.empty else None
@@ -596,29 +632,77 @@ class CausalChain:
             from models.meta_predictor import MetaFeatures
             meta_features = MetaFeatures()
 
-        # Load trained predictor (silent fallback to untrained)
+        # ── Gather live model votes (XGBoost + ARIMA) ─────────────────────────
+        # Prices are sliced to the trigger date so the models see the same
+        # information that was available on that day.
+        votes: list = []
+        vote_labels: list = []
+
+        if prices is not None and not prices.empty and commodity and commodity in prices.columns:
+            prices_at = prices.loc[prices.index <= t_date]
+
+            # XGBoost vote
+            try:
+                import warnings
+                from models.ml.xgboost_shap import XGBoostForecaster
+                from models.features import build_feature_matrix, build_target
+                feat = build_feature_matrix(prices_at)
+                tgt  = build_target(prices_at, commodity)
+                xgb  = XGBoostForecaster(commodity=commodity)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    xgb.fit(feat, tgt)
+                fc  = float(xgb.predict(feat).iloc[-1])
+                ic  = xgb.ic_score(feat, tgt)
+                votes.append(ModelVote(
+                    tier="ml", model_name="XGBoostForecaster",
+                    commodity=commodity, forecast_return=fc, confidence=ic,
+                ))
+                vote_labels.append(f"XGB {fc:+.3%} (IC {ic:.3f})")
+            except Exception:
+                pass
+
+            # ARIMA vote
+            try:
+                import warnings
+                import numpy as np
+                from models.statistical.arima import ARIMAForecaster
+                ret_series = np.log(
+                    prices_at[commodity] / prices_at[commodity].shift(1)
+                ).dropna()
+                ar = ARIMAForecaster(commodity=commodity)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    ar.fit(ret_series)
+                ar_fc = ar.forecast(steps=1)["forecast"][0]
+                votes.append(ModelVote(
+                    tier="statistical", model_name="ARIMA",
+                    commodity=commodity, forecast_return=float(ar_fc), confidence=0.04,
+                ))
+                vote_labels.append(f"ARIMA {float(ar_fc):+.3%}")
+            except Exception:
+                pass
+
+        # ── Load MetaPredictor and predict ────────────────────────────────────
         model_path = self._meta_model_path or (
             Path(__file__).resolve().parent.parent / "data" / "meta_predictor.pkl"
         )
         mp = MetaPredictor()
         mp.load(model_path)
 
-        # Predict with empty votes (weights-only view; real votes need live model fits)
-        decision = mp.predict(meta_features, votes=[])
+        decision = mp.predict(meta_features, votes=votes)
 
-        trusted = decision.trusted_tier
-        top_w   = decision.weights.get(trusted, 0.0)
+        trusted     = decision.trusted_tier
+        top_w       = decision.weights.get(trusted, 0.0)
         trained_tag = "trained" if mp.is_trained else "untrained — equal weights"
+        votes_tag   = f", votes: {', '.join(vote_labels)}" if vote_labels else ", no live votes"
 
         summary = (
-            f"Meta-predictor ({trained_tag}): "
+            f"Meta-predictor ({trained_tag}{votes_tag}): "
             f"trusting **{trusted}** tier ({top_w:.0%} weight)"
         )
 
         if not mp.is_trained:
-            # Model has never been fit — signal is meaningless; surface a clear warning
-            # rather than emitting a random BULLISH/BEARISH direction that would mislead
-            # downstream layers (portfolio node, narrative, Sankey colours).
             return ChainNode(
                 layer="ensemble",
                 model_name="MetaPredictor",
@@ -630,6 +714,7 @@ class CausalChain:
                     "weights":         decision.weights,
                     "meta_confidence": decision.meta_confidence,
                     "is_trained":      False,
+                    "n_votes":         len(votes),
                     "reasoning":       decision.reasoning,
                     "warning": (
                         "MetaPredictor not yet trained — "
@@ -649,6 +734,7 @@ class CausalChain:
                 "weights":         decision.weights,
                 "meta_confidence": decision.meta_confidence,
                 "is_trained":      True,
+                "n_votes":         len(votes),
                 "reasoning":       decision.reasoning,
             },
         )

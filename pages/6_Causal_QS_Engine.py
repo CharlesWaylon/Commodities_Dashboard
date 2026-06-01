@@ -34,6 +34,7 @@ import sys, os
 
 from utils.theme import apply_theme, render_topbar, render_sidebar_nav, PLOTLY_LAYOUT
 from models.causal_chain import ChainNode, CausalChainResult
+from models.config import MODELING_COMMODITIES
 
 st.set_page_config(
     page_title="Accendio | Causal Chain",
@@ -81,56 +82,75 @@ LAYER_ICONS = {
 }
 
 # ── Tickers / commodities (mirrors 4_Models.py) ────────────────────────────────
-CORE_TICKERS = {
-    "WTI Crude Oil":           "CL=F",
-    "Brent Crude Oil":         "BZ=F",
-    "Natural Gas (Henry Hub)": "NG=F",
-    "Gasoline (RBOB)":         "RB=F",
-    "Heating Oil":             "HO=F",
-    "Gold (COMEX)":            "GC=F",
-    "Silver (COMEX)":          "SI=F",
-    "Copper (COMEX)":          "HG=F",
-    "Corn (CBOT)":             "ZC=F",
-    "Wheat (CBOT SRW)":        "ZW=F",
-    "Soybeans (CBOT)":         "ZS=F",
-}
-
-# Map from CORE_TICKERS display name → (VAR group key, DB canonical column name).
-# The DB canonical names match COMMODITY_GROUPS entries in models/statistical/var_vecm.py.
+# Maps every display name in MODELING_COMMODITIES to its VAR group and the
+# canonical column name used by models/statistical/var_vecm.py COMMODITY_GROUPS.
+# Commodities absent from this dict will simply skip the ripple section.
 COMMODITY_TO_GROUP: dict[str, tuple[str, str]] = {
-    "WTI Crude Oil":           ("energy",           "WTI Crude Oil"),
-    "Brent Crude Oil":         ("energy",           "Brent Crude Oil"),
-    "Natural Gas (Henry Hub)": ("energy",           "Natural Gas"),
-    "Gasoline (RBOB)":         ("energy",           "Gasoline (RBOB)"),
-    "Heating Oil":             ("energy",           "Heating Oil"),
-    "Gold (COMEX)":            ("precious_metals",  "Gold"),
-    "Silver (COMEX)":          ("precious_metals",  "Silver"),
-    "Copper (COMEX)":          ("industrial_metals","Copper"),
-    "Corn (CBOT)":             ("grains",           "Corn"),
-    "Wheat (CBOT SRW)":        ("grains",           "Wheat"),
-    "Soybeans (CBOT)":         ("grains",           "Soybeans"),
+    # Energy futures
+    "WTI Crude Oil":             ("energy",            "WTI Crude Oil"),
+    "Brent Crude Oil":           ("energy",            "Brent Crude Oil"),
+    "Natural Gas":               ("energy",            "Natural Gas"),
+    "Gasoline (RBOB)":           ("energy",            "Gasoline (RBOB)"),
+    "Heating Oil":               ("energy",            "Heating Oil"),
+    # Energy transition / ETFs
+    "Carbon Credits*":           ("energy_transition", "Carbon Credits*"),
+    "LNG / Intl Gas*":           ("energy_transition", "LNG / Intl Gas*"),
+    "Metallurgical Coal*":       ("energy_transition", "Metallurgical Coal*"),
+    "Thermal Coal*":             ("energy_transition", "Thermal Coal*"),
+    "Uranium*":                  ("energy_transition", "Uranium*"),
+    "Lumber*":                   ("energy_transition", "Lumber*"),
+    # Precious metals futures
+    "Gold (COMEX)":              ("precious_metals",   "Gold"),
+    "Silver (COMEX)":            ("precious_metals",   "Silver"),
+    "Platinum":                  ("precious_metals",   "Platinum"),
+    "Palladium":                 ("precious_metals",   "Palladium"),
+    # Precious metals ETFs
+    "Gold (Physical/London)*":   ("precious_metals",   "Gold (Physical/London)*"),
+    "Silver (Physical)*":        ("precious_metals",   "Silver (Physical)*"),
+    # Industrial metals futures
+    "Copper (COMEX)":            ("industrial_metals", "Copper"),
+    "Aluminum (COMEX)":          ("industrial_metals", "Aluminum (COMEX)"),
+    "HRC Steel":                 ("industrial_metals", "HRC Steel"),
+    # Industrial metals ETFs
+    "Iron Ore / Steel*":         ("industrial_metals", "Iron Ore / Steel*"),
+    "Zinc & Cobalt*":            ("industrial_metals", "Zinc & Cobalt*"),
+    # Grains core
+    "Corn (CBOT)":               ("grains",            "Corn"),
+    "Wheat (CBOT SRW)":          ("grains",            "Wheat"),
+    "Soybeans (CBOT)":           ("grains",            "Soybeans"),
+    # Ag extended
+    "Soybean Meal":              ("ag_extended",       "Soybean Meal"),
+    "Soybean Oil":               ("ag_extended",       "Soybean Oil"),
+    "Wheat (KC HRW)":            ("ag_extended",       "Wheat (KC HRW)"),
+    "Oats (CBOT)":               ("ag_extended",       "Oats (CBOT)"),
+    "Rough Rice (CBOT)":         ("ag_extended",       "Rough Rice (CBOT)"),
+    # Softs
+    "Coffee":                    ("softs",             "Coffee"),
+    "Cocoa":                     ("softs",             "Cocoa"),
+    "Sugar":                     ("softs",             "Sugar"),
+    "Cotton":                    ("softs",             "Cotton"),
+    "Orange Juice (FCOJ-A)":     ("softs",             "Orange Juice (FCOJ-A)"),
+    # Livestock
+    "Live Cattle":               ("livestock",         "Live Cattle"),
+    "Feeder Cattle":             ("livestock",         "Feeder Cattle"),
+    "Lean Hogs":                 ("livestock",         "Lean Hogs"),
+    # New / alternative
+    "Lithium*":                  ("new_commodities",   "Lithium*"),
+    "Rare Earths*":              ("new_commodities",   "Rare Earths*"),
+    "Bitcoin":                   ("new_commodities",   "Bitcoin"),
 }
 
-# Reverse: DB canonical name → display name (for labelling ripple nodes)
+# Reverse: VAR canonical name → display name (for labelling ripple nodes)
 _DB_TO_DISPLAY: dict[str, str] = {v[1]: k for k, v in COMMODITY_TO_GROUP.items()}
 
 
 # ── Data loaders (cached, DB-first) ────────────────────────────────────────────
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_prices(period: str = "3y") -> pd.DataFrame:
-    from services.data_contract import fetch_price_matrix
-    days = int(period[:-1]) * 365 if period.endswith("y") else 365
-    df = fetch_price_matrix(names=list(CORE_TICKERS.keys()), days=days)
-    if not df.empty:
-        return df
-    import yfinance as yf
-    raw = yf.download(
-        list(CORE_TICKERS.values()), period=period,
-        interval="1d", progress=False, auto_adjust=True,
-    )
-    prices = raw["Close"].rename(columns={v: k for k, v in CORE_TICKERS.items()})
-    return prices.ffill().dropna()
+@st.cache_data(ttl=14400, show_spinner=False)
+def load_prices() -> pd.DataFrame:
+    """Full 40-instrument price matrix via ticker-based DB join (same as Models page)."""
+    from models.data_loader import load_price_matrix_from_db
+    return load_price_matrix_from_db()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -226,19 +246,22 @@ def _build_layer_sparkline(
                 annotation_position="top right",
                 annotation_font=dict(size=7, color="rgba(255,255,255,0.35)"),
             )
+        layout = {**PLOTLY_LAYOUT}
+        layout["xaxis"] = {
+            **layout.get("xaxis", {}),
+            "showgrid": False, "showticklabels": False,
+            "showline": False, "zeroline": False,
+            "range": [x_list[0], x_list[-1]],
+        }
+        layout["yaxis"] = {
+            **layout.get("yaxis", {}),
+            "showgrid": False, "showticklabels": False,
+            "showline": False, "zeroline": False,
+        }
         fig.update_layout(
-            **PLOTLY_LAYOUT,
+            **layout,
             height=_SPARK_HEIGHT,
             margin=dict(t=20, b=2, l=2, r=2),
-            xaxis=dict(
-                showgrid=False, showticklabels=False,
-                showline=False, zeroline=False,
-                range=[x_list[0], x_list[-1]],
-            ),
-            yaxis=dict(
-                showgrid=False, showticklabels=False,
-                showline=False, zeroline=False,
-            ),
             showlegend=False,
             title_text=title,
             title_font=dict(size=8, color="rgba(238,242,255,0.30)"),
@@ -631,7 +654,7 @@ from models.triggers import all_trigger_families
 
 _families     = all_trigger_families()
 _family_names = {f.description: f.name for f in _families}
-_commodity_list = list(CORE_TICKERS.keys())
+_commodity_list = list(MODELING_COMMODITIES.keys())
 
 col_a, col_b, col_c, col_d = st.columns([2, 2, 1.5, 1])
 
@@ -898,7 +921,7 @@ else:
     strength  = cfg.get("strength",  _trigger_strength)
 
     with st.spinner(f"Loading price & macro data…"):
-        _prices = load_prices(period="3y")
+        _prices = load_prices()
         _macro  = load_macro(period="2y", _price_index=_prices.index if not _prices.empty else None)
 
     with st.spinner(f"Running causal trace for {commodity}…"):
