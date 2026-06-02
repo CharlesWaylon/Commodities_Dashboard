@@ -165,7 +165,8 @@ class RetrainSummary:
     n_training_pairs    : total (MetaFeatures, winning_tier) pairs generated.
     tier_distribution   : {tier: count} across all training pairs.
     tree_n_leaves       : number of leaves in the fitted decision tree (-1 if untrained).
-    top_feature         : most important feature by Gini importance (or "" if untrained).
+    top_feature         : most important feature by permutation importance
+                          (Gini fallback if sklearn.inspection is unavailable; "" if untrained).
     save_path           : where the pkl was written (empty string if dry_run or failed).
     error               : non-empty if the run aborted with an exception.
     config              : the RetrainConfig used (for audit).
@@ -834,10 +835,27 @@ def run_daily_retrain(
         log.info("Running backtest on %d commodities…", len(commodities))
 
         # ── 3. Run backtest harness ────────────────────────────────────────────
+        # Load M2 (second-nearby) prices for basis/roll-yield features.
+        # Non-fatal: if M2 ingest has not run yet, m2 is empty and basis features
+        # are simply absent — models fall back to the existing sharpe carry proxy.
+        m2_prices_for_harness: Optional[pd.DataFrame] = None
+        try:
+            from models.data_loader import load_m2_price_matrix_from_db
+            from models.config import MODELING_COMMODITIES
+            m2 = load_m2_price_matrix_from_db()
+            if not m2.empty:
+                m2_prices_for_harness = m2
+                log.info("M2 prices loaded: %d rows × %d cols", len(m2), m2.shape[1])
+            else:
+                log.info("M2 prices: empty (M2 ingest not yet run — basis features inactive)")
+        except Exception as exc:
+            log.warning("M2 price load skipped (%s) — basis features inactive.", exc)
+
         from models.backtest_harness import BacktestHarness, DEFAULT_ADAPTERS
         harness = BacktestHarness(
             adapters=list(DEFAULT_ADAPTERS),
             climate_df=climate if not climate.empty else None,
+            m2_prices=m2_prices_for_harness,
         )
         records = harness.run(prices, macro, commodities)
 
@@ -1010,9 +1028,20 @@ def run_daily_retrain(
         # Capture model stats (works for both RandomForest and legacy tree)
         if meta.is_trained:
             summary.tree_n_leaves = meta.n_leaves
-        summary.top_feature = meta._top_feature()
+        # Log the top feature by PERMUTATION importance, not Gini. Gini is biased
+        # toward high-cardinality continuous columns and is what let days_to_opec
+        # masquerade as the dominant feature while contributing a −0.55 IC.
+        # Permutation importance measures the real accuracy drop on shuffling.
+        perm_imp = meta.permutation_importances(pairs)
+        if perm_imp:
+            summary.top_feature = max(perm_imp, key=perm_imp.get)
+            top5 = sorted(perm_imp.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            log.info("MetaPredictor permutation importances (top 5): %s", top5)
+        else:
+            # sklearn missing / untrained — fall back to Gini top feature.
+            summary.top_feature = meta._top_feature()
         log.info(
-            "MetaPredictor fitted: model=%s, %d leaves, top feature=%r",
+            "MetaPredictor fitted: model=%s, %d leaves, top feature (perm)=%r",
             meta._model_type, summary.tree_n_leaves, summary.top_feature,
         )
 
@@ -1060,8 +1089,12 @@ def run_daily_retrain(
     if not cfg.dry_run and summary.success:
         try:
             from models.cascade_orchestrator import run_cascade
+            # Pass prices=None so the cascade uses its own _load_prices()
+            # (MODELING_COMMODITIES, 40+ instruments). The retrain's `prices`
+            # variable is built from CORE_TICKERS (11 commodities) and would
+            # silently drop Livestock and Digital from the cascade.
             cascade_result = run_cascade(
-                prices   = prices,
+                prices   = None,
                 macro_df = macro,
                 dry_run  = False,
             )

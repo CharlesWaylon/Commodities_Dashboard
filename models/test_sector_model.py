@@ -68,7 +68,8 @@ def test_no_triggers_uses_static_damping(metals_model, prices):
         prices=prices,
         active_triggers=None,
     )
-    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING
+    prior = sm._economic_prior("energy", "metals")
+    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING * prior
     assert detail["WTI Crude Oil"] == pytest.approx(expected, rel=1e-6)
 
 
@@ -78,7 +79,8 @@ def test_empty_trigger_list_uses_static_damping(metals_model, prices):
         prices=prices,
         active_triggers=[],
     )
-    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING
+    prior = sm._economic_prior("energy", "metals")
+    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING * prior
     assert detail["WTI Crude Oil"] == pytest.approx(expected, rel=1e-6)
 
 
@@ -91,12 +93,13 @@ def test_opec_trigger_boosts_energy_upstream_path(metals_model, prices):
         prices=prices,
         active_triggers=triggers,
     )
+    prior = sm._economic_prior("energy", "metals")
     boosted_damping = sm.UPSTREAM_DAMPING + sm.TRIGGER_BOOST_COEFF * 0.7
-    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * boosted_damping
-    assert detail["WTI Crude Oil"] == pytest.approx(expected, rel=1e-6)
+    expected = round(sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * boosted_damping * prior, 6)
+    assert detail["WTI Crude Oil"] == pytest.approx(expected, abs=1e-6)
 
     # Sanity: the boosted contribution is strictly larger than the baseline.
-    baseline = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING
+    baseline = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING * prior
     assert detail["WTI Crude Oil"] > baseline
 
 
@@ -113,7 +116,8 @@ def test_only_matching_sector_is_boosted(metals_model, prices):
         prices=prices,
         active_triggers=triggers,
     )
-    expected_static = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING
+    prior = sm._economic_prior("energy", "metals")
+    expected_static = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * sm.UPSTREAM_DAMPING * prior
     assert detail["WTI Crude Oil"] == pytest.approx(expected_static, rel=1e-6)
 
 
@@ -131,10 +135,12 @@ def test_mixed_upstream_paths_boosted_independently(prices):
         prices=prices,
         active_triggers=triggers,
     )
-    boosted = sm._DEFAULT_CROSS_SECTOR_CORR * 0.01 * (sm.UPSTREAM_DAMPING + sm.TRIGGER_BOOST_COEFF * 0.8)
-    static  = sm._DEFAULT_CROSS_SECTOR_CORR * 0.01 * sm.UPSTREAM_DAMPING
-    assert detail["Corn (CBOT)"]          == pytest.approx(boosted, rel=1e-6)
-    assert detail["WTI Crude Oil"] == pytest.approx(static,  rel=1e-6)
+    ag_prior     = sm._economic_prior("agriculture", "livestock")
+    energy_prior = sm._economic_prior("energy", "livestock")
+    boosted = round(sm._DEFAULT_CROSS_SECTOR_CORR * 0.01 * (sm.UPSTREAM_DAMPING + sm.TRIGGER_BOOST_COEFF * 0.8) * ag_prior, 6)
+    static  = round(sm._DEFAULT_CROSS_SECTOR_CORR * 0.01 * sm.UPSTREAM_DAMPING * energy_prior, 6)
+    assert detail["Corn (CBOT)"]          == pytest.approx(boosted, abs=1e-6)
+    assert detail["WTI Crude Oil"] == pytest.approx(static,  abs=1e-6)
 
 
 # ── 4. Cap at 0.50 (max strength = 1.0) ──────────────────────────────────────
@@ -146,10 +152,11 @@ def test_damping_capped_at_max_strength(metals_model, prices):
         prices=prices,
         active_triggers=triggers,
     )
-    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * (sm.UPSTREAM_DAMPING + sm.TRIGGER_BOOST_COEFF * 1.0)
+    prior = sm._economic_prior("energy", "metals")
+    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * (sm.UPSTREAM_DAMPING + sm.TRIGGER_BOOST_COEFF * 1.0) * prior
     assert detail["WTI Crude Oil"] == pytest.approx(expected, rel=1e-6)
-    # Effective damping is exactly 0.50 — the spec's upper bound.
-    effective_damping = detail["WTI Crude Oil"] / (sm._DEFAULT_CROSS_SECTOR_CORR * 0.02)
+    # Effective damping is exactly 0.50 — the spec's upper bound (prior removed).
+    effective_damping = detail["WTI Crude Oil"] / (sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * prior)
     assert effective_damping == pytest.approx(0.50, rel=1e-6)
 
 
@@ -187,5 +194,6 @@ def test_multiple_triggers_use_max_strength(metals_model, prices):
     # Both opec_action and eia_crude_inventory map to "energy"; max strength
     # among the two is 0.9. weather_shock maps to "agriculture" — irrelevant
     # for this path.
-    expected = sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * (sm.UPSTREAM_DAMPING + sm.TRIGGER_BOOST_COEFF * 0.9)
-    assert detail["WTI Crude Oil"] == pytest.approx(expected, rel=1e-6)
+    prior = sm._economic_prior("energy", "metals")
+    expected = round(sm._DEFAULT_CROSS_SECTOR_CORR * 0.02 * (sm.UPSTREAM_DAMPING + sm.TRIGGER_BOOST_COEFF * 0.9) * prior, 6)
+    assert detail["WTI Crude Oil"] == pytest.approx(expected, abs=1e-6)

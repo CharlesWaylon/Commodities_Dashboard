@@ -50,7 +50,12 @@ import numpy as np
 import pandas as pd
 
 from models.broadcaster import SignalBroadcaster
-from models.config import COMMODITY_SECTORS
+from models.config import (
+    COMMODITY_SECTORS,
+    SECTOR_TRANSMISSION_PRIORS,
+    DEFAULT_TRANSMISSION_PRIOR,
+    UPSTREAM_PRIOR_STRENGTH,
+)
 from models.features import build_feature_matrix, build_target
 from models.ml.xgboost_shap import XGBoostForecaster
 from models.model_signal import ModelSignal
@@ -96,6 +101,29 @@ def _macro_triggers_enabled() -> bool:
 # Default intra-sector correlation used when the DB snapshot is unavailable
 _DEFAULT_INTRA_SECTOR_CORR  = 0.50
 _DEFAULT_CROSS_SECTOR_CORR  = 0.10
+
+
+def _economic_prior(src_sector: str, tgt_sector: str) -> float:
+    """
+    Economic transmission coefficient for a cross-sector upstream edge, blended
+    with a neutral 1.0 by UPSTREAM_PRIOR_STRENGTH (alpha):
+
+        effective = (1 - alpha) + alpha * prior
+
+    Pure in-sample correlation measures co-movement, not causation, which made
+    Metals→Agriculture outrank Energy→Agriculture (the reverse of established
+    cost-share economics). This pulls each cross-sector contribution toward an
+    economically-grounded prior. alpha = 0 restores legacy behavior; alpha = 1
+    applies the full prior. Intra-sector edges are never reweighted. See
+    SECTOR_TRANSMISSION_PRIORS / MODEL_VERIFICATION_LOG.md for citations.
+    """
+    if src_sector == tgt_sector or not src_sector or not tgt_sector:
+        return 1.0
+    prior = SECTOR_TRANSMISSION_PRIORS.get(src_sector, {}).get(
+        tgt_sector, DEFAULT_TRANSMISSION_PRIOR
+    )
+    a = UPSTREAM_PRIOR_STRENGTH
+    return (1.0 - a) + a * prior
 
 # Key aliases: normalise caller-friendly names → macro_router canonical names
 _MACRO_KEY_ALIASES: Dict[str, str] = {
@@ -228,10 +256,11 @@ class SectorSpecificModel(SignalBroadcaster):
         self._xgb: XGBoostForecaster = XGBoostForecaster(commodity=commodity)
 
         # Stored during fit() for feature re-construction at predict time
-        self._prices:   Optional[pd.DataFrame] = None
-        self._feat_df:  Optional[pd.DataFrame] = None
-        self._target:   Optional[pd.Series]    = None
-        self._ic_score: float                  = 0.0
+        self._prices:    Optional[pd.DataFrame] = None
+        self._m2_prices: Optional[pd.DataFrame] = None   # second-nearby for basis features
+        self._feat_df:   Optional[pd.DataFrame] = None
+        self._target:    Optional[pd.Series]    = None
+        self._ic_score:  float                  = 0.0
 
         # Validate sector membership
         if commodity and commodity in COMMODITY_SECTORS:
@@ -246,16 +275,22 @@ class SectorSpecificModel(SignalBroadcaster):
 
     # ── Feature construction ───────────────────────────────────────────────────
 
-    def _build_sector_features(self, prices: pd.DataFrame) -> pd.DataFrame:
-        """Build sector-filtered features. Falls back to full matrix if sector filter fails."""
+    def _build_sector_features(
+        self,
+        prices: pd.DataFrame,
+        m2_prices: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """Build sector-filtered features, including M2 term-structure if available."""
         try:
-            return build_feature_matrix(prices, sector=self.sector)
+            return build_feature_matrix(
+                prices, sector=self.sector, second_contract_prices=m2_prices
+            )
         except ValueError as exc:
             log.warning(
                 "Sector filter failed for '%s' (%s) — falling back to full feature matrix.",
                 self.sector, exc,
             )
-            return build_feature_matrix(prices)
+            return build_feature_matrix(prices, second_contract_prices=m2_prices)
 
     def _ensure_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -264,7 +299,7 @@ class SectorSpecificModel(SignalBroadcaster):
         otherwise assume raw prices and apply sector filtering.
         """
         if self._xgb._feature_names is None:
-            return self._build_sector_features(data)
+            return self._build_sector_features(data, self._m2_prices)
 
         # If at least one expected feature column is present, assume features
         feature_set = set(self._xgb._feature_names)
@@ -272,7 +307,7 @@ class SectorSpecificModel(SignalBroadcaster):
             return data
 
         # Raw prices → build sector features
-        return self._build_sector_features(data)
+        return self._build_sector_features(data, self._m2_prices)
 
     # ── Fit ───────────────────────────────────────────────────────────────────
 
@@ -293,8 +328,19 @@ class SectorSpecificModel(SignalBroadcaster):
         """
         self._prices = prices
 
+        # Load second-nearby prices for basis/roll-yield features.
+        # Non-fatal: if the M2 table is empty (first run before M2 ingest),
+        # _m2_prices stays None and term-structure features are simply absent.
+        try:
+            from models.data_loader import load_m2_price_matrix_from_db
+            m2 = load_m2_price_matrix_from_db()
+            self._m2_prices = m2 if not m2.empty else None
+        except Exception as exc:
+            log.debug("M2 price load skipped (%s) — basis features disabled.", exc)
+            self._m2_prices = None
+
         # Sector-filtered feature matrix (reduced dimensionality)
-        self._feat_df = self._build_sector_features(prices)
+        self._feat_df = self._build_sector_features(prices, self._m2_prices)
 
         if target is None:
             target = build_target(prices, self.commodity)
@@ -606,7 +652,12 @@ class SectorSpecificModel(SignalBroadcaster):
             top_strength = sector_boost.get(upstream_sector, 0.0)
             damping = self.upstream_damping + TRIGGER_BOOST_COEFF * top_strength
 
-            contribution = corr * float(upstream_forecast) * damping
+            # Economic transmission prior: reweight cross-sector edges toward
+            # cost-share-grounded fundamentals so attribution reflects causation,
+            # not just in-sample co-movement.
+            prior = _economic_prior(upstream_sector, self.sector)
+
+            contribution = corr * float(upstream_forecast) * damping * prior
             detail[upstream_commodity] = round(contribution, 6)
 
         total = sum(detail.values())

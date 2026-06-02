@@ -13,8 +13,8 @@ Column groups
   macro_overlays:      dxy_zscore63, dxy_mom5, dxy_mom21,
                        vix, vix_risk_off, vix_crisis, vix_level_z,
                        tlt_yield_proxy, tlt_mom21,
-                       days_to_wasde, is_wasde_window, wasde_post5,
-                       days_to_opec, is_opec_window, opec_post10  (15 columns)
+                       days_to_wasde, is_wasde_window, wasde_post5, wasde_surprise_z,
+                       days_to_opec, is_opec_window, opec_post10, opec_surprise_z  (17 columns)
   climate_weather:     mei, mei_lag3m, mei_lag6m, enso_phase,
                        pdsi_cornbelt (if token), pdsi_zscore (if token),
                        hdd_deviation_pct, cdd_deviation_pct (if token)
@@ -76,8 +76,8 @@ _MACRO_COLS = [
     "dxy_zscore63", "dxy_mom5", "dxy_mom21",
     "vix", "vix_risk_off", "vix_crisis", "vix_level_z",
     "tlt_yield_proxy", "tlt_mom21",
-    "days_to_wasde", "is_wasde_window", "wasde_post5",
-    "days_to_opec", "is_opec_window", "opec_post10",
+    "days_to_wasde", "is_wasde_window", "wasde_post5", "wasde_surprise_z",
+    "days_to_opec", "is_opec_window", "opec_post10", "opec_surprise_z",
 ]
 _CLIMATE_COLS = [
     "mei", "mei_lag3m", "mei_lag6m", "enso_phase",

@@ -26,9 +26,11 @@ from sklearn.preprocessing import StandardScaler
 from models.config import (
     COMMODITY_SECTORS,
     DEFAULT_TARGET,
+    FORECAST_HORIZON,
     RETURN_LAGS,
     ROLLING_VOL_WINDOW,
     ROLLING_MOM_WINDOW,
+    ROLLING_MOM_WINDOW_LONG,
     ZSCORE_WINDOW,
     N_QUBITS,
 )
@@ -122,6 +124,23 @@ def rolling_momentum(returns: pd.DataFrame, window: int = ROLLING_MOM_WINDOW) ->
     return returns.rolling(window).sum()
 
 
+def sharpe_signal(returns: pd.DataFrame, mom_window: int = ROLLING_MOM_WINDOW,
+                  vol_window: int = ROLLING_VOL_WINDOW) -> pd.DataFrame:
+    """
+    Risk-adjusted momentum: rolling cumulative return divided by rolling vol.
+
+    Gorton–Rouwenhorst (2006) show that commodity return predictability comes
+    partly from carry/roll yield.  In the absence of term-structure data (second
+    contract), this signal proxies carry: a commodity in backwardation tends to
+    show positive momentum backed by low vol, giving a high Sharpe signal.
+    Vol-scaling also prevents high-vol instruments (crypto, nat gas) from
+    dominating the cross-sectional ranking.
+    """
+    mom = returns.rolling(mom_window).sum()
+    vol = returns.rolling(vol_window).std().replace(0, np.nan)
+    return (mom / vol).fillna(0.0)
+
+
 def rolling_zscore(prices: pd.DataFrame, window: int = ZSCORE_WINDOW) -> pd.DataFrame:
     """
     (P_t - rolling_mean) / rolling_std over `window` days.
@@ -137,6 +156,7 @@ def rolling_zscore(prices: pd.DataFrame, window: int = ZSCORE_WINDOW) -> pd.Data
 def build_feature_matrix(
     prices: pd.DataFrame,
     sector: str | None = None,
+    second_contract_prices: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Construct a wide feature DataFrame from a price matrix.
@@ -158,16 +178,31 @@ def build_feature_matrix(
         When None (default), all columns are used — identical to the original
         behaviour, so all existing call sites remain unaffected.
 
+    second_contract_prices : pd.DataFrame or None, optional
+        Next-maturity (M2) price matrix — same column names as ``prices``.
+        When supplied, ``build_term_structure_features()`` is called and its
+        ``{c}_basis``, ``{c}_basis_zscore``, and ``{c}_roll_yield`` columns are
+        left-joined onto the feature matrix (after the vol/mom/zscore block).
+        Columns present in M2 but absent from the sector-filtered ``prices`` are
+        silently ignored.  NaN rows during the z-score warmup are expected and
+        handled identically to other rolling features.
+        When None (the default), output is identical to the pre-M2 behaviour, so
+        all existing call sites remain unaffected.
+
     Output
     ------
     pd.DataFrame
         One row per trading day. Columns:
           {commodity}_ret_{lag}d    — lagged log-return (lags from RETURN_LAGS)
           {commodity}_vol21         — rolling 21-day realised volatility
-          {commodity}_mom10         — rolling 10-day cumulative return
+          {commodity}_mom10         — rolling 10-day cumulative return (short trend)
+          {commodity}_mom21         — rolling 21-day cumulative return (medium trend)
+          {commodity}_sharpe        — risk-adjusted momentum: mom10 / vol21 (carry proxy)
           {commodity}_zscore        — rolling 63-day z-score
-        External-signal columns that survive filtering are left unchanged
-        (no renaming) and appended at the end.
+          {commodity}_basis         — log(front/M2); only when second_contract_prices given
+          {commodity}_basis_zscore  — rolling z-score of basis; only with M2 data
+          {commodity}_roll_yield    — annualised basis (basis × 252); only with M2 data
+        External-signal columns that survive filtering are left unchanged.
 
     Raises
     ------
@@ -178,35 +213,50 @@ def build_feature_matrix(
         prices = _filter_prices_to_sector(prices, sector)
 
     # Separate commodity columns from any external signals that survived filtering.
-    # External signals get passed through as-is; commodity columns get the full
-    # lag/vol/mom/zscore treatment.
     known_commodities = set(COMMODITY_SECTORS.keys())
     commodity_cols = [c for c in prices.columns if c in known_commodities]
     external_cols  = [c for c in prices.columns if c not in known_commodities]
 
     price_data = prices[commodity_cols] if commodity_cols else prices
 
-    ret = log_returns(price_data)
-    vol = rolling_volatility(ret)
-    mom = rolling_momentum(ret)
-    zsc = rolling_zscore(price_data)
+    ret      = log_returns(price_data)
+    vol      = rolling_volatility(ret)
+    mom      = rolling_momentum(ret)
+    mom_long = rolling_momentum(ret, ROLLING_MOM_WINDOW_LONG)
+    shp      = sharpe_signal(ret)
+    zsc      = rolling_zscore(price_data)
 
     parts = []
 
-    # Lagged returns (1d, 2d, 5d) — these become predictive signals
+    # Lagged returns (1d, 2d, 5d, 10d) — 10d lag aligns with FORECAST_HORIZON
     for lag in RETURN_LAGS:
         lagged = ret.shift(lag)
         lagged.columns = [f"{c}_ret_{lag}d" for c in ret.columns]
         parts.append(lagged)
 
-    vol.columns = [f"{c}_vol21" for c in vol.columns]
-    mom.columns = [f"{c}_mom10" for c in mom.columns]
-    zsc.columns = [f"{c}_zscore" for c in zsc.columns]
+    vol.columns      = [f"{c}_vol21"   for c in vol.columns]
+    mom.columns      = [f"{c}_mom10"   for c in mom.columns]
+    mom_long.columns = [f"{c}_mom21"   for c in mom_long.columns]
+    shp.columns      = [f"{c}_sharpe"  for c in shp.columns]
+    zsc.columns      = [f"{c}_zscore"  for c in zsc.columns]
 
-    parts += [vol, mom, zsc]
+    parts += [vol, mom, mom_long, shp, zsc]
+
+    # ── Term-structure features (basis / roll yield) ───────────────────────────
+    # Only produced when second_contract_prices is supplied.  The M2 matrix is
+    # pre-filtered to the sector-active columns so basis is only computed for
+    # futures that have real term structure (ETFs/proxies are absent from M2).
+    if second_contract_prices is not None and not second_contract_prices.empty:
+        # Restrict M2 to columns that survived the sector filter on prices
+        m2_filtered = second_contract_prices.reindex(
+            columns=[c for c in second_contract_prices.columns if c in price_data.columns]
+        )
+        if not m2_filtered.empty:
+            ts_features = build_term_structure_features(price_data, m2_filtered)
+            if not ts_features.empty:
+                parts.append(ts_features)
 
     # Append any external signal columns (DXY, VIX, TLT, PDSI, etc.) unchanged.
-    # They were already filtered to sector-appropriate signals above.
     if external_cols:
         parts.append(prices[external_cols])
 
@@ -252,15 +302,100 @@ def augment_with_climate(
     return feat_df.join(climate_aligned, how="left")
 
 
-def build_target(prices: pd.DataFrame, target_name: str = DEFAULT_TARGET) -> pd.Series:
+def build_term_structure_features(
+    prices: pd.DataFrame,
+    second_contract_prices: pd.DataFrame | None = None,
+    zscore_window: int = ZSCORE_WINDOW,
+) -> pd.DataFrame:
     """
-    Next-day log-return of the target commodity.
+    Basis and roll-yield features from front-to-next-maturity spreads.
 
-    We shift by -1 so that each row in X aligns with *tomorrow's* return —
-    the value we are trying to forecast.
+    These are the Gorton–Hayashi–Rouwenhorst carry signals that have the most
+    documented forecasting power for commodity returns at monthly horizons.
+    Positive roll yield = backwardation → long position earns carry.
+    Negative roll yield = contango → carry hurts longs.
+
+    Parameters
+    ----------
+    prices : pd.DataFrame
+        Front-contract (or continuous) price matrix — same as passed to
+        build_feature_matrix().
+    second_contract_prices : pd.DataFrame or None
+        Next-maturity prices, same columns as prices.  When None (the current
+        state of the ingest pipeline), an empty DataFrame is returned so callers
+        are unaffected.  To unlock these features, extend pipeline/ingest.py to
+        fetch a second-nearby ticker per commodity (e.g. CLH=F alongside CL=F)
+        and pass the resulting matrix here.
+    zscore_window : int
+        Window for normalising the basis series.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns per commodity (when second_contract_prices is supplied):
+          {c}_basis         — log(front / next) = log spread proxy
+          {c}_basis_zscore  — rolling z-score of basis
+          {c}_roll_yield    — annualised basis (basis * 252)
+        Empty DataFrame when second_contract_prices is None.
+    """
+    if second_contract_prices is None or second_contract_prices.empty:
+        return pd.DataFrame(index=prices.index)
+
+    shared = [c for c in prices.columns if c in second_contract_prices.columns]
+    if not shared:
+        return pd.DataFrame(index=prices.index)
+
+    p1 = prices[shared]
+    p2 = second_contract_prices[shared]
+
+    basis = np.log(p1 / p2)
+
+    mu  = basis.rolling(zscore_window).mean()
+    sig = basis.rolling(zscore_window).std().replace(0, np.nan)
+    basis_z = (basis - mu) / sig
+
+    roll_yield = basis * 252  # annualise: assumes ~1 calendar day per bar
+
+    parts = []
+    for col in shared:
+        df = pd.DataFrame({
+            f"{col}_basis":        basis[col],
+            f"{col}_basis_zscore": basis_z[col],
+            f"{col}_roll_yield":   roll_yield[col],
+        })
+        parts.append(df)
+
+    return pd.concat(parts, axis=1) if parts else pd.DataFrame(index=prices.index)
+
+
+def build_target(
+    prices: pd.DataFrame,
+    target_name: str = DEFAULT_TARGET,
+    horizon: int = FORECAST_HORIZON,
+) -> pd.Series:
+    """
+    Forward cumulative log-return of the target commodity over `horizon` days.
+
+    At horizon=1 this is the next-day return (legacy behaviour).
+    At horizon=10 (the default, matching FORECAST_HORIZON) the target is the
+    2-week cumulative log-return — a partly-forecastable quantity where momentum
+    and carry signals have documented predictive power (Gorton–Rouwenhorst 2006).
+
+    Overlapping windows
+    -------------------
+    Consecutive H-day targets share H-1 return observations.  This serial
+    correlation reduces effective sample size but does NOT introduce look-ahead
+    bias — the shift(-H) ensures row t only sees returns from t+1 onward.
+    Models that split train from validation must embargo H rows at the boundary
+    to prevent correlated targets from inflating held-out loss estimates.
+    See XGBoostForecaster.fit() and BacktestHarness._run_commodity().
     """
     ret = log_returns(prices)
-    return ret[target_name].shift(-1).rename("target")
+    if horizon == 1:
+        return ret[target_name].shift(-1).rename("target")
+    # rolling(H).sum() at row i = sum(ret[i-H+1 : i+1])
+    # shift(-H) at row i       = that sum at row i+H = sum(ret[i+1 : i+H+1])
+    return ret[target_name].rolling(horizon).sum().shift(-horizon).rename("target")
 
 
 # ── Quantum-ready feature set ─────────────────────────────────────────────────
@@ -292,7 +427,7 @@ def build_quantum_features(
     (X, y) — both numpy arrays, aligned row-by-row.
     """
     feat_df = build_feature_matrix(prices)
-    y_series = build_target(prices, target_name)
+    y_series = build_target(prices, target_name)  # uses FORECAST_HORIZON by default
 
     # Align on common index, drop any NaN in either
     combined = pd.concat([feat_df, y_series], axis=1).dropna()

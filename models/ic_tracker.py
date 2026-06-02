@@ -6,8 +6,9 @@ Purpose
 Measures and persists how well each model tier is actually forecasting.
 
 The IC is the Spearman rank correlation between a tier's forecasted returns
-and the realised next-day returns.  It is the standard quantitative-finance
-accuracy metric for directional forecasting:
+and the realised H-day forward returns (H = FORECAST_HORIZON = 10 trading
+days).  It is the standard quantitative-finance accuracy metric for
+directional forecasting:
 
     IC ≥ 0.05   → tier is generating actionable signal  (GREEN)
     0 ≤ IC < 0.05 → marginal signal, monitor carefully  (AMBER)

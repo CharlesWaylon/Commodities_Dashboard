@@ -48,8 +48,8 @@ Usage
 
     df = build_macro_overlay_features(period="2y")
     # Columns: dxy_*, vix_*, tlt_*, dgs10, breakeven_infl*,
-    #          days_to_wasde, is_wasde_week, wasde_post5,
-    #          days_to_opec, is_opec_window, opec_post10
+    #          days_to_wasde, is_wasde_week, wasde_post5, wasde_surprise_z,
+    #          days_to_opec, is_opec_window, opec_post10, opec_surprise_z
 """
 
 import os
@@ -144,6 +144,23 @@ _WASDE_POST_WINDOW = 5    # trading days after release to flag
 _OPEC_PRE_WINDOW  = 14   # days before meeting
 _OPEC_POST_WINDOW = 10   # trading days after meeting
 
+# ── Event-study surprise proxy ─────────────────────────────────────────────────
+# OPEC/WASDE "surprise" = realized abnormal move in the underlying complex in the
+# few trading days after the event, z-scored across events. An anticipated,
+# priced-in decision produces ~no post-event move (low/negative z); a genuine
+# surprise produces a large one (high z). This is the literature's
+# "surprise = reaction" view and needs no new data feed — just meeting dates and
+# existing prices. The z is populated ONLY inside the post-event digestion window
+# (and only once the forward return is realized, so there is no look-ahead);
+# every other date is 0.0, keeping the feature sparse and event-gated like the
+# FRED cpi_surprise_z rather than a continuous ramp a forest can over-fit.
+_OPEC_SURPRISE_FWD_DAYS  = 2   # trading days of post-meeting WTI reaction
+_WASDE_SURPRISE_FWD_DAYS = 2   # trading days of post-report corn reaction
+
+# yfinance fallback tickers for the underlying complexes
+_YF_WTI  = "CL=F"
+_YF_CORN = "ZC=F"
+
 # ── WASDE release dates ────────────────────────────────────────────────────────
 # Source: USDA ERS, https://www.usda.gov/oce/commodity/wasde/
 # Approximate: 2nd Tuesday of each month, 12:00 ET. Hardcoded for accuracy.
@@ -229,6 +246,60 @@ def _wasde_dates_range(start: date, end: date) -> list:
 def _opec_dates_range(start: date, end: date) -> list:
     known = [pd.Timestamp(d).date() for d in OPEC_MEETING_DATES]
     return [d for d in known if start <= d <= end]
+
+
+def _event_surprise_zmap(
+    events: list,
+    price: pd.Series,
+    fwd_days: int = 2,
+) -> dict:
+    """
+    Map each event date → z-scored *signed* post-event reaction.
+
+    For every event, the realized abnormal move is the `fwd_days`-trading-day
+    forward log return in `price`, anchored at the first trading day on or after
+    the event. The sign is preserved (a post-meeting rally is +, a selloff is −),
+    so a downstream model sees direction as well as magnitude. Those signed
+    returns are z-scored *across the supplied events* — the cross-sectional
+    "surprise = reaction" event-study proxy. A large |z| means an unusually large
+    move in either direction; the sign tells which way.
+
+    Returns {} when fewer than two events have a usable return (can't z-score),
+    so callers fall back to an all-zero surprise column.
+    """
+    if price is None or price.empty or not events:
+        return {}
+    p = price.dropna().sort_index()
+    if p.empty:
+        return {}
+
+    raw: dict = {}
+    for ev in events:
+        ev_ts = pd.Timestamp(ev)
+        i = p.index.searchsorted(ev_ts)          # first trading day on/after event
+        if i >= len(p) or i + fwd_days >= len(p):
+            continue
+        p0, p1 = float(p.iloc[i]), float(p.iloc[i + fwd_days])
+        if p0 <= 0 or p1 <= 0:
+            continue
+        raw[ev] = np.log(p1 / p0)
+
+    if len(raw) < 2:
+        return {}
+
+    vals = np.array(list(raw.values()), dtype=float)
+    mu, sigma = float(vals.mean()), float(vals.std(ddof=0))
+    if sigma == 0 or np.isnan(sigma):
+        return {}
+    return {ev: (v - mu) / sigma for ev, v in raw.items()}
+
+
+def _fetch_event_price(fred_id: str, yf_ticker: str, start: str) -> pd.Series:
+    """Daily close for an event underlying: FRED first, yfinance fallback."""
+    s = _fetch_fred_series(fred_id, start)
+    if not s.empty:
+        return s
+    return _yf_close(yf_ticker, start)
 
 
 # ── Macro price features ───────────────────────────────────────────────────────
@@ -483,6 +554,7 @@ def wasde_calendar_features(
     index: pd.DatetimeIndex,
     pre_window:  int = _WASDE_PRE_WINDOW,
     post_window: int = _WASDE_POST_WINDOW,
+    price: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Build WASDE release calendar dummy features aligned to `index`.
@@ -492,23 +564,30 @@ def wasde_calendar_features(
     index : pd.DatetimeIndex
         Date range to generate features for. Typically the index of the
         full feature matrix.
+    price : pd.Series, optional
+        Daily close of a representative agricultural underlying (corn) used to
+        compute the event-study surprise. When absent, wasde_surprise_z is 0.0.
 
     Returns
     -------
     pd.DataFrame
         Columns:
-          days_to_wasde   — signed integer (negative = before release)
-          is_wasde_window — True within [−pre_window, +post_window] days
-          wasde_post5     — True for 5 calendar days after release
+          days_to_wasde     — signed integer (negative = before release)
+          is_wasde_window   — True within [−pre_window, +post_window] days
+          wasde_post5       — True for 5 calendar days after release
+          wasde_surprise_z  — z-scored post-report corn reaction, populated only
+                              inside wasde_post5 (and only once realized); else 0.0
     """
     start = index.min().date()
     end   = index.max().date()
     releases = _wasde_dates_range(start, end)
+    zmap     = _event_surprise_zmap(releases, price, _WASDE_SURPRISE_FWD_DAYS)
 
     result = pd.DataFrame(index=index)
-    result["days_to_wasde"]   = np.nan
-    result["is_wasde_window"] = False
-    result["wasde_post5"]     = False
+    result["days_to_wasde"]    = np.nan
+    result["is_wasde_window"]  = False
+    result["wasde_post5"]      = False
+    result["wasde_surprise_z"] = 0.0
 
     for t in index:
         d = t.date()
@@ -525,9 +604,14 @@ def wasde_calendar_features(
             result.loc[t, "days_to_wasde"]   = dist_past
             result.loc[t, "is_wasde_window"] = dist_past <= post_window
 
-        result.loc[t, "wasde_post5"] = (0 <= dist_past <= post_window)
+        is_post = (0 <= dist_past <= post_window)
+        result.loc[t, "wasde_post5"] = is_post
+        # Surprise is realized only after `fwd_days` trading days → no look-ahead.
+        if is_post and past and dist_past >= _WASDE_SURPRISE_FWD_DAYS:
+            result.loc[t, "wasde_surprise_z"] = zmap.get(past[-1], 0.0)
 
-    result["days_to_wasde"] = result["days_to_wasde"].astype(float)
+    result["days_to_wasde"]    = result["days_to_wasde"].astype(float)
+    result["wasde_surprise_z"] = result["wasde_surprise_z"].astype(float)
     return result
 
 
@@ -535,26 +619,37 @@ def opec_calendar_features(
     index: pd.DatetimeIndex,
     pre_window:  int = _OPEC_PRE_WINDOW,
     post_window: int = _OPEC_POST_WINDOW,
+    wti: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Build OPEC+ meeting calendar dummy features aligned to `index`.
+
+    Parameters
+    ----------
+    wti : pd.Series, optional
+        Daily WTI close used to compute the event-study surprise. When absent,
+        opec_surprise_z is 0.0 everywhere.
 
     Returns
     -------
     pd.DataFrame
         Columns:
-          days_to_opec   — signed integer (negative = before meeting)
-          is_opec_window — True within [−pre_window, +post_window] days
-          opec_post10    — True for 10 calendar days after meeting
+          days_to_opec    — signed integer (negative = before meeting)
+          is_opec_window  — True within [−pre_window, +post_window] days
+          opec_post10     — True for 10 calendar days after meeting
+          opec_surprise_z — z-scored post-meeting WTI reaction, populated only
+                            inside opec_post10 (and only once realized); else 0.0
     """
     start = index.min().date()
     end   = index.max().date()
     meetings = _opec_dates_range(start, end)
+    zmap     = _event_surprise_zmap(meetings, wti, _OPEC_SURPRISE_FWD_DAYS)
 
     result = pd.DataFrame(index=index)
-    result["days_to_opec"]   = np.nan
-    result["is_opec_window"] = False
-    result["opec_post10"]    = False
+    result["days_to_opec"]    = np.nan
+    result["is_opec_window"]  = False
+    result["opec_post10"]     = False
+    result["opec_surprise_z"] = 0.0
 
     for t in index:
         d = t.date()
@@ -570,9 +665,14 @@ def opec_calendar_features(
             result.loc[t, "days_to_opec"]   = dist_past
             result.loc[t, "is_opec_window"] = dist_past <= post_window
 
-        result.loc[t, "opec_post10"] = (0 <= dist_past <= post_window)
+        is_post = (0 <= dist_past <= post_window)
+        result.loc[t, "opec_post10"] = is_post
+        # Surprise is realized only after `fwd_days` trading days → no look-ahead.
+        if is_post and past and dist_past >= _OPEC_SURPRISE_FWD_DAYS:
+            result.loc[t, "opec_surprise_z"] = zmap.get(past[-1], 0.0)
 
-    result["days_to_opec"] = result["days_to_opec"].astype(float)
+    result["days_to_opec"]    = result["days_to_opec"].astype(float)
+    result["opec_surprise_z"] = result["opec_surprise_z"].astype(float)
     return result
 
 
@@ -603,8 +703,15 @@ def build_macro_overlay_features(
 
     idx = index if index is not None else macro.index
 
-    wasde = wasde_calendar_features(idx)
-    opec  = opec_calendar_features(idx)
+    # Underlyings for the event-study surprise proxies (no new data feed — WTI
+    # via FRED DCOILWTICO/CL=F, corn via ZC=F). Failures degrade to all-zero
+    # surprise columns inside the calendar builders.
+    start = _period_to_start_date(period)
+    wti  = _fetch_event_price("DCOILWTICO", _YF_WTI, start)
+    corn = _yf_close(_YF_CORN, start)
+
+    wasde = wasde_calendar_features(idx, price=corn)
+    opec  = opec_calendar_features(idx, wti=wti)
 
     combined = macro.reindex(idx).ffill(limit=3)
     combined = combined.join(wasde, how="left")

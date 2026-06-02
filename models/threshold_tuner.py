@@ -78,6 +78,11 @@ DEFAULT_THRESHOLD_GRID: List[float] = [round(t, 2) for t in np.arange(0.1, 1.0, 
 # Fallback threshold when not enough data or IC is negative everywhere
 FALLBACK_THRESHOLD = 0.50
 
+# Minimum events at threshold required to persist a config row.
+# Results below this floor have undefined (or unreliable) IC and must not be
+# written — they produce NaN-IC rows that downstream gate code loads silently.
+MIN_EVENTS_FLOOR = 5
+
 
 
 # ── Data classes ───────────────────────────────────────────────────────────────
@@ -160,19 +165,107 @@ class TuneResult:
         )
 
 
+# ── Schema migration (idempotent, runs once per process) ───────────────────────
+
+_schema_ready = False   # module-level sentinel — reset on process restart
+
+
+def _ensure_schema() -> None:
+    """
+    Idempotent one-time migration for the threshold_config table.
+
+    Steps (each is a no-op if already applied):
+      1. Delete degenerate rows — best_ic IS NULL or n_events_at_threshold < floor.
+         These are mathematically undefined configs that the load path must never
+         see; they existed because save_tune_results previously persisted them.
+      2. Deduplicate — if the same (family, forward_days, lookback_days) has
+         multiple rows (from pre-fix plain INSERTs), keep only the newest id.
+      3. Create UNIQUE INDEX on (family, forward_days, lookback_days) so future
+         writes become upserts and duplicates are impossible at the DB level.
+
+    This function is called once per process by save_tune_results() and is safe
+    to call again — the UNIQUE INDEX creation is guarded by IF NOT EXISTS, and
+    the DELETE statements are no-ops when the table is already clean.
+    """
+    global _schema_ready
+    if _schema_ready:
+        return
+
+    try:
+        with get_engine().connect() as conn:
+            # Step 1 — purge degenerate rows (NaN IC or too few events to trust)
+            conn.execute(
+                text("""
+                    DELETE FROM threshold_config
+                    WHERE  best_ic IS NULL
+                        OR n_events_at_threshold < :floor
+                """),
+                {"floor": MIN_EVENTS_FLOOR},
+            )
+
+            # Step 2 — keep only the highest id per natural key (= most recent insert)
+            conn.execute(text("""
+                DELETE FROM threshold_config
+                WHERE  id NOT IN (
+                    SELECT MAX(id)
+                    FROM   threshold_config
+                    GROUP  BY family, forward_days, lookback_days
+                )
+            """))
+
+            # Step 3 — unique constraint so future writes can use ON CONFLICT
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_threshold_config_key
+                ON threshold_config (family, forward_days, lookback_days)
+            """))
+
+            conn.commit()
+        log.info("threshold_config schema migration applied (dedup + unique index).")
+    except Exception as exc:
+        log.warning("threshold_config migration failed (non-fatal): %s", exc)
+
+    _schema_ready = True   # mark done even on failure so we don't retry every call
+
+
 # ── SQLAlchemy helpers ─────────────────────────────────────────────────────────
 
 def save_tune_results(results: Dict[str, TuneResult]) -> int:
-    """Persist tuning results to threshold_config.  Returns rows written."""
+    """
+    Persist tuning results to threshold_config using upsert semantics.
+
+    The natural key is (family, forward_days, lookback_days): the same family
+    tuned with different window parameters is a distinct config row, but
+    re-running with the same windows overwrites the old values rather than
+    appending a new copy.
+
+    Results with fewer than MIN_EVENTS_FLOOR events at threshold, or with
+    NaN best_ic, are silently skipped — they represent undefined configs that
+    would produce a NaN gate threshold if loaded.
+
+    Returns the number of rows upserted (degenerate skips not counted).
+    """
     if not results:
         return 0
+
+    # Apply schema migration exactly once per process (dedup + unique index).
+    _ensure_schema()
+
     rows = []
+    n_skipped = 0
     for r in results.values():
+        if r.n_events_at_threshold < MIN_EVENTS_FLOOR or np.isnan(r.best_ic):
+            log.info(
+                "Skipping degenerate result for %r "
+                "(n_events_at_threshold=%d, best_ic=%s) — not persisted.",
+                r.family, r.n_events_at_threshold, r.best_ic,
+            )
+            n_skipped += 1
+            continue
         rows.append({
             "family":                r.family,
             "optimal_threshold":     float(r.optimal_threshold),
             "best_ic":               float(r.best_ic),
-            "continuous_ic":         float(r.continuous_ic),
+            "continuous_ic":         float(r.continuous_ic) if not np.isnan(r.continuous_ic) else None,
             "n_events_total":        int(r.n_events_total),
             "n_events_at_threshold": int(r.n_events_at_threshold),
             "lookback_days":         int(r.lookback_days),
@@ -180,19 +273,42 @@ def save_tune_results(results: Dict[str, TuneResult]) -> int:
             "grid_results":          json.dumps({str(k): float(v) for k, v in r.grid_results.items()}),
             "evaluated_at":          r.evaluated_at,
         })
+
+    if not rows:
+        log.info(
+            "save_tune_results: nothing to write (%d degenerate result(s) skipped).",
+            n_skipped,
+        )
+        return 0
+
+    # Upsert: ON CONFLICT updates every column except the natural-key columns
+    # and the surrogate id.  evaluated_at is always overwritten so the row
+    # reflects when it was last tuned.
     sql = text("""
         INSERT INTO threshold_config
             (family, optimal_threshold, best_ic, continuous_ic,
              n_events_total, n_events_at_threshold,
              lookback_days, forward_days, grid_results, evaluated_at)
-        VALUES (:family, :optimal_threshold, :best_ic, :continuous_ic,
-                :n_events_total, :n_events_at_threshold,
-                :lookback_days, :forward_days, :grid_results, :evaluated_at)
+        VALUES
+            (:family, :optimal_threshold, :best_ic, :continuous_ic,
+             :n_events_total, :n_events_at_threshold,
+             :lookback_days, :forward_days, :grid_results, :evaluated_at)
+        ON CONFLICT (family, forward_days, lookback_days) DO UPDATE SET
+            optimal_threshold     = EXCLUDED.optimal_threshold,
+            best_ic               = EXCLUDED.best_ic,
+            continuous_ic         = EXCLUDED.continuous_ic,
+            n_events_total        = EXCLUDED.n_events_total,
+            n_events_at_threshold = EXCLUDED.n_events_at_threshold,
+            grid_results          = EXCLUDED.grid_results,
+            evaluated_at          = EXCLUDED.evaluated_at
     """)
     with get_engine().connect() as conn:
         conn.execute(sql, rows)
         conn.commit()
-    log.info("Saved %d threshold result(s) to DB.", len(rows))
+    log.info(
+        "Upserted %d threshold result(s) to DB (%d degenerate skipped).",
+        len(rows), n_skipped,
+    )
     return len(rows)
 
 
@@ -200,21 +316,28 @@ def load_optimal_thresholds() -> Dict[str, float]:
     """
     Return the most recent optimal threshold per trigger family.
 
+    One row per family is guaranteed post-migration for the common case where
+    the tuner is always run with the same forward_days/lookback_days.  When a
+    family has been tuned under multiple window configurations, the MAX(evaluated_at)
+    subquery selects the most recently tuned row — i.e. the config from the last
+    run takes precedence.
+
     Returns
     -------
     dict mapping family → optimal_threshold.
-    Falls back to FALLBACK_THRESHOLD for any family not in the table.
-    Empty dict if the table has no rows yet.
+    Empty dict if the table has no qualifying rows.
     """
     try:
         sql = text("""
-            SELECT   family, optimal_threshold
-            FROM     threshold_config
-            WHERE    (family, evaluated_at) IN (
-                         SELECT family, MAX(evaluated_at)
+            SELECT   t.family, t.optimal_threshold
+            FROM     threshold_config t
+            JOIN     (
+                         SELECT family, MAX(evaluated_at) AS latest
                          FROM   threshold_config
                          GROUP  BY family
-                     )
+                     ) latest_t
+              ON     t.family = latest_t.family
+              AND    t.evaluated_at = latest_t.latest
         """)
         with get_engine().connect() as conn:
             result = conn.execute(sql)

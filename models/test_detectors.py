@@ -14,7 +14,7 @@ from features.trigger_detectors import (
     detect_opec_action,
     detect_fed_tightening,
     detect_all,
-    OPEC_STRENGTH_SCALE_DAYS,
+    OPEC_SURPRISE_FULL_Z,
     DXY_Z_THRESHOLD,
 )
 
@@ -41,52 +41,68 @@ def _idx(n: int) -> pd.DatetimeIndex:
 
 # ── OPEC detector ─────────────────────────────────────────────────────────────
 
-def test_opec_inside_window_pre_meeting():
-    print("1. OPEC — inside window, pre-meeting")
+def test_opec_surprise_fires():
+    print("1. OPEC — genuine surprise fires (high post-meeting z)")
     try:
         df = pd.DataFrame({
-            "days_to_opec":   [-7, -6, -5, -4, -3],
-            "is_opec_window": [True] * 5,
-        }, index=_idx(5))
+            "opec_surprise_z": [0.0, 0.0, 1.0],   # latest row = surprise
+            "is_opec_window":  [True] * 3,
+        }, index=_idx(3))
         ev = detect_opec_action(df)
         assert ev is not None, "should fire"
         assert ev.family == "opec_action"
-        expected = 1.0 - 3 / OPEC_STRENGTH_SCALE_DAYS  # last row days=-3
+        expected = 1.0 / OPEC_SURPRISE_FULL_Z   # z=1.0 → strength 0.5
         assert abs(ev.strength - expected) < 1e-9
-        assert "before meeting" in ev.rationale
+        assert "surprise" in ev.rationale
         _ok(f"strength={ev.strength:.4f} (expected {expected:.4f})")
     except Exception as e:
-        _fail("opec pre-meeting", e)
+        _fail("opec surprise fires", e)
 
 
-def test_opec_meeting_day():
-    print("2. OPEC — meeting day, strength 1.0")
+def test_opec_strength_caps_at_one():
+    print("2. OPEC — large surprise caps strength at 1.0")
     try:
         df = pd.DataFrame({
-            "days_to_opec":   [-2, -1, 0],
-            "is_opec_window": [True, True, True],
-        }, index=_idx(3))
+            "opec_surprise_z": [0.0, 3.5],   # z >> 2.0 → capped
+            "is_opec_window":  [True, True],
+        }, index=_idx(2))
         ev = detect_opec_action(df)
         assert ev is not None
         assert abs(ev.strength - 1.0) < 1e-9
-        assert "meeting day" in ev.rationale
-        _ok("strength=1.0 on meeting day")
+        _ok("z=3.5 → strength capped at 1.0")
     except Exception as e:
-        _fail("opec meeting day", e)
+        _fail("opec strength cap", e)
 
 
-def test_opec_outside_window_returns_none():
-    print("3. OPEC — outside window, no fire")
+def test_opec_bearish_surprise_fires():
+    print("2b. OPEC — bearish surprise (negative z) fires on magnitude")
     try:
         df = pd.DataFrame({
-            "days_to_opec":   [-50, -49, -48],
-            "is_opec_window": [False, False, False],
+            "opec_surprise_z": [0.0, -1.0],   # post-meeting selloff
+            "is_opec_window":  [True, True],
+        }, index=_idx(2))
+        ev = detect_opec_action(df)
+        assert ev is not None, "bearish surprise should fire"
+        expected = 1.0 / OPEC_SURPRISE_FULL_Z   # |z|=1.0 → strength 0.5
+        assert abs(ev.strength - expected) < 1e-9
+        assert ev.metadata["direction"] == "bearish"
+        _ok(f"z=-1.0 → strength={ev.strength:.4f}, direction=bearish")
+    except Exception as e:
+        _fail("opec bearish surprise fires", e)
+
+
+def test_opec_anticipated_returns_none():
+    print("3. OPEC — anticipated decision (no move) does not fire")
+    try:
+        df = pd.DataFrame({
+            "opec_surprise_z": [0.0, 0.0, 0.0],   # priced-in → no surprise
+            "is_opec_window":  [False, False, False],
         }, index=_idx(3))
         ev = detect_opec_action(df)
         assert ev is None
-        _ok("returns None when is_opec_window=False")
+        _ok("returns None when opec_surprise_z is 0")
     except Exception as e:
-        _fail("opec outside window", e)
+        _fail("opec anticipated", e)
 
 
 def test_opec_missing_columns_safe():
@@ -173,9 +189,9 @@ def test_detect_all_both_fire():
     print("10. detect_all — both detectors fire")
     try:
         df = pd.DataFrame({
-            "days_to_opec":   [-7] * 5,
-            "is_opec_window": [True] * 5,
-            "dxy_zscore63":   [2.5] * 5,
+            "opec_surprise_z": [2.0] * 5,
+            "is_opec_window":  [True] * 5,
+            "dxy_zscore63":    [2.5] * 5,
         }, index=_idx(5))
         events = detect_all(df)
         families = {e.family for e in events}
@@ -189,8 +205,8 @@ def test_detect_all_only_one_fires():
     print("11. detect_all — only OPEC fires when DXY column missing")
     try:
         df = pd.DataFrame({
-            "days_to_opec":   [-3] * 3,
-            "is_opec_window": [True] * 3,
+            "opec_surprise_z": [2.0] * 3,
+            "is_opec_window":  [True] * 3,
         }, index=_idx(3))
         events = detect_all(df)
         assert len(events) == 1
@@ -233,9 +249,10 @@ if __name__ == "__main__":
     print()
 
     for fn in [
-        test_opec_inside_window_pre_meeting,
-        test_opec_meeting_day,
-        test_opec_outside_window_returns_none,
+        test_opec_surprise_fires,
+        test_opec_strength_caps_at_one,
+        test_opec_bearish_surprise_fires,
+        test_opec_anticipated_returns_none,
         test_opec_missing_columns_safe,
         test_fed_fires_on_3_consecutive_above,
         test_fed_does_not_fire_on_break,

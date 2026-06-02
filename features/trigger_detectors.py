@@ -42,43 +42,54 @@ from models.triggers import TriggerEvent
 from models.router import SignalRouter
 
 
-# ── OPEC+ meeting proximity ───────────────────────────────────────────────────
+# ── OPEC+ meeting surprise ────────────────────────────────────────────────────
 
-OPEC_STRENGTH_SCALE_DAYS = 14  # outside ±14 days → strength 0
+# |opec_surprise_z| (≈ z-scored signed post-meeting WTI reaction) at or above
+# this maps to full strength. |z|=2 → 1.0; an anticipated, priced-in decision
+# (|z|≈0) → 0.0, so the trigger does not fire on non-events. A large move fires
+# regardless of direction; the sign is reported in the event metadata.
+OPEC_SURPRISE_FULL_Z = 2.0
 
 
 def detect_opec_action(macro_df: pd.DataFrame) -> Optional[TriggerEvent]:
     """
-    Fire when the latest macro row sits inside the OPEC+ meeting window.
-    Strength scales linearly with proximity: meeting day = 1.0, edge = ~0.
+    Fire on a genuine OPEC+ *surprise*, not mere meeting proximity.
 
-    Requires columns: `days_to_opec`, `is_opec_window`.
+    Strength is driven by the event-study surprise z-score
+    (`opec_surprise_z`, built in features/macro_overlays.py): the realized
+    signed post-meeting WTI move, z-scored across meetings. An anticipated
+    decision produces ~no move (|z|≈0 → no trigger); a genuine surprise
+    produces a large move in either direction (high |z| → strong trigger), and
+    the sign (bullish rally vs bearish selloff) is reported in the rationale and
+    metadata. This keeps the trigger consistent with the meta-predictor's
+    opec_surprise_z feature — the window-proximity strength it used to emit
+    disagreed with that feature and was a source of the −0.55 IC.
+
+    Requires column: `opec_surprise_z`.
     """
-    if "days_to_opec" not in macro_df.columns or "is_opec_window" not in macro_df.columns:
+    if "opec_surprise_z" not in macro_df.columns:
         return None
 
     last = macro_df.iloc[-1]
-    if not bool(last.get("is_opec_window", False)):
+    z = last.get("opec_surprise_z", 0.0)
+    if pd.isna(z):
+        return None
+    z = float(z)
+
+    # opec_surprise_z is now signed (post-meeting WTI rally + / selloff −).
+    # Strength keys off the *magnitude* of the surprise so a large bearish
+    # reaction fires just as a large bullish one does; the sign is surfaced
+    # separately so consumers know which way the shock cuts.
+    strength = max(0.0, min(1.0, abs(z) / OPEC_SURPRISE_FULL_Z))
+    if strength <= 0.0:
         return None
 
-    days = last["days_to_opec"]
-    if pd.isna(days):
-        return None
-    days = float(days)
-
-    strength = max(0.0, 1.0 - abs(days) / OPEC_STRENGTH_SCALE_DAYS)
-    if days < 0:
-        timing = f"{int(abs(days))} days before meeting"
-    elif days > 0:
-        timing = f"{int(days)} days after meeting"
-    else:
-        timing = "meeting day"
-
+    direction = "bullish" if z > 0 else "bearish"
     return SignalRouter.make_event(
         family="opec_action",
         strength=strength,
-        rationale=f"OPEC+ window — {timing}",
-        metadata={"days_to_opec": days},
+        rationale=f"OPEC+ surprise ({direction}) — post-meeting WTI reaction z={z:+.2f}",
+        metadata={"opec_surprise_z": z, "direction": direction},
     )
 
 

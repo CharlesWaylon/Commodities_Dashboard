@@ -93,6 +93,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from models.config import FORECAST_HORIZON
+
 _log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -129,11 +131,17 @@ FEATURE_COLUMNS: Tuple[str, ...] = (
     "dxy_mom21",
     "tlt_mom21",
     "tlt_yield_proxy",
+    # ── Event windows: binary flags + event-study surprise z-scores ───────────
+    # days_to_opec / days_to_wasde were intentionally dropped: as high-cardinality
+    # integer ramps the forest latched onto them as spurious splitters (the −0.55
+    # IC days_to_opec incident). The surprise z's carry the real signal (large
+    # post-event move = genuine surprise) and are sparse/event-gated like the
+    # FRED cpi_surprise_z, so they can't be abused the same way.
     "is_opec_window",
-    "days_to_opec",
+    "opec_surprise_z",
     "is_wasde_window",
-    "days_to_wasde",
     "wasde_post5",
+    "wasde_surprise_z",
     "enso_phase",              # −1 = La Niña, 0 = neutral, +1 = El Niño
     # ── Step 5: FRED surprise features + trigger-derived regime hint ──────────
     # Sourced via features.macro_features.build_macro_surprise_features() and
@@ -187,12 +195,14 @@ class MetaFeatures:
     tlt_mom21: float = float("nan")      # 21-day log-return of TLT (bonds)
     tlt_yield_proxy: float = float("nan") # −1 × tlt daily log-ret (rate dir)
 
-    # ── Calendar / event proximity ─────────────────────────────────────────
+    # ── Calendar / event proximity + event-study surprise ──────────────────
     is_opec_window: float = 0.0          # 1.0 inside OPEC± window
-    days_to_opec: float = float("nan")   # signed; negative = before meeting
+    days_to_opec: float = float("nan")   # signed; negative = before meeting (reasoning only)
+    opec_surprise_z: float = 0.0         # z-scored post-meeting WTI reaction (sparse, post10 only)
     is_wasde_window: float = 0.0         # 1.0 inside WASDE window
-    days_to_wasde: float = float("nan")  # signed; negative = before release
+    days_to_wasde: float = float("nan")  # signed; negative = before release (reasoning only)
     wasde_post5: float = 0.0             # 1.0 for 5d after WASDE release
+    wasde_surprise_z: float = 0.0        # z-scored post-report corn reaction (sparse, post5 only)
 
     # ── Climate / ENSO ────────────────────────────────────────────────────
     enso_phase: float = 0.0                      # −1 = La Niña, 0 = neutral, +1 = El Niño
@@ -237,9 +247,11 @@ class MetaFeatures:
             "tlt_yield_proxy": self.tlt_yield_proxy,
             "is_opec_window": self.is_opec_window,
             "days_to_opec": self.days_to_opec,
+            "opec_surprise_z": self.opec_surprise_z,
             "is_wasde_window": self.is_wasde_window,
             "days_to_wasde": self.days_to_wasde,
             "wasde_post5": self.wasde_post5,
+            "wasde_surprise_z": self.wasde_surprise_z,
             "enso_phase": self.enso_phase,
             "cpi_surprise_z":      self.cpi_surprise_z,
             "unrate_surprise_z":   self.unrate_surprise_z,
@@ -264,7 +276,7 @@ class ModelVote:
     commodity: str       # canonical display name
     forecast_return: float  # e.g. +0.009 = +0.9%
     confidence: float       # IC or equivalent proxy, [0, 1]
-    horizon: int = 1        # forecast horizon in trading days
+    horizon: int = FORECAST_HORIZON  # forecast horizon in trading days
 
     def __post_init__(self):
         if self.tier not in KNOWN_TIERS:
@@ -400,9 +412,11 @@ def collect_meta_features(macro_df: pd.DataFrame) -> MetaFeatures:
         tlt_yield_proxy=_get("tlt_yield_proxy"),
         is_opec_window=float(_get("is_opec_window", 0.0)),
         days_to_opec=_get("days_to_opec"),
+        opec_surprise_z=float(_get("opec_surprise_z", 0.0)),
         is_wasde_window=float(_get("is_wasde_window", 0.0)),
         days_to_wasde=_get("days_to_wasde"),
         wasde_post5=float(_get("wasde_post5", 0.0)),
+        wasde_surprise_z=float(_get("wasde_surprise_z", 0.0)),
         enso_phase=float(_get("enso_phase", 0.0)),
         cpi_surprise_z=_sf(surprise, "cpi_surprise_z"),
         unrate_surprise_z=_sf(surprise, "unrate_surprise_z"),
@@ -662,7 +676,11 @@ class MetaPredictor:
                 )
             params = dict(
                 n_estimators=300,
-                max_depth=None,
+                # Bounded rather than None: an unbounded forest grows splits deep
+                # enough to exploit high-cardinality columns (the days_to_opec
+                # failure mode). When Optuna runs it overrides this with a tuned
+                # depth in [3, 14]; otherwise we keep the caller's max_depth floor.
+                max_depth=max_depth,
                 min_samples_leaf=min_samples_leaf,
                 max_features="sqrt",
                 class_weight="balanced",
@@ -802,6 +820,48 @@ class MetaPredictor:
             key=lambda x: x[1],
             reverse=True,
         )[:top_n]
+
+    def permutation_importances(
+        self,
+        records: List[Tuple["MetaFeatures", str]],
+        n_repeats: int = 10,
+        random_state: int = 42,
+    ) -> Dict[str, float]:
+        """
+        Permutation importance over FEATURE_COLUMNS, evaluated on `records`.
+
+        Preferred over the tree's built-in Gini importance for *logging* the
+        top feature: Gini is biased toward high-cardinality continuous columns
+        (an integer ramp like days_to_opec scores high simply because it offers
+        many split points), which is exactly how days_to_opec masqueraded as the
+        dominant feature while contributing a −0.55 IC. Permutation importance
+        measures the *actual* accuracy drop when a column is shuffled, so an
+        uninformative high-cardinality column scores ~0.
+
+        Returns {} when untrained, records is empty, or sklearn is unavailable.
+        """
+        if not self.is_trained or not records:
+            return {}
+        try:
+            from sklearn.inspection import permutation_importance
+        except ImportError:
+            return {}
+        X = np.nan_to_num(
+            np.array([mf.to_feature_vector() for mf, _ in records], dtype=float),
+            nan=0.0,
+        )
+        y = [tier for _, tier in records]
+        result = permutation_importance(
+            self._tree, X, y,
+            n_repeats=n_repeats,
+            random_state=random_state,
+            n_jobs=-1,
+            scoring="accuracy",
+        )
+        return {
+            col: float(v)
+            for col, v in zip(FEATURE_COLUMNS, result.importances_mean)
+        }
 
     # ── Persistence ───────────────────────────────────────────────────────────
 

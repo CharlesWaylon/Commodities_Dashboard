@@ -205,6 +205,55 @@ COMMODITY_UNITS = {
     "Bitcoin":                  "USD",
 }
 
+# ── Second-nearby (M2) futures tickers ────────────────────────────────────────
+# Maps each tradeable futures commodity (keyed by the same display names used in
+# COMMODITY_TICKERS) to its current second-nearby contract ticker on Yahoo Finance.
+#
+# Format:  "{ROOT}{MONTH_CODE}{2-DIGIT-YEAR}.{EXCHANGE}"
+# Month codes: F=Jan G=Feb H=Mar J=Apr K=May M=Jun N=Jul Q=Aug U=Sep V=Oct X=Nov Z=Dec
+# Exchanges:   .NYM=NYMEX  .CMX=COMEX  .CBT=CBOT  .CME=CME  .NYB=ICE/NYBOT
+#
+# ⚠️  MAINTENANCE: As contracts expire, update these tickers to the next M2
+# contract month.  The pipeline downloads whatever history yfinance serves for
+# each specific contract (typically the last 6-12 months).  ETF/equity proxies
+# (names ending with "*") and instruments without listed term structures
+# (Aluminum, HRC Steel, Bitcoin) are intentionally absent — those get skipped.
+#
+# Last updated: 2026-06-01 (second nearby as of that date).
+FUTURES_M2_TICKERS: dict[str, str] = {
+    # ── ENERGY — NYMEX (monthly expiry) ───────────────────────────────────────
+    "WTI Crude Oil":            "CLQ26.NYM",   # Aug 2026 WTI (front=Jul)
+    "Brent Crude Oil":          "BZQ26.NYM",   # Aug 2026 Brent (front=Jul)
+    "Natural Gas (Henry Hub)":  "NGQ26.NYM",   # Aug 2026 NG (front=Jul)
+    "Gasoline (RBOB)":          "RBQ26.NYM",   # Aug 2026 RBOB (front=Jul)
+    "Heating Oil (No.2)":       "HOQ26.NYM",   # Aug 2026 HO (front=Jul)
+    # ── METALS — COMEX ────────────────────────────────────────────────────────
+    "Gold (COMEX)":             "GCV26.CMX",   # Oct 2026 Gold (front=Aug; bi-monthly)
+    "Silver (COMEX)":           "SIU26.CMX",   # Sep 2026 Silver (front=Jul; Mar/May/Jul/Sep/Dec)
+    "Copper (COMEX)":           "HGU26.CMX",   # Sep 2026 Copper (front=Jul; Mar/May/Jul/Sep/Dec)
+    "Platinum":                 "PLV26.CMX",   # Oct 2026 Platinum (front=Jul; Jan/Apr/Jul/Oct)
+    "Palladium":                "PAZ26.CMX",   # Dec 2026 Palladium (front=Sep; Mar/Jun/Sep/Dec)
+    # ── AGRICULTURE — CBOT ───────────────────────────────────────────────────
+    "Corn (CBOT)":              "ZCU26.CBT",   # Sep 2026 Corn (front=Jul; Mar/May/Jul/Sep/Dec)
+    "Wheat (CBOT SRW)":         "ZWU26.CBT",   # Sep 2026 Wheat (front=Jul)
+    "Wheat (KC HRW)":           "KEU26.CBT",   # Sep 2026 HRW (front=Jul)
+    "Soybeans (CBOT)":          "ZSQ26.CBT",   # Aug 2026 Soybeans (front=Jul; Jan/Mar/May/Jul/Aug/Sep/Nov)
+    "Soybean Oil":              "ZLQ26.CBT",   # Aug 2026 SoyOil (front=Jul)
+    "Soybean Meal":             "ZMQ26.CBT",   # Aug 2026 SoyMeal (front=Jul)
+    "Oats (CBOT)":              "ZOU26.CBT",   # Sep 2026 Oats (front=Jul; Mar/May/Jul/Sep/Dec)
+    "Rough Rice (CBOT)":        "ZRU26.CBT",   # Sep 2026 Rice (front=Jul; Jan/Mar/May/Jul/Sep/Nov)
+    # ── AGRICULTURE — ICE/NYBOT ───────────────────────────────────────────────
+    "Coffee (Arabica)":         "KCZ26.NYB",   # Dec 2026 Coffee (front=Sep; Mar/May/Jul/Sep/Dec)
+    "Cocoa (ICE)":              "CCZ26.NYB",   # Dec 2026 Cocoa (front=Sep; Mar/May/Jul/Sep/Dec)
+    "Sugar (Raw #11)":          "SBV26.NYB",   # Oct 2026 Sugar (front=Jul; Mar/May/Jul/Oct)
+    "Cotton (No.2)":            "CTV26.NYB",   # Oct 2026 Cotton (front=Jul; Mar/May/Jul/Oct/Dec)
+    "Orange Juice (FCOJ-A)":    "OJU26.NYB",   # Sep 2026 OJ (front=Jul; Jan/Mar/May/Jul/Sep/Nov)
+    # ── LIVESTOCK — CME ───────────────────────────────────────────────────────
+    "Live Cattle":              "LEV26.CME",   # Oct 2026 Live Cattle (front=Aug; Feb/Apr/Jun/Aug/Oct/Dec)
+    "Feeder Cattle":            "GFU26.CME",   # Sep 2026 Feeder Cattle (front=Aug)
+    "Lean Hogs":                "HEV26.CME",   # Oct 2026 Lean Hogs (front=Aug)
+}
+
 # ── Proxy flag & notes ─────────────────────────────────────────────────────────
 # True = this is an ETF/equity proxy, not a direct commodity futures price.
 # The dashboard shows an asterisk (*) and the note below for these instruments.

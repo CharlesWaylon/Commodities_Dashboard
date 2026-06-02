@@ -92,7 +92,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from models.config import TEST_FRACTION
+from models.config import FORECAST_HORIZON, TEST_FRACTION
 from models.meta_predictor import (
     MetaFeatures,
     MetaPredictor,
@@ -122,7 +122,7 @@ class BacktestRecord:
     date: pd.Timestamp
     commodity: str
     meta_features: MetaFeatures
-    actual_return: float
+    actual_return: float   # FORECAST_HORIZON-day cumulative log-return from date t to t+H
     tier_forecasts: Dict[str, float] = field(default_factory=dict)
     tier_errors: Dict[str, float] = field(default_factory=dict)
     winning_tier: str = ""
@@ -266,6 +266,7 @@ class XGBoostAdapter(TierAdapter):
         self._model = None
         self._commodity = None
         self._climate_df: Optional[pd.DataFrame] = None
+        self._m2_prices:  Optional[pd.DataFrame] = None   # second-nearby for basis features
 
     @property
     def tier(self) -> str:
@@ -274,7 +275,9 @@ class XGBoostAdapter(TierAdapter):
     def fit(self, prices_train: pd.DataFrame, commodity: str) -> None:
         from models.ml.xgboost_shap import XGBoostForecaster
         from models.features import build_feature_matrix, build_target, augment_with_climate
-        feat_train = build_feature_matrix(prices_train)
+        feat_train = build_feature_matrix(
+            prices_train, second_contract_prices=self._m2_prices
+        )
         feat_train = augment_with_climate(feat_train, self._climate_df, commodity)
         target_train = build_target(prices_train, commodity)
         aligned = feat_train.join(target_train).dropna()
@@ -296,7 +299,9 @@ class XGBoostAdapter(TierAdapter):
         if self._model is None:
             return pd.Series(np.nan, index=test_idx)
         from models.features import build_feature_matrix, augment_with_climate
-        feat_full = build_feature_matrix(prices_full)
+        feat_full = build_feature_matrix(
+            prices_full, second_contract_prices=self._m2_prices
+        )
         feat_full = augment_with_climate(feat_full, self._climate_df, commodity)
         test_feats = feat_full.loc[feat_full.index.isin(test_idx)].dropna()
         if test_feats.empty:
@@ -322,6 +327,7 @@ class ElasticNetAdapter(TierAdapter):
     def __init__(self):
         self._model = None
         self._climate_df: Optional[pd.DataFrame] = None
+        self._m2_prices:  Optional[pd.DataFrame] = None   # second-nearby for basis features
 
     @property
     def tier(self) -> str:
@@ -330,7 +336,9 @@ class ElasticNetAdapter(TierAdapter):
     def fit(self, prices_train: pd.DataFrame, commodity: str) -> None:
         from models.ml.elastic_net import ElasticNetFactorModel
         from models.features import build_feature_matrix, build_target, augment_with_climate
-        feat = build_feature_matrix(prices_train)
+        feat = build_feature_matrix(
+            prices_train, second_contract_prices=self._m2_prices
+        )
         feat = augment_with_climate(feat, self._climate_df, commodity)
         target = build_target(prices_train, commodity)
         aligned = feat.join(target).dropna()
@@ -351,7 +359,9 @@ class ElasticNetAdapter(TierAdapter):
         if self._model is None:
             return pd.Series(np.nan, index=test_idx)
         from models.features import build_feature_matrix, augment_with_climate
-        feat_full = build_feature_matrix(prices_full)
+        feat_full = build_feature_matrix(
+            prices_full, second_contract_prices=self._m2_prices
+        )
         feat_full = augment_with_climate(feat_full, self._climate_df, commodity)
         test_feats = feat_full.loc[feat_full.index.isin(test_idx)].dropna()
         if test_feats.empty:
@@ -406,12 +416,14 @@ class BacktestHarness:
         min_train_rows: int = 120,
         n_splits: int = 5,
         climate_df: Optional[pd.DataFrame] = None,
+        m2_prices: Optional[pd.DataFrame] = None,
     ):
         self.adapters = adapters if adapters is not None else list(DEFAULT_ADAPTERS)
         self.test_fraction = test_fraction
         self.min_train_rows = min_train_rows
         self.n_splits = max(1, int(n_splits))
         self.climate_df = climate_df
+        self.m2_prices  = m2_prices   # second-nearby price matrix for basis features
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -584,7 +596,11 @@ class BacktestHarness:
         -------
         list of (test_start, test_end) tuples, or [] if data is insufficient.
         """
-        usable = n - 1  # last row has no actual return
+        # Reserve the last FORECAST_HORIZON rows: their H-day forward returns
+        # are NaN (shift(-H) pushes them out of bounds).  Making this explicit
+        # here rather than relying only on the `if np.isnan(actual): continue`
+        # guard ensures adapters never see these rows as potential test indices.
+        usable = n - FORECAST_HORIZON
 
         if self.n_splits == 1:
             # ── Legacy single-split behaviour ─────────────────────────────────
@@ -626,10 +642,12 @@ class BacktestHarness:
           3. Compare each tier's forecast to the realised return
           4. Tag the date with the winning tier and its MetaFeatures
         """
-        # ── 1. Pre-compute actual next-day returns for the full window ─────────
-        actual_returns = np.log(
-            prices[commodity] / prices[commodity].shift(1)
-        ).shift(-1)
+        # ── 1. Pre-compute actual H-day forward returns for the full window ──────
+        # FORECAST_HORIZON-day cumulative return: sum(ret[t+1 : t+H+1]).
+        # The last H rows of the test window have NaN actual returns and are
+        # skipped by the `if np.isnan(actual): continue` guard below.
+        _ret_1d = np.log(prices[commodity] / prices[commodity].shift(1))
+        actual_returns = _ret_1d.rolling(FORECAST_HORIZON).sum().shift(-FORECAST_HORIZON)
 
         # ── 2. Determine fold boundaries ──────────────────────────────────────
         splits = self._split_indices(len(prices))
@@ -659,10 +677,12 @@ class BacktestHarness:
                 continue
 
             # ── 4a. Fit each adapter on this fold's expanding train window ─────
-            # Propagate climate data to adapters that support it (XGBoost, ElasticNet)
+            # Propagate climate and M2 data to adapters that support them.
             for adapter in self.adapters:
                 if hasattr(adapter, "_climate_df"):
                     adapter._climate_df = climate_df
+                if hasattr(adapter, "_m2_prices"):
+                    adapter._m2_prices = self.m2_prices
 
             tier_forecasts: Dict[str, pd.Series] = {}
             for adapter in self.adapters:

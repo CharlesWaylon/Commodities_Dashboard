@@ -26,6 +26,8 @@ from utils.macro_narrative import (
     load_macro, get_macro_state, compute_forecasts, build_narrative,
 )
 from models.cascade_validator import validate as _cascade_validate
+from database.db import get_engine as _get_engine
+from sqlalchemy import text as _sa_text
 
 st.set_page_config(
     page_title="Accendio | Causal Chains",
@@ -159,17 +161,122 @@ def load_prices(period_days: int = 756) -> pd.DataFrame:
 # are imported from utils.macro_narrative above.
 
 
+# ── Cascade DB data & signal helpers ─────────────────────────────────────────
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_cascade_db_data() -> pd.DataFrame:
+    """Load all cascade_forecasts rows from Postgres. Returns empty DF on failure."""
+    try:
+        engine = _get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(_sa_text(
+                "SELECT forecast_date, commodity, sector, base_forecast, "
+                "macro_adjustment, upstream_adjustment, final_forecast, "
+                "confidence, regime, upstream_detail FROM cascade_forecasts "
+                "ORDER BY forecast_date, sector, commodity"
+            ))
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        df["forecast_date"] = pd.to_datetime(df["forecast_date"]).dt.date
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+# DB sector key → topology display name (and reverse)
+_SECTOR_DISPLAY: Dict[str, str] = {
+    "energy":      "Energy",
+    "metals":      "Metals",
+    "agriculture": "Agriculture",
+    "livestock":   "Livestock",
+    "digital":     "Digital",
+}
+_SECTOR_DB: Dict[str, str] = {v: k for k, v in _SECTOR_DISPLAY.items()}
+
+
+def _build_sector_signals(df: pd.DataFrame, forecast_date) -> Dict[str, tuple]:
+    """Returns {display_name: (avg_final_forecast, avg_confidence, has_data)}."""
+    sub = df[df["forecast_date"] == forecast_date] if not df.empty else pd.DataFrame()
+    result: Dict[str, tuple] = {}
+    for db_key, display in _SECTOR_DISPLAY.items():
+        rows = sub[sub["sector"] == db_key] if not sub.empty else pd.DataFrame()
+        if rows.empty:
+            result[display] = (0.0, 0.0, False)
+        else:
+            result[display] = (
+                float(rows["final_forecast"].mean()),
+                float(rows["confidence"].mean()),
+                True,
+            )
+    return result
+
+
+def _build_edge_weights(df: pd.DataFrame, forecast_date) -> Dict[tuple, float]:
+    """
+    Returns {(src_display, tgt_display): upstream influence magnitude}.
+
+    Parses upstream_detail JSON (per-commodity contributions stored at predict
+    time) and sums contributions by upstream sector, so Energy→Agriculture and
+    Metals→Agriculture reflect their actual measured shares rather than an
+    equal split of the net upstream_adjustment.
+    """
+    import json
+    from models.config import COMMODITY_SECTORS
+
+    sub = df[df["forecast_date"] == forecast_date] if not df.empty else pd.DataFrame()
+    if sub.empty:
+        return {}
+
+    # Accumulate total absolute contribution per (src_sector, tgt_sector) edge
+    edge_sums: Dict[tuple, float] = {}
+    edge_counts: Dict[tuple, int] = {}
+
+    for _, row in sub.iterrows():
+        tgt_db = row["sector"]
+        tgt_disp = _SECTOR_DISPLAY.get(tgt_db)
+        if tgt_disp is None:
+            continue
+
+        detail_raw = row.get("upstream_detail")
+        if not detail_raw:
+            continue
+        try:
+            detail: Dict[str, float] = json.loads(detail_raw)
+        except (TypeError, ValueError):
+            continue
+
+        for comm_name, contrib in detail.items():
+            src_db = COMMODITY_SECTORS.get(comm_name)
+            if src_db is None:
+                continue
+            src_disp = _SECTOR_DISPLAY.get(src_db)
+            if src_disp is None:
+                continue
+            edge = (src_disp, tgt_disp)
+            edge_sums[edge]   = edge_sums.get(edge, 0.0) + abs(contrib)
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+
+    # Average over commodities in the target sector so sectors with more
+    # commodities don't artificially dominate
+    return {
+        edge: total / edge_counts[edge]
+        for edge, total in edge_sums.items()
+    }
+
+
 # ── Cascade Topology Diagram ───────────────────────────────────────────────────
 
-def build_topology_diagram() -> go.Figure:
+def build_topology_diagram(
+    sector_signals: Optional[Dict[str, tuple]] = None,
+    edge_weights:   Optional[Dict[tuple, float]] = None,
+) -> go.Figure:
     """
-    Static node-link diagram of the full 9-edge cross-sector causal topology.
+    Node-link diagram of the 9-edge cross-sector causal topology.
 
-    Node layout (data coords, x in [0,10], y in [0,6]):
-      Energy(1,3)  Metals(3.5,4.8)  Agriculture(6.5,4.8)  Livestock(9,3)  Digital(5.5,1.2)
+    When sector_signals is supplied, node fill/border reflect live forecast direction.
+    When edge_weights is supplied, arrowwidth scales with upstream influence magnitude.
 
-    Arrow colour = source sector colour so edge bundles are readable at a glance.
-    Edge labels are rendered in the reference table below the chart (not inline).
+    sector_signals: {display_name: (avg_final_forecast, avg_confidence, has_data)}
+    edge_weights:   {(src_display, tgt_display): upstream magnitude}
     """
     nodes = {
         "Energy":      (1.0, 3.0),
@@ -178,8 +285,6 @@ def build_topology_diagram() -> go.Figure:
         "Livestock":   (9.0, 3.0),
         "Digital":     (5.5, 1.2),
     }
-
-    # (source, target) — mirrors UPSTREAM_MAP in cascade_orchestrator.py
     edges = [
         ("Energy",      "Metals"),
         ("Energy",      "Agriculture"),
@@ -191,13 +296,53 @@ def build_topology_diagram() -> go.Figure:
         ("Agriculture", "Livestock"),
         ("Agriculture", "Digital"),
     ]
-
-    # Source-sector colour map (Digital not a source in UPSTREAM_MAP)
-    _src_color = {
-        "Energy":      AMBER,
-        "Metals":      BLUE,
-        "Agriculture": GREEN,
+    _src_color = {"Energy": AMBER, "Metals": BLUE, "Agriculture": GREEN}
+    _base_node_color = {
+        "Energy": AMBER, "Metals": BLUE, "Agriculture": GREEN,
+        "Livestock": PURPLE, "Digital": TEAL,
     }
+
+    # Edge width helpers
+    _ew      = edge_weights or {}
+    _max_ew  = max(_ew.values(), default=0.0) or 1.0
+
+    def _arrow_width(src, tgt):
+        w = _ew.get((src, tgt), 0.0)
+        return 1.2 + (w / _max_ew) * 2.3   # [1.2, 3.5]
+
+    def _arrow_alpha(src, tgt):
+        if not _ew:
+            return 0.65
+        w = _ew.get((src, tgt), 0.0)
+        return 0.40 + (w / _max_ew) * 0.40  # [0.40, 0.80]
+
+    # Node colour helpers
+    _sig = sector_signals or {}
+
+    def _node_fill(sector):
+        fc, _, has = _sig.get(sector, (0.0, 0.0, False))
+        if not _sig:
+            return _hex_rgba(_base_node_color[sector], 0.12)
+        if not has:
+            return _hex_rgba(ICE, 0.04)
+        if fc > 0.0005:
+            return _hex_rgba(GREEN, 0.20)
+        if fc < -0.0005:
+            return _hex_rgba(RED, 0.20)
+        return _hex_rgba(BLUE, 0.10)
+
+    def _node_border(sector):
+        base = _base_node_color[sector]
+        if not _sig:
+            return base
+        fc, _, has = _sig.get(sector, (0.0, 0.0, False))
+        if not has:
+            return _hex_rgba(ICE, 0.20)
+        if fc > 0.0005:
+            return GREEN
+        if fc < -0.0005:
+            return RED
+        return base
 
     fig = go.Figure()
 
@@ -209,28 +354,42 @@ def build_topology_diagram() -> go.Figure:
             x=x1, y=y1, ax=x0, ay=y0,
             xref="x", yref="y", axref="x", ayref="y",
             showarrow=True,
-            arrowhead=3, arrowsize=1.1, arrowwidth=1.8,
-            arrowcolor=_hex_rgba(_src_color.get(src, ICE), 0.65),
+            arrowhead=3, arrowsize=1.1,
+            arrowwidth=_arrow_width(src, tgt),
+            arrowcolor=_hex_rgba(_src_color.get(src, ICE), _arrow_alpha(src, tgt)),
             text="",
         )
 
-    # Node circles + sector labels
-    _node_sector_colors = {**SECTOR_COLORS, "Digital": TEAL}
-    for sector, (x, y) in nodes.items():
-        color = _node_sector_colors.get(sector, ICE)
+    # One Scatter trace per sector so on_select returns the sector by curve index
+    _SECTOR_ORDER = ["Energy", "Metals", "Agriculture", "Livestock", "Digital"]
+    for sector in _SECTOR_ORDER:
+        x, y = nodes[sector]
+        fc, conf, has = _sig.get(sector, (0.0, 0.0, False))
+        if has:
+            dir_str = "▲" if fc > 0 else "▼"
+            hover = (
+                f"<b>{sector}</b><br>"
+                f"Avg forecast: {dir_str} {fc*100:+.3f}%<br>"
+                f"Confidence: {conf:.3f}<br>"
+                f"<i>Click to inspect</i>"
+            )
+        else:
+            hover = f"<b>{sector}</b><br><i>No cascade data yet</i><br><i>Click to inspect</i>"
+
         fig.add_trace(go.Scatter(
             x=[x], y=[y],
+            name=sector,
             mode="markers+text",
             marker=dict(
-                size=60,
-                color=_hex_rgba(color, 0.12),
-                line=dict(color=color, width=2),
+                size=62,
+                color=_node_fill(sector),
+                line=dict(color=_node_border(sector), width=2.2),
             ),
             text=[sector],
             textposition="middle center",
-            textfont=dict(color=color, size=11),
+            textfont=dict(color=_node_border(sector), size=11),
+            hovertemplate=hover + "<extra></extra>",
             showlegend=False,
-            hoverinfo="skip",
         ))
 
     fig.update_layout(**PLOTLY_LAYOUT, height=270, margin=dict(t=10, l=10, r=10, b=10))
@@ -282,6 +441,130 @@ def render_topology_edge_table() -> None:
         </table></div>""",
         unsafe_allow_html=True,
     )
+
+
+# ── Sector Drill-Down ─────────────────────────────────────────────────────────
+
+_SECTOR_PANEL_COLORS = {
+    "Energy": AMBER, "Metals": BLUE, "Agriculture": GREEN,
+    "Livestock": PURPLE, "Digital": TEAL,
+}
+
+_SHORT_NAMES = {
+    " (COMEX)": "", " (CBOT)": "", " (Henry Hub)": "",
+    " (CBOT SRW)": "", " (RBOB)": "",
+}
+
+
+def _shorten(name: str) -> str:
+    for pat, rep in _SHORT_NAMES.items():
+        name = name.replace(pat, rep)
+    return name
+
+
+def render_sector_drilldown(df: pd.DataFrame, sector_display: str, forecast_date) -> None:
+    """
+    Commodity-level breakdown for the selected sector on the chosen date.
+    Left: stacked horizontal bar (base + macro_adj + upstream_adj = final).
+    Right: sparkline of final_forecast history across all available dates.
+    """
+    db_key = _SECTOR_DB.get(sector_display)
+    if db_key is None:
+        return
+
+    color     = _SECTOR_PANEL_COLORS.get(sector_display, ICE)
+    sector_df = df[df["sector"] == db_key].copy()
+    date_df   = sector_df[sector_df["forecast_date"] == forecast_date]
+
+    if date_df.empty:
+        st.markdown(
+            f"<div style='color:{_hex_rgba(ICE,0.4)};font-size:13px;padding:12px'>"
+            f"No cascade forecast data for {sector_display} on {forecast_date}.</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    commodities = date_df["commodity"].tolist()
+    y_labels    = [_shorten(c) for c in commodities]
+
+    # ── Stacked breakdown bars ──────────────────────────────────────────────────
+    fig_bars = go.Figure()
+    for col_name, col_color, label in [
+        ("base_forecast",        color,  "Base"),
+        ("macro_adjustment",     BLUE,   "Macro adj."),
+        ("upstream_adjustment",  PURPLE, "Upstream adj."),
+    ]:
+        vals = (date_df[col_name] * 100).tolist()
+        fig_bars.add_trace(go.Bar(
+            name=label,
+            y=y_labels,
+            x=vals,
+            orientation="h",
+            marker_color=_hex_rgba(col_color, 0.65),
+            hovertemplate=f"{label}: %{{x:.3f}}%<extra></extra>",
+        ))
+
+    fig_bars.add_vline(x=0, line=dict(color=_hex_rgba(ICE, 0.15), width=1))
+    fig_bars.update_layout(
+        **PLOTLY_LAYOUT,
+        barmode="relative",
+        height=max(160, len(commodities) * 54),
+        margin=dict(t=8, l=8, r=70, b=28),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            font=dict(size=10, color=_hex_rgba(ICE, 0.5)),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        xaxis=dict(title="Forecast return (%)", tickformat=".3f",
+                   tickfont=dict(size=9)),
+        yaxis=dict(tickfont=dict(size=10)),
+    )
+
+    # ── Sparkline: final_forecast history ──────────────────────────────────────
+    fig_spark = go.Figure()
+    for comm, label in zip(commodities, y_labels):
+        hist = (
+            sector_df[sector_df["commodity"] == comm]
+            .sort_values("forecast_date")
+        )
+        if hist.empty:
+            continue
+        fig_spark.add_trace(go.Scatter(
+            x=hist["forecast_date"].tolist(),
+            y=(hist["final_forecast"] * 100).tolist(),
+            mode="lines+markers",
+            name=label,
+            line=dict(width=1.5),
+            marker=dict(size=4),
+            hovertemplate=f"{label}: %{{y:.3f}}%<extra></extra>",
+        ))
+
+    fig_spark.add_hline(y=0, line=dict(color=_hex_rgba(ICE, 0.18), width=1, dash="dot"))
+    fig_spark.update_layout(
+        **PLOTLY_LAYOUT,
+        height=180,
+        margin=dict(t=8, l=8, r=8, b=28),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            font=dict(size=9, color=_hex_rgba(ICE, 0.5)),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        xaxis=dict(tickfont=dict(size=9)),
+        yaxis=dict(title="Final forecast (%)", tickformat=".3f", tickfont=dict(size=9)),
+    )
+
+    col_bars, col_spark = st.columns([3, 2])
+    _dim = f"font-size:10px;color:{_hex_rgba(ICE,0.35)};letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px"
+    with col_bars:
+        st.markdown(f"<div style='{_dim}'>Forecast Breakdown — {forecast_date}</div>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(fig_bars, use_container_width=True,
+                        config={"displayModeBar": False})
+    with col_spark:
+        st.markdown(f"<div style='{_dim}'>Forecast History (all dates)</div>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(fig_spark, use_container_width=True,
+                        config={"displayModeBar": False})
 
 
 # ── Cascade Sankey ─────────────────────────────────────────────────────────────
@@ -792,13 +1075,108 @@ with st.expander("🔍 Cascade validator details", expanded=(_vr.status not in (
 
 # ── SECTION 0: Cascade Topology ──────────────────────────────────────────────
 st.subheader("⓪ Cascade Topology")
-st.caption(
-    "Static causal dependency map — how price shocks propagate across commodity sectors "
-    "before any macro channel overlay is applied."
+
+_casc_df    = load_cascade_db_data()
+_casc_dates = sorted(_casc_df["forecast_date"].unique()) if not _casc_df.empty else []
+
+# ── Date slider (shown only when DB data exists) ───────────────────────────────
+if _casc_dates:
+    _date_idx = st.slider(
+        "Forecast date",
+        min_value=0,
+        max_value=len(_casc_dates) - 1,
+        value=len(_casc_dates) - 1,
+        format="",
+        key="topology_date_slider",
+        label_visibility="collapsed",
+    )
+    _selected_date    = _casc_dates[_date_idx]
+    _sector_signals   = _build_sector_signals(_casc_df, _selected_date)
+    _edge_weights_map = _build_edge_weights(_casc_df, _selected_date)
+    st.caption(
+        f"Showing cascade state for **{_selected_date}** — "
+        "drag to replay history. Node colour = forecast direction. "
+        "Edge thickness = upstream influence magnitude. "
+        "Click a sector node or button below to inspect commodity detail."
+    )
+    st.caption(
+        "Edge weights blend measured cross-sector co-movement with economic "
+        "transmission priors (e.g. energy→agriculture is weighted up because "
+        "natural gas drives 70–80% of ammonia/fertiliser cost). Priors are "
+        "applied during cascade fitting, so weights reflect the new blend only "
+        "for forecasts produced after the next retrain. See MODEL_VERIFICATION_LOG.md."
+    )
+else:
+    _selected_date    = None
+    _sector_signals   = None
+    _edge_weights_map = None
+    st.caption(
+        "Causal dependency map — how price shocks propagate across commodity sectors. "
+        "Node colours and edge weights will encode live signals once cascade forecasts exist."
+    )
+
+# ── Topology chart with click-selection ────────────────────────────────────────
+_topology_fig = build_topology_diagram(_sector_signals, _edge_weights_map)
+_TOPO_SECTORS = ["Energy", "Metals", "Agriculture", "Livestock", "Digital"]
+
+_sel = st.plotly_chart(
+    _topology_fig,
+    use_container_width=True,
+    config={"displayModeBar": False},
+    on_select="rerun",
+    selection_mode="points",
+    key="topology_chart",
 )
-st.plotly_chart(build_topology_diagram(), use_container_width=True,
-                config={"displayModeBar": False})
+
+# Map click event → sector name via curve_number (one trace per sector, in order)
+_clicked_sector: Optional[str] = None
+if _sel and _sel.get("selection", {}).get("points"):
+    _pt = _sel["selection"]["points"][0]
+    _ci = _pt.get("curve_number", -1)
+    if 0 <= _ci < len(_TOPO_SECTORS):
+        _clicked_sector = _TOPO_SECTORS[_ci]
+
+if _clicked_sector:
+    st.session_state["topology_selected_sector"] = _clicked_sector
+elif "topology_selected_sector" not in st.session_state:
+    st.session_state["topology_selected_sector"] = None
+
 render_topology_edge_table()
+
+# ── Sector drill-down ──────────────────────────────────────────────────────────
+if _casc_dates:
+    st.markdown(
+        f"<div style='font-size:10px;color:{_hex_rgba(ICE,0.3)};letter-spacing:.1em;"
+        f"text-transform:uppercase;margin:14px 0 6px'>Sector Detail</div>",
+        unsafe_allow_html=True,
+    )
+    _pill_cols = st.columns(len(_TOPO_SECTORS))
+    for i, sec_name in enumerate(_TOPO_SECTORS):
+        _is_sel = st.session_state.get("topology_selected_sector") == sec_name
+        _sig    = (_sector_signals or {}).get(sec_name, (0.0, 0.0, False))
+        _fc, _, _has = _sig
+        _dir = " ▲" if _fc > 0.0005 else (" ▼" if _fc < -0.0005 else "")
+        with _pill_cols[i]:
+            if st.button(
+                f"{sec_name}{_dir}",
+                key=f"sector_pill_{sec_name}",
+                use_container_width=True,
+                type="primary" if _is_sel else "secondary",
+            ):
+                st.session_state["topology_selected_sector"] = sec_name
+                st.rerun()
+
+    _sel_sector = st.session_state.get("topology_selected_sector")
+    if _sel_sector and _selected_date:
+        _sec_color = _SECTOR_PANEL_COLORS.get(_sel_sector, ICE)
+        st.markdown(
+            f"<div style='font-size:11px;color:{_sec_color};font-weight:600;"
+            f"letter-spacing:.08em;text-transform:uppercase;margin:10px 0 4px'>"
+            f"◆ {_sel_sector}</div>",
+            unsafe_allow_html=True,
+        )
+        render_sector_drilldown(_casc_df, _sel_sector, _selected_date)
+
 st.divider()
 
 

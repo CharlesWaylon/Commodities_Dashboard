@@ -21,6 +21,8 @@ from models.backtest_harness import (
     DEFAULT_ADAPTERS,
 )
 from models.meta_predictor import MetaFeatures, MetaPredictor, KNOWN_TIERS
+from models.config import FORECAST_HORIZON
+from models.features import build_feature_matrix
 
 PASS = 0
 FAIL = 0
@@ -435,9 +437,10 @@ def test_split_indices_single_split_fallback():
         assert len(splits) == 1, f"expected 1 fold, got {len(splits)}"
         ts, te = splits[0]
         expected_split = int(n * (1 - 0.20))   # = 240
+        expected_usable = n - FORECAST_HORIZON  # = 290 (embargo applied)
         assert ts == expected_split, f"test_start={ts}, expected {expected_split}"
-        assert te == n - 1, f"test_end={te}, expected {n-1}"
-        _ok(f"single split: train [0:{ts}], test [{ts}:{te}]")
+        assert te == expected_usable, f"test_end={te}, expected {expected_usable} (n - FORECAST_HORIZON)"
+        _ok(f"single split: train [0:{ts}], test [{ts}:{te}] (usable={expected_usable})")
     except Exception as e:
         _fail("_split_indices single-split fallback", e)
 
@@ -517,6 +520,148 @@ def test_walk_forward_covers_most_of_history():
         _fail("walk-forward coverage", e)
 
 
+# ── Term-structure feature tests (Prompt 2) ───────────────────────────────────
+
+def _make_m2_prices(m1: pd.DataFrame, spread: float = 0.02) -> pd.DataFrame:
+    """Synthetic M2 matrix: front price inflated by a fixed spread (contango)."""
+    return m1 * (1 + spread)
+
+
+def test_build_feature_matrix_with_m2_gains_basis_columns():
+    print("21. build_feature_matrix with M2 — output gains *_basis / *_basis_zscore / *_roll_yield columns")
+    try:
+        m1 = _make_prices(300)
+        m2 = _make_m2_prices(m1)
+
+        feat_with_m2 = build_feature_matrix(m1, second_contract_prices=m2)
+
+        cols = feat_with_m2.columns.tolist()
+        for commodity in m1.columns:
+            for suffix in ("_basis", "_basis_zscore", "_roll_yield"):
+                expected = f"{commodity}{suffix}"
+                assert expected in cols, (
+                    f"Expected column '{expected}' in feature matrix with M2 prices; "
+                    f"got columns: {cols}"
+                )
+
+        _ok(
+            f"basis/zscore/roll_yield columns present for all {len(m1.columns)} commodity(ies); "
+            f"total features={len(cols)}"
+        )
+    except Exception as e:
+        _fail("build_feature_matrix with M2 basis columns", e)
+
+
+def test_build_feature_matrix_without_m2_matches_baseline():
+    print("22. build_feature_matrix without M2 — output is identical to None baseline")
+    try:
+        m1 = _make_prices(300)
+
+        feat_none    = build_feature_matrix(m1, second_contract_prices=None)
+        feat_default = build_feature_matrix(m1)
+
+        assert list(feat_none.columns) == list(feat_default.columns), (
+            "Column order differs between None and default (no second_contract_prices)"
+        )
+        assert feat_none.shape == feat_default.shape, (
+            f"Shape mismatch: None={feat_none.shape}, default={feat_default.shape}"
+        )
+
+        # No term-structure columns should appear in the baseline
+        for col in feat_none.columns:
+            assert not any(col.endswith(s) for s in ("_basis", "_basis_zscore", "_roll_yield")), (
+                f"Term-structure column '{col}' unexpectedly present without M2 prices"
+            )
+
+        _ok(
+            f"no basis columns without M2; shapes match ({feat_none.shape}); "
+            f"column lists identical"
+        )
+    except Exception as e:
+        _fail("build_feature_matrix without M2 matches baseline", e)
+
+
+# ── IC horizon / embargo tests (Prompt 3) ─────────────────────────────────────
+
+def test_actual_return_equals_h_day_cumulative():
+    print("23. BacktestHarness — actual_return at date t equals H-day cumulative log-return")
+    try:
+        prices = _make_prices(250)
+        macro  = _make_macro(prices.index)
+
+        harness = BacktestHarness(
+            adapters=[_StubAdapter("statistical", 0.0)],
+            test_fraction=0.20,
+        )
+        records = harness.run(prices, macro, ["WTI Crude Oil"])
+        assert records, "expected at least one record"
+
+        # Recompute H-day actuals ourselves from the price series
+        log_ret_1d = np.log(prices["WTI Crude Oil"] / prices["WTI Crude Oil"].shift(1))
+        h_day_actual = log_ret_1d.rolling(FORECAST_HORIZON).sum().shift(-FORECAST_HORIZON)
+
+        mismatches = 0
+        for rec in records:
+            expected = h_day_actual.get(rec.date)
+            if expected is None or np.isnan(expected):
+                continue  # last-H rows have no valid actual — skip
+            diff = abs(rec.actual_return - expected)
+            if diff > 1e-10:
+                mismatches += 1
+                print(
+                    f"    MISMATCH @ {rec.date.date()}: "
+                    f"record={rec.actual_return:.8f}, expected={expected:.8f}"
+                )
+
+        assert mismatches == 0, (
+            f"{mismatches} records have actual_return != H-day cumulative return"
+        )
+        _ok(
+            f"all {len(records)} records: actual_return == "
+            f"rolling({FORECAST_HORIZON}).sum().shift(-{FORECAST_HORIZON})"
+        )
+    except Exception as e:
+        _fail("actual_return equals H-day cumulative", e)
+
+
+def test_split_indices_embargo_reserves_forecast_horizon():
+    print(
+        f"24. _split_indices — last {FORECAST_HORIZON} rows are embargoed "
+        f"(usable = n - FORECAST_HORIZON)"
+    )
+    try:
+        harness = BacktestHarness(
+            adapters=[_StubAdapter("ml", 0.0)],
+            min_train_rows=60,
+            n_splits=4,
+        )
+        n = 300
+        splits = harness._split_indices(n)
+        usable = n - FORECAST_HORIZON  # expected ceiling on test indices
+
+        for i, (ts, te) in enumerate(splits):
+            assert te <= usable, (
+                f"fold {i}: test_end ({te}) exceeds usable boundary ({usable}); "
+                f"last {FORECAST_HORIZON} rows are not embargoed"
+            )
+
+        # Last fold should be close to the embargo boundary — gap is only integer-division rounding
+        last_te = splits[-1][1]
+        n_splits = harness.n_splits
+        fold_size = max(1, (usable - harness.min_train_rows) // n_splits)
+        assert usable - last_te < fold_size, (
+            f"last fold test_end={last_te} is more than one fold_size ({fold_size}) "
+            f"below usable={usable}; embargo may be over-cutting"
+        )
+
+        _ok(
+            f"all folds respect embargo; last fold ends at index {last_te} "
+            f"(usable={usable}, gap={usable - last_te}, n={n}, H={FORECAST_HORIZON})"
+        )
+    except Exception as e:
+        _fail("embargo reserves FORECAST_HORIZON rows", e)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -548,6 +693,12 @@ if __name__ == "__main__":
         test_walk_forward_produces_more_records,
         test_walk_forward_no_data_leakage,
         test_walk_forward_covers_most_of_history,
+        # ── Term-structure features (Prompt 2) ────────────────────────────────
+        test_build_feature_matrix_with_m2_gains_basis_columns,
+        test_build_feature_matrix_without_m2_matches_baseline,
+        # ── IC horizon / embargo (Prompt 3) ───────────────────────────────────
+        test_actual_return_equals_h_day_cumulative,
+        test_split_indices_embargo_reserves_forecast_horizon,
     ]:
         fn()
         print()
@@ -556,8 +707,9 @@ if __name__ == "__main__":
     if FAIL == 0:
         print(f"ALL {PASS} ASSERTIONS PASSED")
         print(
-            "Phase 5 CV upgrade complete: BacktestHarness now uses expanding-window "
-            "walk-forward cross-validation (n_splits=5 default)."
+            "Phase 5 CV + M2 term-structure + IC-horizon tests complete. "
+            "BacktestHarness uses expanding-window walk-forward CV (n_splits=5 default); "
+            "actual_return is H-day cumulative; basis/zscore/roll_yield features active when M2 supplied."
         )
     else:
         print(f"{PASS} passed  |  {FAIL} FAILED")

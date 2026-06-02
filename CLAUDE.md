@@ -21,6 +21,48 @@ Every new model, selectbox, or data-loading path added to this project **must** 
 
 ---
 
+## ⚠️ MODEL VERIFICATION RULE — MANDATORY FOR ALL MODELS
+**Every model, weight, prior, or parameter that is trained or implemented must be
+verified against outside resources before it ships.** This applies to new models
+and to changes to existing ones.
+
+### Required workflow
+1. **Check against external sources.** Before trusting a learned weight,
+   coefficient, edge, or prior, confirm it is economically/physically sensible
+   using outside resources (literature, industry data, domain references — use
+   web search when available).
+2. **Communicate the result to Charles — positive OR negative.** Always report
+   whether the verification confirmed, refuted, or was inconclusive about the
+   model's behaviour. Do not silently fix and move on; do not hide negative
+   findings.
+3. **Record it in the repository.** Append an entry to
+   [`MODEL_VERIFICATION_LOG.md`](MODEL_VERIFICATION_LOG.md) (repo root) with:
+   what was verified, the sources, the verdict, and what changed in code.
+
+### Why
+In-sample **correlation measures co-movement, not causation.** On 2026-06-01 the
+cascade topology edge weights were found to be economically inverted
+(Metals→Agriculture ranked near Energy→Agriculture) because they were derived
+from correlation alone. Outside sources showed energy→agriculture transmission
+dominates (natural gas = 70–80% of fertiliser cost). See the log for the full
+finding and remediation.
+
+### Economic-prior methodology (the fix pattern)
+When a learned cross-sector weight contradicts fundamentals, blend an economic
+prior in multiplicatively rather than overriding the data:
+- Priors live in `models/config.py::SECTOR_TRANSMISSION_PRIORS` (data-driven;
+  tunable without touching code), with `DEFAULT_TRANSMISSION_PRIOR` and
+  `UPSTREAM_PRIOR_STRENGTH` (α).
+- `models/sector_model.py::_economic_prior` computes
+  `prior = (1 − α) + α × economic_prior`; the upstream contribution becomes
+  `corr × upstream_forecast × damping × prior`.
+- `α = 0` reproduces legacy correlation-only behaviour (backward compatible);
+  `α = 1` applies the full prior.
+- Priors take effect during cascade **fitting**, so existing `cascade_forecasts`
+  rows reflect the blend only after the next `models/daily_retrain.py` run.
+
+---
+
 ## Database
 - **Backend:** PostgreSQL — `postgresql://charlesmerkel@localhost/commodities`
 - **SQLite is no longer used.** The old `data/commodities.db` file still exists but is not read by any code.

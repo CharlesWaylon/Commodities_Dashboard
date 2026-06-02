@@ -79,6 +79,61 @@ def load_price_matrix_from_db(
     return matrix
 
 
+def load_m2_price_matrix_from_db(
+    commodities: Optional[dict] = None,
+) -> pd.DataFrame:
+    """
+    Load second-nearby (M2) closing prices from price_history (interval='1d_m2').
+
+    Returns the same wide-format DataFrame as load_price_matrix_from_db() but
+    for M2 contracts only.  Columns are MODELING_COMMODITIES display names; rows
+    are trading dates.  Commodities without any M2 rows in the DB are absent
+    (not errored).  ETFs/proxies naturally have no M2 rows and are silently
+    omitted.
+
+    Returns an empty DataFrame if no M2 data has been ingested yet — callers
+    must handle this case (build_feature_matrix treats None/empty as a no-op).
+    """
+    if commodities is None:
+        commodities = MODELING_COMMODITIES
+
+    ticker_to_name = {v: k for k, v in commodities.items()}
+
+    query = """
+        SELECT c.ticker, ph.date,
+               COALESCE(ph.adjusted_close, ph.close) AS close
+        FROM price_history ph
+        JOIN commodities c ON c.id = ph.commodity_id
+        WHERE ph.interval = '1d_m2'
+          AND ph.close IS NOT NULL
+        ORDER BY ph.date
+    """
+    engine = get_engine()
+    with engine.connect() as _conn:
+        result = _conn.execute(text(query))
+        raw = pd.DataFrame(result.fetchall(), columns=result.keys())
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    raw["date"] = pd.to_datetime(raw["date"])
+    raw = raw[raw["ticker"].isin(ticker_to_name)]
+    if raw.empty:
+        return pd.DataFrame()
+
+    matrix = raw.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
+    matrix.index.name = "Date"
+    matrix = matrix.rename(columns=ticker_to_name)
+
+    present = [c for c in commodities if c in matrix.columns]
+    if not present:
+        return pd.DataFrame()
+
+    matrix = matrix[present]
+    matrix = matrix.ffill(limit=3)
+    return matrix
+
+
 def load_price_matrix(
     commodities: Optional[dict] = None,
     period: str = HISTORY_PERIOD,

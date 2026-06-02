@@ -51,12 +51,18 @@ from features.trigger_detectors import (
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _opec_df(in_window: bool = True, days: float = 0.0, n: int = 5) -> pd.DataFrame:
+def _opec_df(in_window: bool = True, days: float = 0.0, n: int = 5,
+             surprise_z: float = 2.0) -> pd.DataFrame:
+    # opec_surprise_z drives the (now surprise-based) detector; a large z inside
+    # the post-meeting window is a genuine OPEC surprise. Outside the window the
+    # column is 0.0, mirroring the sparse, event-gated overlay feature.
     idx = pd.date_range("2025-01-01", periods=n, freq="B")
+    z = surprise_z if in_window else 0.0
     return pd.DataFrame({
-        "is_opec_window": [in_window] * n,
-        "days_to_opec":   [days] * n,
-        "dxy_zscore63":   [0.5] * n,
+        "is_opec_window":  [in_window] * n,
+        "days_to_opec":    [days] * n,
+        "opec_surprise_z": [z] * n,
+        "dxy_zscore63":    [0.5] * n,
     }, index=idx)
 
 
@@ -226,9 +232,10 @@ def run_tests() -> None:
 
     # ── 20. detect_all — all four detectors fire ──────────────────────────────
     full_df = pd.DataFrame({
-        # OPEC
-        "is_opec_window": [True],
-        "days_to_opec":   [2.0],
+        # OPEC (surprise-driven: large post-meeting WTI reaction z)
+        "is_opec_window":  [True],
+        "days_to_opec":    [2.0],
+        "opec_surprise_z": [2.0],
         # DXY (3 consecutive rows needed — extend to 5)
         "dxy_zscore63":   [2.5],
         # ENSO

@@ -49,6 +49,7 @@ from typing import Optional
 
 from models.config import (
     COMMODITY_SECTORS,
+    FORECAST_HORIZON,
     MODELING_COMMODITIES,
     RANDOM_SEED,
     SECTOR_XGB_DEFAULTS,
@@ -58,16 +59,19 @@ from models.features import build_feature_matrix, build_target
 from models.model_signal import ModelSignal
 from models.broadcaster import SignalBroadcaster
 
-# Global fallback params (used only when sector lookup fails entirely)
+# Global fallback params (used only when sector lookup fails entirely).
+# n_estimators is a ceiling; early stopping (eval_set wired in fit()) will fire
+# well before this.  max_depth=4 → ≤16 leaves/tree; 200 trees → ≤3,200 total
+# leaves against ~4,300 fit rows so leaves ≪ training rows.
 XGB_PARAMS = dict(
-    n_estimators=500,
+    n_estimators=200,
     learning_rate=0.03,
     max_depth=4,
     subsample=0.8,
     colsample_bytree=0.8,
-    min_child_weight=10,
+    min_child_weight=15,
     reg_alpha=0.1,
-    reg_lambda=1.0,
+    reg_lambda=2.0,
     random_state=RANDOM_SEED,
     n_jobs=-1,
 )
@@ -170,16 +174,17 @@ class XGBoostForecaster(SignalBroadcaster):
         """
         Fit XGBoost with early stopping on a held-out validation slice.
 
-        Chronological split only — no shuffling. The validation slice is
-        taken from the middle of the training set to avoid contaminating
-        the final test period.
+        Chronological split only — no shuffling.  An embargo of FORECAST_HORIZON
+        rows is dropped at the fit/val boundary so that overlapping H-day targets
+        (consecutive rows share H-1 return observations) do not inflate the
+        early-stopping validation loss and cause premature stopping.
 
         Parameters
         ----------
         feat_df : pd.DataFrame
             Feature matrix from build_feature_matrix().
         target : pd.Series
-            Next-day log-return from build_target().
+            H-day forward cumulative log-return from build_target().
         """
         X_df, y = self._prepare(feat_df, target)
 
@@ -209,10 +214,20 @@ class XGBoostForecaster(SignalBroadcaster):
         X_train_all = X_df.iloc[:split]
         y_train_all = y.iloc[:split]
 
-        # Further split training into fit / early-stop validation
-        val_cut = int(len(X_train_all) * (1 - VALIDATION_FRACTION))
-        X_fit, X_val = X_train_all.iloc[:val_cut], X_train_all.iloc[val_cut:]
-        y_fit, y_val = y_train_all.iloc[:val_cut], y_train_all.iloc[val_cut:]
+        # Split into fit / early-stop validation with an H-day embargo gap.
+        # Without the embargo, overlapping H-day targets (rows i and i+1 share
+        # H-1 return observations) make the val loss autocorrelated and cause
+        # early stopping to fire too late.
+        val_cut     = int(len(X_train_all) * (1 - VALIDATION_FRACTION))
+        embargo_end = min(val_cut + FORECAST_HORIZON, len(X_train_all))
+        X_fit = X_train_all.iloc[:val_cut]
+        X_val = X_train_all.iloc[embargo_end:]
+        y_fit = y_train_all.iloc[:val_cut]
+        y_val = y_train_all.iloc[embargo_end:]
+        if X_val.empty:
+            # Fallback when the training slice is too short for an embargo gap
+            X_val = X_train_all.iloc[val_cut:]
+            y_val = y_train_all.iloc[val_cut:]
 
         self._scaler = StandardScaler()
         X_fit_sc = self._scaler.fit_transform(X_fit)
@@ -221,6 +236,8 @@ class XGBoostForecaster(SignalBroadcaster):
         self._model = xgb.XGBRegressor(**self._xgb_params)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            # early_stopping_rounds + eval_set together activate early stopping;
+            # both are required — omitting eval_set would silently ignore the rounds.
             self._model.set_params(early_stopping_rounds=EARLY_STOPPING_ROUNDS)
             self._model.fit(
                 X_fit_sc, y_fit,
@@ -268,7 +285,7 @@ class XGBoostForecaster(SignalBroadcaster):
     def predict_with_signal(
         self,
         features: pd.DataFrame,
-        horizon: int = 1,
+        horizon: int = FORECAST_HORIZON,
     ) -> ModelSignal:
         """
         Predict next-day return and emit a standardized ModelSignal.
