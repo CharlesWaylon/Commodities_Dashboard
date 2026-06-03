@@ -556,3 +556,48 @@ CI once a CI provider is chosen (deferred per Charles's call this session — lo
 runner only for now). The presentation layer is not yet a single package, so it is
 enforced as a forbidden *target*, not a root package; the page-taxonomy move lands
 in Phase 6.
+
+---
+
+## 2026-06-03 — Phase 1 fundamental ingestors: publication-lag approximations (DATA)
+
+**What was verified.** The release-timing assumptions baked into the three new
+free fundamental adapters (CFTC COT, EIA, USDA), since these drive point-in-time
+correctness — a wrong release_date silently re-introduces look-ahead.
+
+**Sources checked.**
+- *CFTC COT.* CFTC publishes the Commitments-of-Traders report each **Friday at
+  15:30 ET** for positions held the preceding **Tuesday** (cftc.gov COT release
+  schedule). → 3-calendar-day lag. **Confirmed.** Caveat: federal-holiday weeks
+  slip the release by ~1 day; the public Socrata dataset carries no publish
+  timestamp, so the fixed +3d is a documented approximation.
+- *EIA Weekly Petroleum Status Report.* Week ending Friday, released the following
+  **Wednesday ~10:30 ET** (eia.gov release calendar). → ~5-day lag. **Confirmed.**
+  *Weekly Natural Gas Storage Report* releases **Thursday** → 6-day lag, applied as
+  a per-series override. **Confirmed.**
+- *USDA WASDE / NASS QuickStats.* Reports release on scheduled dates well after the
+  reference period; QuickStats does not expose a clean per-row first-publish date.
+  A conservative **+30-day** lag is used pending wiring of the published WASDE
+  release calendar. **Inconclusive / conservative approximation** (errs toward
+  *later* visibility, which is the safe direction for anti-look-ahead).
+
+**Verdict.** ✅ Confirmed for COT and EIA (lags match official schedules);
+⚠️ conservative-approximation for USDA and for FRED (FredAdapter already documents
+its ALFRED-vintage gap). All lags err toward *delaying* visibility, so they cannot
+manufacture look-ahead — the failure mode is being slightly too cautious, never
+too optimistic.
+
+**What changed in code.** Added `data/adapters/{cftc,eia,usda}_adapter.py`
+(release-dated `_shape` transforms, network best-effort), the
+`services/{cot,eia,usda}_ingest.py` runners (idempotent, flag-gated by
+`FUNDAMENTAL_FEEDS_ENABLED`, launchd-schedulable), and `data/validation.py` (the
+portfolio-wide quality gate: staleness / outlier / calendar-gap / coverage) plus a
+flagged Data-Health console on `pages/5_Database.py` (`DATA_HEALTH_ENABLED`).
+
+**Follow-up (explicit task, not blocking).** Replace the fixed-lag approximations
+with exact release calendars: FRED→ALFRED realtime vintages; USDA→published WASDE
+calendar; COT→holiday-aware Friday. Tracked here so no signal silently assumes
+more precision than we have.
+
+**Reproduce / test.** `pytest data/` (adapter shaping + validation; network-free).
+Boundaries: `lint-imports`.
