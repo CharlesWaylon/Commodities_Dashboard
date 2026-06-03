@@ -601,3 +601,50 @@ more precision than we have.
 
 **Reproduce / test.** `pytest data/` (adapter shaping + validation; network-free).
 Boundaries: `lint-imports`.
+
+---
+
+## 2026-06-03 — Phase 1 live smoke test: CFTC/EIA validated, USDA corrected (DATA)
+
+**What was verified.** A bounded live ingest of each free fundamental feed into
+the real Postgres store, checking values, release-date math, the PIT invariant,
+and idempotency.
+
+**CFTC COT — ✅ confirmed.** WTI managed-money net (code 067651), 126 weekly rows
+2024→present. Net long ~73k–98k contracts (specs structurally net-long crude —
+correct magnitude). Release = Tuesday ref + 3d = Friday ✓. As-of a past date
+hides later releases; re-run stayed at 126 rows (idempotent) ✓.
+
+**EIA weekly stocks — ✅ confirmed (values), ⚠️ minor flag bug.** Crude ending
+stocks 433.7M bbl, nat-gas working storage 2,483 Bcf — both match published
+levels. Release lags correct (crude +5d, nat-gas +6d). **Bug:** the EIA v2
+``/seriesid/`` endpoint ignores the ``start`` param, so the runner pulls full
+history (1982→present) regardless of ``--start``. Harmless (idempotent, and full
+history is desirable for backfill) but ``--start`` is misleading — follow-up to
+move to the ``/v2/{route}/data`` endpoint with proper faceting.
+
+**USDA QuickStats — ⚠️ refuted then corrected.** First run was wrong in two ways:
+(1) every observation was stamped to ``Dec-31`` of its year, so the four quarterly
+Grain Stocks reads (Mar1/Jun1/Sep1/Dec1) collapsed onto one date — 99 API records
+deduped to 27, silently dropping 3 of every 4 quarters; (2) ``release_date`` was a
+fabricated ``Dec-31 + 30d``. **Fix:** ``reference_date`` now anchors to the first
+of the position month from ``end_code``; ``release_date`` now uses QuickStats'
+real ``load_time`` publish timestamp (revision reloads only push visibility later
+— safe for anti-look-ahead). Series renamed ``*_ENDING_STOCKS`` →
+``*_GRAIN_STOCKS`` since these are quarterly stocks, not WASDE carryout (the Sep1
+read ≈ marketing-year carryout). Stale rows purged and re-ingested: 99 rows, all
+four quarters preserved; Corn Sep1 2025 = 1.55B bu (trough) vs Dec1 = 13.3B
+(post-harvest) — textbook seasonality. **Verdict: corrected and confirmed.**
+
+**What changed in code.** Rewrote ``data/adapters/usda_adapter.py`` date logic
+(``_reference_date`` via end_code, new ``_release_date`` via load_time); renamed
+``services/usda_ingest.py`` DEFAULT_QUERIES keys; added quarterly + load_time
+adapter tests. Also added ``data.config.load_env()`` so the runners load ``.env``
+under launchd (keys were otherwise invisible).
+
+**Follow-ups (not blocking).** EIA ``--start`` faceting; USDA load_time is a load
+(not strictly first-print) timestamp — fine and conservative, but a published
+Grain Stocks release calendar would be exact.
+
+**Reproduce.** ``FUNDAMENTAL_FEEDS_ENABLED=true python -m services.{cot,eia,usda}_ingest``
+(needs EIA_API_KEY / USDA_QUICKSTATS_KEY in .env). Tests: ``pytest data/``.
