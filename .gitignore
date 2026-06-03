@@ -4,13 +4,18 @@
 !.env.example
 .streamlit/secrets.toml
 
-# ── Local Database ─────────────────────────────────────────────────────────────
-# The SQLite database contains your 5-year historical data.
-# It is large, local-only, and should never be committed.
-data/
+# ── Local Database & model artifacts ────────────────────────────────────────────
+# The SQLite database contains your 5-year historical data. It is large,
+# local-only, and should never be committed. NOTE: data/ is now a real source
+# package (data layer), so we ignore the binary artifacts that live in it rather
+# than the whole directory.
+data/commodities.db
+data/meta_predictor.pkl
+data/sector_params.json
 *.db
 *.sqlite
 *.sqlite3
+*.pkl
 
 # ── Internal Reports ───────────────────────────────────────────────────────────
 reports/
