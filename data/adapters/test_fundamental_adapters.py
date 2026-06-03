@@ -61,17 +61,34 @@ def test_eia_skips_missing_values():
     assert EiaAdapter()._shape("PET.X.W", raw).empty
 
 
-def test_usda_year_end_reference_and_lag():
-    raw = [{"year": "2025", "Value": "1,540,000", "reference_period_desc": "MARKETING YEAR"}]
-    row = UsdaAdapter()._shape("CORN_ENDING_STOCKS", raw).iloc[0]
-    assert row["value"] == 1540000.0  # comma stripped
+def test_usda_quarterly_reference_from_end_code():
+    # The four quarterly position reads must land on distinct first-of-month dates,
+    # not collapse onto year-end.
+    raw = [
+        {"year": "2025", "end_code": "03", "Value": "8,147,437,000", "load_time": "2025-03-31 12:00:00.000"},
+        {"year": "2025", "end_code": "06", "Value": "4,642,894,000", "load_time": "2025-06-30 12:00:00.000"},
+        {"year": "2025", "end_code": "09", "Value": "1,551,286,000", "load_time": "2025-09-30 12:00:00.000"},
+        {"year": "2025", "end_code": "12", "Value": "13,305,825,000", "load_time": "2026-01-12 12:00:00.000"},
+    ]
+    df = UsdaAdapter()._shape("CORN_GRAIN_STOCKS", raw).sort_values("reference_date")
+    assert list(df["reference_date"]) == [date(2025, 3, 1), date(2025, 6, 1),
+                                          date(2025, 9, 1), date(2025, 12, 1)]
+    # release_date comes from the real load_time, not a fixed lag.
+    assert list(df["release_date"])[0] == date(2025, 3, 31)
+    assert list(df["release_date"])[-1] == date(2026, 1, 12)
+    assert df.iloc[0]["value"] == 8147437000.0  # commas stripped
+
+
+def test_usda_falls_back_to_year_end_and_lag_without_codes():
+    raw = [{"year": "2025", "Value": "1,540,000"}]  # no end_code, no load_time
+    row = UsdaAdapter()._shape("X", raw).iloc[0]
     assert row["reference_date"] == date(2025, 12, 31)
-    assert row["release_date"] == date(2026, 1, 30)  # +30 days default
+    assert row["release_date"] == date(2026, 1, 30)  # +30d default lag
 
 
 def test_usda_skips_suppressed_values():
     raw = [{"year": "2025", "Value": "(D)"}, {"year": None, "Value": "5"}]
-    assert UsdaAdapter()._shape("CORN_ENDING_STOCKS", raw).empty
+    assert UsdaAdapter()._shape("CORN_GRAIN_STOCKS", raw).empty
 
 
 def test_adapters_return_empty_frame_on_no_data():

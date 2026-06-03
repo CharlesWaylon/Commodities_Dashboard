@@ -12,12 +12,13 @@ period (year/marketing-year).
 
 RELEASE TIMING (point-in-time correctness)
 ──────────────────────────────────────────
-USDA reports (WASDE, Grain Stocks, Crop Production) are released on scheduled
-dates well after the reference period closes. QuickStats exposes
-``load_time`` / report metadata but not a clean first-publish date per row, so we
-approximate ``release_date = reference_date + publication_lag_days`` (default 30;
-override per series). Documented approximation, flagged in MODEL_VERIFICATION_LOG;
-a later upgrade to the published WASDE release calendar is an explicit task.
+We use QuickStats' real ``load_time`` (when USDA loaded/published the row) as the
+``release_date`` — a true timestamp, not a fixed lag. Revision reloads carry a
+later load_time, which only delays visibility (safe for anti-look-ahead). When
+load_time is missing we fall back to ``reference_date + publication_lag_days``
+(default 30). The ``reference_date`` is anchored to the first of the position
+month from ``end_code`` (the quarterly Grain Stocks Mar1/Jun1/Sep1/Dec1 reads),
+so the four quarterly observations in a year no longer collapse onto one date.
 
 DATA SOURCE
 ───────────
@@ -62,8 +63,12 @@ class UsdaAdapter(FundamentalAdapter):
         return int(self.per_series_lag_days.get(series_id, self.publication_lag_days))
 
     def _reference_date(self, rec: dict) -> Optional[pd.Timestamp]:
-        """End-of-period date from QuickStats fields (year, optional end-code)."""
-        end_code = rec.get("reference_period_desc") or rec.get("end_code")
+        """
+        Period the figure describes. QuickStats "POINT IN TIME" stocks carry the
+        position month in ``end_code`` (e.g. 03/06/09/12 for the quarterly Grain
+        Stocks Mar1/Jun1/Sep1/Dec1 reads). We anchor to the first of that month.
+        Annual rows (no usable end_code) fall back to calendar year-end.
+        """
         year = rec.get("year")
         if year is None:
             return None
@@ -71,13 +76,32 @@ class UsdaAdapter(FundamentalAdapter):
             yr = int(year)
         except (ValueError, TypeError):
             return None
-        # Default to calendar year-end; QuickStats marketing-year rows are
-        # year-stamped, and the lag-based release handles the publication offset.
+        try:
+            month = int(rec.get("end_code"))
+        except (ValueError, TypeError):
+            month = None
+        if month and 1 <= month <= 12:
+            return pd.Timestamp(year=yr, month=month, day=1)
         return pd.Timestamp(year=yr, month=12, day=31)
+
+    def _release_date(self, rec: dict, ref: pd.Timestamp, series_id: str) -> pd.Timestamp:
+        """
+        Prefer QuickStats' real ``load_time`` (when USDA actually published/loaded
+        the row) — a true timestamp beats a fixed lag. Revision reloads carry a
+        later load_time, which only pushes visibility *later* (safe for
+        anti-look-ahead). Fall back to reference_date + publication lag when
+        load_time is absent.
+        """
+        lt = rec.get("load_time")
+        if lt:
+            try:
+                return pd.Timestamp(lt).normalize()
+            except (ValueError, TypeError):
+                pass
+        return ref + timedelta(days=self._lag(series_id))
 
     # ── pure transform (testable core) ────────────────────────────────────────
     def _shape(self, series_id: str, data_rows: List[dict]) -> pd.DataFrame:
-        lag = self._lag(series_id)
         rows = []
         for rec in data_rows:
             ref = self._reference_date(rec)
@@ -88,12 +112,13 @@ class UsdaAdapter(FundamentalAdapter):
                 val = float(str(raw_val).replace(",", ""))
             except (ValueError, TypeError):
                 continue
+            release = self._release_date(rec, ref, series_id)
             rows.append(
                 {
                     "source": self.source_name,
                     "series_id": series_id,
                     "reference_date": ref.date(),
-                    "release_date": (ref + timedelta(days=lag)).date(),
+                    "release_date": release.date(),
                     "value": val,
                 }
             )

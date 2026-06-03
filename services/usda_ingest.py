@@ -25,22 +25,23 @@ from data import fundamental_store as store
 
 logger = logging.getLogger(__name__)
 
-# series_id -> QuickStats query. Ending stocks (STOCKS, ENDING) at the national
-# level, annual marketing year. Non-engineers can extend this map.
+# series_id -> QuickStats query. These are the quarterly Grain Stocks "POINT IN
+# TIME" position reads (Mar1/Jun1/Sep1/Dec1) at the national level — the Sep1 read
+# approximates marketing-year carryout. Non-engineers can extend this map.
 DEFAULT_QUERIES = {
-    "CORN_ENDING_STOCKS": {
+    "CORN_GRAIN_STOCKS": {
         "commodity_desc": "CORN",
         "statisticcat_desc": "STOCKS",
         "short_desc": "CORN, GRAIN - STOCKS, MEASURED IN BU",
         "agg_level_desc": "NATIONAL",
     },
-    "SOYBEANS_ENDING_STOCKS": {
+    "SOYBEANS_GRAIN_STOCKS": {
         "commodity_desc": "SOYBEANS",
         "statisticcat_desc": "STOCKS",
         "short_desc": "SOYBEANS - STOCKS, MEASURED IN BU",
         "agg_level_desc": "NATIONAL",
     },
-    "WHEAT_ENDING_STOCKS": {
+    "WHEAT_GRAIN_STOCKS": {
         "commodity_desc": "WHEAT",
         "statisticcat_desc": "STOCKS",
         "short_desc": "WHEAT - STOCKS, MEASURED IN BU",
