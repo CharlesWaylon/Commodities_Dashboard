@@ -1,0 +1,73 @@
+# Layer-boundary contracts — the seams of the data → signal → risk/portfolio →
+# presentation architecture (CLAUDE.md DASHBOARD EVOLUTION RULE #5).
+#
+# These contracts make it physically impossible for a future change to drag
+# Streamlit/presentation logic down into the signal/portfolio/evaluation layers,
+# or to let a lower layer reach UP into a higher one. Run locally with:
+#
+#     lint-imports
+#
+# (import-linter is in requirements.txt). The presentation layer (app.py / pages/)
+# is NOT yet a single package, so it is referenced as a forbidden TARGET rather
+# than a root package here; the page-taxonomy package move lands in Phase 6.
+
+[importlinter]
+root_packages =
+    data
+    signals
+    portfolio
+    evaluation
+# Required because the forbidden_modules below name external packages (streamlit).
+include_external_packages = True
+
+# ── The data layer is the floor: no presentation, no upward layers ────────────
+# (It may still reuse legacy models.* / features.* fetch helpers during the
+# transition — those are not forbidden here. The clearly-wrong upward/sideways
+# imports are.)
+[importlinter:contract:data-is-the-floor]
+name = data must not import streamlit / pages / app / signals / portfolio / evaluation
+type = forbidden
+source_modules =
+    data
+forbidden_modules =
+    streamlit
+    app
+    pages
+    signals
+    portfolio
+    evaluation
+
+# ── The signal layer is pure: no presentation, no portfolio, no gate ──────────
+[importlinter:contract:signals-isolated]
+name = signals must not import streamlit / pages / app / portfolio / evaluation
+type = forbidden
+source_modules =
+    signals
+forbidden_modules =
+    streamlit
+    app
+    pages
+    portfolio
+    evaluation
+
+# ── The portfolio layer may use signals, but never presentation ───────────────
+[importlinter:contract:portfolio-no-presentation]
+name = portfolio must not import streamlit / pages / app
+type = forbidden
+source_modules =
+    portfolio
+forbidden_modules =
+    streamlit
+    app
+    pages
+
+# ── The gate may read data + signals, but never presentation ──────────────────
+[importlinter:contract:evaluation-no-presentation]
+name = evaluation must not import streamlit / pages / app
+type = forbidden
+source_modules =
+    evaluation
+forbidden_modules =
+    streamlit
+    app
+    pages

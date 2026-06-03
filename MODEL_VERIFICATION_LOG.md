@@ -488,3 +488,163 @@ series accrues forward depth (months of daily observations). This is by design
 all 26 futures populate their near-dated contracts and forward accrual begins for
 the whole universe; the carry IC contribution remains to be measured once the
 stitched depth crosses the coverage gate.
+
+---
+
+## 2026-06-03 — Phase 0: the out-of-sample evaluation gate + layer seams
+
+**What was built.** The foundation of the dashboard restructure — the *gate* that
+every future signal must pass before going live (North Star principle #1). This is
+infrastructure, not a model promotion, but the first real signal was run through
+it and its verdict is reported here per the rule.
+
+New code (branch `feat/phase0-eval-gate`, behind no user-facing flag — it is
+headless research infrastructure):
+- `signals/base.py` — the single `Signal` interface every edge implements
+  (`compute(asof, panel)`, mandatory non-empty `economic_rationale`, multi-horizon
+  `{5,10,21}`) + a name registry.
+- `signals/momentum.py` — `momentum_xs`, the first real signal: 12-1
+  cross-sectional momentum (long winners / short losers), vol-scaled, z-scored.
+- `evaluation/harness.py` — the gate: per-date cross-sectional Spearman IC,
+  IC information ratio + t-stat on a **de-overlapped** subsample (dates spaced ≥ H
+  apart, so overlapping H-day targets don't inflate significance), directional hit
+  rate, **net-of-cost** long-short PnL (`evaluation/costs.py`, 10 bps/side),
+  walk-forward fold sign-stability, and a PROMOTE/REJECT contract. Writes the
+  `signal_scorecard` table and a human-readable diff vs the prior run.
+- `evaluation/point_in_time.py` + `evaluation/test_point_in_time.py` — the
+  anti-look-ahead property test: for every registered signal, `compute(asof=t)`
+  must not change when future rows are appended. A deliberately-leaky fixture
+  confirms the test bites.
+- `signal_scorecard` table (`database/models.py::SignalScorecardRow`) — the
+  append-only experiment ledger backing this log.
+- `.importlinter` — layer-boundary contracts (signals must not import
+  streamlit/pages/app/portfolio/evaluation; portfolio/evaluation must not import
+  presentation). `lint-imports` → **3 kept, 0 broken**.
+
+**Verification of `momentum_xs` against external sources.** Cross-sectional
+commodity momentum is one of the most robustly documented factor premia
+(Erb & Harvey 2006; Miffre & Rallis 2007; Asness, Moskowitz & Pedersen 2013 "Value
+and Momentum Everywhere"). So the *economic rationale is confirmed* — this is not a
+data-mined pattern. The question the gate answers is whether THIS construction, on
+THIS 40-instrument universe, after costs, clears the bar.
+
+**Verdict: ⚠️ REJECT (gate working as designed; result is honest, not a failure).**
+On ~5y of daily data (1,580 daily IC obs):
+
+| H  | OOS IC | IC IR | t-stat | hit | net LS Sharpe | fold sign-stability |
+|----|--------|-------|--------|-----|---------------|---------------------|
+| 5  | 0.032  | 0.136 | 2.42   | 51.0% | 0.38 | 5/5 positive |
+| 10 | 0.038  | 0.160 | 2.01   | 51.3% | 0.43 | 5/5 positive |
+| 21 | 0.040  | 0.191 | 1.67   | 51.5% | 0.47 | 4/5 positive |
+
+The IC is **positive, sign-stable across every walk-forward fold, and the IC
+t-stat exceeds 2 at H=5/10** — i.e. there is a real, weak edge, exactly as theory
+predicts (and it strengthens with horizon, as momentum should). It is rejected
+only because the IC **information ratio (0.14–0.19) is below the 0.30 promotion
+bar**. This is the intended behaviour: a single weak signal is not promotable
+alone. The North Star is breadth (Edge = IC × √breadth) — momentum_xs is a
+*survivor to be combined*, not a standalone live model. It will re-enter the gate
+as one input to the honest ensemble in Phase 4. No code was changed in response to
+the verdict; the signal is recorded as a validated-but-not-yet-promotable edge.
+
+**Reproduce:** `python -m evaluation.harness --signal momentum_xs --horizons 5,10,21`
+(persists to `signal_scorecard`; add `--no-db` to skip). Tests:
+`pytest signals/ evaluation/`. Boundaries: `lint-imports`.
+
+**Pending (Phase 0 follow-ups, not blocking).** Wire `lint-imports` + `pytest` into
+CI once a CI provider is chosen (deferred per Charles's call this session — local
+runner only for now). The presentation layer is not yet a single package, so it is
+enforced as a forbidden *target*, not a root package; the page-taxonomy move lands
+in Phase 6.
+
+---
+
+## 2026-06-03 — Phase 1 fundamental ingestors: publication-lag approximations (DATA)
+
+**What was verified.** The release-timing assumptions baked into the three new
+free fundamental adapters (CFTC COT, EIA, USDA), since these drive point-in-time
+correctness — a wrong release_date silently re-introduces look-ahead.
+
+**Sources checked.**
+- *CFTC COT.* CFTC publishes the Commitments-of-Traders report each **Friday at
+  15:30 ET** for positions held the preceding **Tuesday** (cftc.gov COT release
+  schedule). → 3-calendar-day lag. **Confirmed.** Caveat: federal-holiday weeks
+  slip the release by ~1 day; the public Socrata dataset carries no publish
+  timestamp, so the fixed +3d is a documented approximation.
+- *EIA Weekly Petroleum Status Report.* Week ending Friday, released the following
+  **Wednesday ~10:30 ET** (eia.gov release calendar). → ~5-day lag. **Confirmed.**
+  *Weekly Natural Gas Storage Report* releases **Thursday** → 6-day lag, applied as
+  a per-series override. **Confirmed.**
+- *USDA WASDE / NASS QuickStats.* Reports release on scheduled dates well after the
+  reference period; QuickStats does not expose a clean per-row first-publish date.
+  A conservative **+30-day** lag is used pending wiring of the published WASDE
+  release calendar. **Inconclusive / conservative approximation** (errs toward
+  *later* visibility, which is the safe direction for anti-look-ahead).
+
+**Verdict.** ✅ Confirmed for COT and EIA (lags match official schedules);
+⚠️ conservative-approximation for USDA and for FRED (FredAdapter already documents
+its ALFRED-vintage gap). All lags err toward *delaying* visibility, so they cannot
+manufacture look-ahead — the failure mode is being slightly too cautious, never
+too optimistic.
+
+**What changed in code.** Added `data/adapters/{cftc,eia,usda}_adapter.py`
+(release-dated `_shape` transforms, network best-effort), the
+`services/{cot,eia,usda}_ingest.py` runners (idempotent, flag-gated by
+`FUNDAMENTAL_FEEDS_ENABLED`, launchd-schedulable), and `data/validation.py` (the
+portfolio-wide quality gate: staleness / outlier / calendar-gap / coverage) plus a
+flagged Data-Health console on `pages/5_Database.py` (`DATA_HEALTH_ENABLED`).
+
+**Follow-up (explicit task, not blocking).** Replace the fixed-lag approximations
+with exact release calendars: FRED→ALFRED realtime vintages; USDA→published WASDE
+calendar; COT→holiday-aware Friday. Tracked here so no signal silently assumes
+more precision than we have.
+
+**Reproduce / test.** `pytest data/` (adapter shaping + validation; network-free).
+Boundaries: `lint-imports`.
+
+---
+
+## 2026-06-03 — Phase 1 live smoke test: CFTC/EIA validated, USDA corrected (DATA)
+
+**What was verified.** A bounded live ingest of each free fundamental feed into
+the real Postgres store, checking values, release-date math, the PIT invariant,
+and idempotency.
+
+**CFTC COT — ✅ confirmed.** WTI managed-money net (code 067651), 126 weekly rows
+2024→present. Net long ~73k–98k contracts (specs structurally net-long crude —
+correct magnitude). Release = Tuesday ref + 3d = Friday ✓. As-of a past date
+hides later releases; re-run stayed at 126 rows (idempotent) ✓.
+
+**EIA weekly stocks — ✅ confirmed (values), ⚠️ minor flag bug.** Crude ending
+stocks 433.7M bbl, nat-gas working storage 2,483 Bcf — both match published
+levels. Release lags correct (crude +5d, nat-gas +6d). **Bug:** the EIA v2
+``/seriesid/`` endpoint ignores the ``start`` param, so the runner pulls full
+history (1982→present) regardless of ``--start``. Harmless (idempotent, and full
+history is desirable for backfill) but ``--start`` is misleading — follow-up to
+move to the ``/v2/{route}/data`` endpoint with proper faceting.
+
+**USDA QuickStats — ⚠️ refuted then corrected.** First run was wrong in two ways:
+(1) every observation was stamped to ``Dec-31`` of its year, so the four quarterly
+Grain Stocks reads (Mar1/Jun1/Sep1/Dec1) collapsed onto one date — 99 API records
+deduped to 27, silently dropping 3 of every 4 quarters; (2) ``release_date`` was a
+fabricated ``Dec-31 + 30d``. **Fix:** ``reference_date`` now anchors to the first
+of the position month from ``end_code``; ``release_date`` now uses QuickStats'
+real ``load_time`` publish timestamp (revision reloads only push visibility later
+— safe for anti-look-ahead). Series renamed ``*_ENDING_STOCKS`` →
+``*_GRAIN_STOCKS`` since these are quarterly stocks, not WASDE carryout (the Sep1
+read ≈ marketing-year carryout). Stale rows purged and re-ingested: 99 rows, all
+four quarters preserved; Corn Sep1 2025 = 1.55B bu (trough) vs Dec1 = 13.3B
+(post-harvest) — textbook seasonality. **Verdict: corrected and confirmed.**
+
+**What changed in code.** Rewrote ``data/adapters/usda_adapter.py`` date logic
+(``_reference_date`` via end_code, new ``_release_date`` via load_time); renamed
+``services/usda_ingest.py`` DEFAULT_QUERIES keys; added quarterly + load_time
+adapter tests. Also added ``data.config.load_env()`` so the runners load ``.env``
+under launchd (keys were otherwise invisible).
+
+**Follow-ups (not blocking).** EIA ``--start`` faceting; USDA load_time is a load
+(not strictly first-print) timestamp — fine and conservative, but a published
+Grain Stocks release calendar would be exact.
+
+**Reproduce.** ``FUNDAMENTAL_FEEDS_ENABLED=true python -m services.{cot,eia,usda}_ingest``
+(needs EIA_API_KEY / USDA_QUICKSTATS_KEY in .env). Tests: ``pytest data/``.

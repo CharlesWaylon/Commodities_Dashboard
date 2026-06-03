@@ -658,3 +658,88 @@ class CausalMonitoringLog(Base):
 
     def __repr__(self):
         return f"<CausalMonitoringLog {self.logged_at[:10]} n_alerts={self.n_alerts}>"
+
+
+class SignalScorecardRow(Base):
+    """
+    Out-of-sample gate scorecard — one row per (run, signal, horizon).
+
+    This is the experiment ledger that backs the CLAUDE.md gate rule: every
+    evaluation.harness run records its costed, walk-forward, look-ahead-safe
+    verdict here so a signal's promotability is auditable over time.
+    Written by evaluation/harness.py::persist_scorecard.
+    UNIQUE(run_at, signal_name, horizon).
+    """
+    __tablename__ = "signal_scorecard"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    run_at            = Column(String(50),  nullable=False)   # UTC ISO timestamp of the harness run
+    signal_name       = Column(String(100), nullable=False)
+    horizon           = Column(Integer,     nullable=False)   # trading days (5/10/21/…)
+    n_obs             = Column(Integer,     nullable=False)   # daily cross-sectional IC observations
+    ic_mean           = Column(Float,       nullable=True)    # OOS Spearman IC (de-overlapped mean)
+    ic_ir             = Column(Float,       nullable=True)    # IC information ratio
+    ic_tstat          = Column(Float,       nullable=True)
+    hit_rate          = Column(Float,       nullable=True)
+    ls_sharpe_net     = Column(Float,       nullable=True)    # net-of-cost long-short Sharpe
+    ls_return_net_ann = Column(Float,       nullable=True)    # net-of-cost annualised LS return
+    avg_turnover      = Column(Float,       nullable=True)
+    cost_bps          = Column(Float,       nullable=True)
+    verdict           = Column(String(20),  nullable=False)   # "promote" | "reject"
+    detail_json       = Column(Text,        nullable=True)    # full HorizonScorecard (folds, reasons)
+    config_json       = Column(Text,        nullable=True)
+    inserted_at       = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("run_at", "signal_name", "horizon", name="uq_scorecard_run_signal_horizon"),
+        Index("ix_scorecard_signal", "signal_name", "run_at"),
+        Index("ix_scorecard_verdict", "verdict", "run_at"),
+    )
+
+    def __repr__(self):
+        return f"<SignalScorecardRow {self.signal_name} H={self.horizon} {self.verdict} @ {self.run_at[:10]}>"
+
+
+class FundamentalObservation(Base):
+    """
+    Point-in-time store for release-dated fundamentals (COT / EIA / USDA / FRED).
+
+    The defining feature is the pair of dates:
+      reference_date — the period the datum DESCRIBES (e.g. the Tuesday a COT
+                       report counts positions for; the week an EIA stock level
+                       covers).
+      release_date   — when the datum became PUBLIC (publication lag). A signal
+                       computing as-of date t may only read rows with
+                       release_date <= t. This is what makes the backtest honest:
+                       EIA/WASDE/COT are published with a delay, so keying off
+                       release_date (not reference_date) prevents look-ahead.
+
+    Written by the *_ingest.py services via data/fundamental_store.write_observations.
+    Read via data/fundamental_store.get_asof(date).
+    UNIQUE(source, series_id, reference_date, release_date) — idempotent upserts;
+    a revised vintage of the same reference_date lands as a new release_date row.
+    """
+    __tablename__ = "fundamental_observations"
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    source         = Column(String(30),  nullable=False)   # "cftc_cot" | "eia" | "usda" | "fred"
+    series_id      = Column(String(120), nullable=False)   # vendor series identifier
+    reference_date = Column(Date,        nullable=False)    # period the value describes
+    release_date   = Column(Date,        nullable=False)    # when it became public (PIT key)
+    value          = Column(Float,       nullable=False)
+    unit           = Column(String(40),  nullable=True)
+    instrument     = Column(String(100), nullable=True)    # display name when mappable to the universe
+    meta_json      = Column(Text,        nullable=True)     # source-specific extras
+    inserted_at    = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("source", "series_id", "reference_date", "release_date",
+                         name="uq_fundobs_source_series_ref_release"),
+        Index("ix_fundobs_series_release", "series_id", "release_date"),
+        Index("ix_fundobs_source_release", "source", "release_date"),
+        Index("ix_fundobs_instrument", "instrument", "release_date"),
+    )
+
+    def __repr__(self):
+        return (f"<FundamentalObservation {self.source}:{self.series_id} "
+                f"ref={self.reference_date} rel={self.release_date} v={self.value}>")
