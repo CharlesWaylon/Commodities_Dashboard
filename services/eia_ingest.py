@@ -18,7 +18,7 @@ import logging
 from typing import Iterable, Optional
 
 from data.adapters.eia_adapter import EiaAdapter
-from data.config import fundamental_feeds_enabled
+from data.config import fundamental_feeds_enabled, load_env
 from data import fundamental_store as store
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ NAT_GAS_LAG_DAYS = {"NG.NW2_EPG0_SWO_R48_BCF.W": 6}
 
 
 def run(series_ids: Optional[Iterable[str]] = None, start: Optional[str] = None) -> int:
+    load_env()
     if not fundamental_feeds_enabled():
         logger.info("eia_ingest: FUNDAMENTAL_FEEDS_ENABLED is off — skipping.")
         return 0

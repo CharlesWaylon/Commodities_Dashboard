@@ -21,7 +21,7 @@ import logging
 from typing import Iterable, Optional
 
 from data.adapters.cftc_adapter import CftcAdapter
-from data.config import fundamental_feeds_enabled
+from data.config import fundamental_feeds_enabled, load_env
 from data import fundamental_store as store
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ DEFAULT_SERIES = {
 
 def run(series_ids: Optional[Iterable[str]] = None, start: Optional[str] = None) -> int:
     """Fetch COT net managed-money positioning and upsert; returns rows written."""
+    load_env()
     if not fundamental_feeds_enabled():
         logger.info("cot_ingest: FUNDAMENTAL_FEEDS_ENABLED is off — skipping.")
         return 0

@@ -11,6 +11,22 @@ from __future__ import annotations
 import os
 
 
+def load_env() -> None:
+    """
+    Load .env into the process environment (idempotent, best-effort).
+
+    The ingest runners call this on entry so API keys resolve identically whether
+    invoked from an interactive shell or from launchd (which has no exported shell
+    environment). Mirrors the load_dotenv() convention in features/macro_overlays.
+    """
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except Exception:
+        pass
+
+
 def _flag(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:

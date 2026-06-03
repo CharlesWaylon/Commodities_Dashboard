@@ -20,7 +20,7 @@ import logging
 from typing import Iterable, Optional
 
 from data.adapters.usda_adapter import UsdaAdapter
-from data.config import fundamental_feeds_enabled
+from data.config import fundamental_feeds_enabled, load_env
 from data import fundamental_store as store
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ DEFAULT_QUERIES = {
 
 
 def run(series_ids: Optional[Iterable[str]] = None, start: Optional[str] = None) -> int:
+    load_env()
     if not fundamental_feeds_enabled():
         logger.info("usda_ingest: FUNDAMENTAL_FEEDS_ENABLED is off — skipping.")
         return 0
