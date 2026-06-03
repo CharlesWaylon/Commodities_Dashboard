@@ -130,6 +130,50 @@ if info["price_rows"] > 0:
     st.dataframe(coverage, use_container_width=True, hide_index=True)
     st.divider()
 
+    # ── Data-Health Console (flagged: DATA_HEALTH_ENABLED) ──────────────────────
+    # Additive surface per the Evolution Rule — off by default, the page is
+    # unchanged until the flag is set. All computation lives in data.validation;
+    # the page only renders the result.
+    try:
+        from data.config import data_health_enabled
+        _health_on = data_health_enabled()
+    except Exception:
+        _health_on = False
+
+    if _health_on:
+        st.subheader("🩺 Data-Health Console")
+        st.caption("Portfolio-wide quality gate — staleness, outliers, calendar gaps, coverage")
+        try:
+            from data import universe
+            from data.validation import run_quality_report
+
+            panel = df.pivot_table(index="Date", columns="Ticker", values="Close").sort_index()
+            try:
+                expected = list(universe.tickers())
+            except Exception:
+                expected = None
+            report = run_quality_report(panel, expected=expected)
+
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("Status", "✅ PASS" if report.ok else "❌ FAIL")
+            h2.metric("Instruments", report.n_instruments)
+            h3.metric("Errors", len(report.of_severity("error")))
+            h4.metric("Warnings", len(report.of_severity("warn")))
+
+            issues = report.to_frame()
+            if issues.empty:
+                st.success("No data-quality issues detected.")
+            else:
+                sev_filter = st.multiselect(
+                    "Severity", options=["error", "warn", "info"],
+                    default=["error", "warn"],
+                )
+                shown = issues[issues["severity"].isin(sev_filter)] if sev_filter else issues
+                st.dataframe(shown, use_container_width=True, hide_index=True)
+        except Exception as exc:  # never let the console crash the page
+            st.warning(f"Data-health console unavailable: {exc}")
+        st.divider()
+
     # ── Raw Data Viewer ────────────────────────────────────────────────────────
     st.subheader("🔍 Raw Data Viewer")
     commodities_in_db = sorted(df["Name"].unique().tolist())
