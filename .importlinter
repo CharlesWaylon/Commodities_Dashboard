@@ -13,11 +13,29 @@
 
 [importlinter]
 root_packages =
+    data
     signals
     portfolio
     evaluation
 # Required because the forbidden_modules below name external packages (streamlit).
 include_external_packages = True
+
+# ── The data layer is the floor: no presentation, no upward layers ────────────
+# (It may still reuse legacy models.* / features.* fetch helpers during the
+# transition — those are not forbidden here. The clearly-wrong upward/sideways
+# imports are.)
+[importlinter:contract:data-is-the-floor]
+name = data must not import streamlit / pages / app / signals / portfolio / evaluation
+type = forbidden
+source_modules =
+    data
+forbidden_modules =
+    streamlit
+    app
+    pages
+    signals
+    portfolio
+    evaluation
 
 # ── The signal layer is pure: no presentation, no portfolio, no gate ──────────
 [importlinter:contract:signals-isolated]
