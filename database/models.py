@@ -658,3 +658,43 @@ class CausalMonitoringLog(Base):
 
     def __repr__(self):
         return f"<CausalMonitoringLog {self.logged_at[:10]} n_alerts={self.n_alerts}>"
+
+
+class SignalScorecardRow(Base):
+    """
+    Out-of-sample gate scorecard — one row per (run, signal, horizon).
+
+    This is the experiment ledger that backs the CLAUDE.md gate rule: every
+    evaluation.harness run records its costed, walk-forward, look-ahead-safe
+    verdict here so a signal's promotability is auditable over time.
+    Written by evaluation/harness.py::persist_scorecard.
+    UNIQUE(run_at, signal_name, horizon).
+    """
+    __tablename__ = "signal_scorecard"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    run_at            = Column(String(50),  nullable=False)   # UTC ISO timestamp of the harness run
+    signal_name       = Column(String(100), nullable=False)
+    horizon           = Column(Integer,     nullable=False)   # trading days (5/10/21/…)
+    n_obs             = Column(Integer,     nullable=False)   # daily cross-sectional IC observations
+    ic_mean           = Column(Float,       nullable=True)    # OOS Spearman IC (de-overlapped mean)
+    ic_ir             = Column(Float,       nullable=True)    # IC information ratio
+    ic_tstat          = Column(Float,       nullable=True)
+    hit_rate          = Column(Float,       nullable=True)
+    ls_sharpe_net     = Column(Float,       nullable=True)    # net-of-cost long-short Sharpe
+    ls_return_net_ann = Column(Float,       nullable=True)    # net-of-cost annualised LS return
+    avg_turnover      = Column(Float,       nullable=True)
+    cost_bps          = Column(Float,       nullable=True)
+    verdict           = Column(String(20),  nullable=False)   # "promote" | "reject"
+    detail_json       = Column(Text,        nullable=True)    # full HorizonScorecard (folds, reasons)
+    config_json       = Column(Text,        nullable=True)
+    inserted_at       = Column(String(50),  nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("run_at", "signal_name", "horizon", name="uq_scorecard_run_signal_horizon"),
+        Index("ix_scorecard_signal", "signal_name", "run_at"),
+        Index("ix_scorecard_verdict", "verdict", "run_at"),
+    )
+
+    def __repr__(self):
+        return f"<SignalScorecardRow {self.signal_name} H={self.horizon} {self.verdict} @ {self.run_at[:10]}>"
