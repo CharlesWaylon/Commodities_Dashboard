@@ -134,6 +134,64 @@ def load_m2_price_matrix_from_db(
     return matrix
 
 
+def load_m1_raw_matrix_from_db(
+    commodities: Optional[dict] = None,
+) -> pd.DataFrame:
+    """
+    Load the genuine front (M1) RAW closing prices from price_history
+    (interval='1d_m1_raw').
+
+    These are the stitched constant-front legs produced by pipeline/stitch_m2.py —
+    the *raw* close of whichever listed contract is the true front on each date.
+    Pair them with load_m2_price_matrix_from_db() so basis = log(M1_raw / M2_raw)
+    is computed from two legs in the SAME contract universe (no roll-adjusted vs
+    raw mixing, no fixed far-dated contract masquerading as M2).
+
+    Returns the same wide-format DataFrame as load_price_matrix_from_db().
+    Returns an empty DataFrame if no '1d_m1_raw' data exists yet — callers must
+    handle this (build_feature_matrix falls back to the continuous front when the
+    raw front is absent).
+    """
+    if commodities is None:
+        commodities = MODELING_COMMODITIES
+
+    ticker_to_name = {v: k for k, v in commodities.items()}
+
+    query = """
+        SELECT c.ticker, ph.date,
+               COALESCE(ph.adjusted_close, ph.close) AS close
+        FROM price_history ph
+        JOIN commodities c ON c.id = ph.commodity_id
+        WHERE ph.interval = '1d_m1_raw'
+          AND ph.close IS NOT NULL
+        ORDER BY ph.date
+    """
+    engine = get_engine()
+    with engine.connect() as _conn:
+        result = _conn.execute(text(query))
+        raw = pd.DataFrame(result.fetchall(), columns=result.keys())
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    raw["date"] = pd.to_datetime(raw["date"])
+    raw = raw[raw["ticker"].isin(ticker_to_name)]
+    if raw.empty:
+        return pd.DataFrame()
+
+    matrix = raw.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
+    matrix.index.name = "Date"
+    matrix = matrix.rename(columns=ticker_to_name)
+
+    present = [c for c in commodities if c in matrix.columns]
+    if not present:
+        return pd.DataFrame()
+
+    matrix = matrix[present]
+    matrix = matrix.ffill(limit=3)
+    return matrix
+
+
 def load_price_matrix(
     commodities: Optional[dict] = None,
     period: str = HISTORY_PERIOD,

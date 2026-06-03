@@ -372,3 +372,119 @@ remains the economically sensible `fedfunds_surprise_z`.
 reports `direction` (bullish/bearish) in the rationale and `metadata`.
 `OPEC_SURPRISE_FULL_Z` comment updated to magnitude semantics. Added
 `test_opec_bearish_surprise_fires` to `models/test_detectors.py`.
+
+---
+
+## 2026-06-02 — M2 term structure: contract-month cycles + roll calendar
+
+**Context.** The first M2 ingest stored a single fixed dated contract per
+commodity (e.g. `CLQ26.NYM`). Diagnosis on 2026-06-02 found two problems: (1) the
+DB held only ~4 rows for 12 of 26 futures (an *incremental* run + yfinance
+rate-limiting, not a Yahoo coverage issue — a direct probe returned 252 rows for
+24 of 26 tickers); (2) a fixed dated contract is **not** a constant-maturity M2
+over history — `CLQ26` (Aug 2026) is the genuine 2nd-nearby today but was ~M13 a
+year ago, so `basis = log(front/CLQ26)` mislabels long-dated calendar spreads as
+near-term carry. Also the front leg used roll-adjusted `adjusted_close` while the
+M2 leg used raw `close` — mixing adjusted and raw distorts the spread.
+
+**Decision.** Build a proper contract calendar that resolves the genuine M1/M2
+listed contracts on each date and stitches a constant-2nd-nearby series from raw
+adjacent legs. New files: `config/futures_calendar.py`,
+`pipeline/contract_calendar.py`, `pipeline/test_contract_calendar.py`.
+
+**What was verified (this entry).** The per-commodity listed-month cycles, which
+drive every resolved ticker. Sources: CME Group and ICE contract specifications
+via web search, 2026-06-02.
+
+- **Web-confirmed directly:** COMEX Gold (Feb/Apr/Jun/Aug/Oct/Dec), Silver &
+  Copper (Mar/May/Jul/Sep/Dec); **NYMEX Platinum (Jan/Apr/Jul/Oct) & Palladium
+  (Mar/Jun/Sep/Dec)** — and crucially that Pt/Pd trade on **NYMEX (`.NYM`)**, not
+  COMEX; the prior `.CMX` symbols 404'd. ICE Coffee & Cocoa (Mar/May/Jul/Sep/Dec),
+  Cotton (Mar/May/Jul/Oct/Dec), Orange Juice (Jan/Mar/May/Jul/Sep/Nov); CME Lean
+  Hogs (Feb/Apr/May/Jun/Jul/Aug/Oct/Dec); CBOT Soybean Meal
+  (Jan/Mar/May/Jul/Aug/Sep/Oct/Dec).
+- **Standard exchange cycles (textbook references; match every web-confirmed
+  sibling on the same exchange):** NYMEX energy (all 12 months); CBOT Corn / SRW
+  Wheat / KC Wheat / Oats (Mar/May/Jul/Sep/Dec), Soybeans (Jan/Mar/May/Jul/Aug/
+  Sep/Nov), Soybean Oil (Jan/Mar/May/Jul/Aug/Sep/Oct/Dec), Rough Rice (Jan/Mar/
+  May/Jul/Sep/Nov); CME Live Cattle (Feb/Apr/Jun/Aug/Oct/Dec), Feeder Cattle
+  (Jan/Mar/Apr/May/Aug/Sep/Oct/Nov).
+
+**Verdict.** ✅ Confirmed / corrected. The Pt/Pd exchange fix is verified against
+source. Documented simplifications: (a) Pt/Pd list serial + quarterly months — we
+use only the liquid *quarterly* cycle; (b) `roll_offset_bdays` is a per-group
+approximation of expiry timing — exact roll day is not calibrated to volume/OI
+(tunable in `config/futures_calendar.py`). These are acceptable because the basis
+feature only needs M1/M2 to be genuinely *adjacent* listed contracts; the rolling
+z-score absorbs the small roll-boundary discontinuity.
+
+**Independent check (code).** `pipeline/test_contract_calendar.py` (10/10 passing)
+confirms the resolver reproduces the real WTI curve: on 2026-06-02 it returns
+front = `CLN26.NYM` (Jul), M2 = `CLQ26.NYM` (Aug), and correctly promotes M2→M1
+at the roll boundary. All 26 specs resolve distinct, ordered M1/M2.
+
+**Still pending (not yet verified empirically).** The stitched basis values and
+their IC contribution — requires `pipeline/ingest_contracts.py` +
+`pipeline/stitch_m2.py` to run on the Mac (network + Postgres), then the
+prompt-4 retrain and prompt-5 IC comparison. No IC numbers are claimed yet.
+
+---
+
+## 2026-06-02 — Stitched M2 carry features: empirical run + coverage-gate finding
+
+**Context.** First end-to-end Mac run of the constant-maturity stack
+(`ingest_contracts` → `stitch_m2` → `daily_retrain --period 3y` → health report).
+
+**What was verified (empirically, on live Postgres).**
+- **Stitch correctness:** for the commodities that ingested (WTI/Brent/Gasoline),
+  the stitcher produced genuine M1/M2 legs (e.g. WTI M1=7, M2=28; Brent M1=12,
+  M2=47) from the real adjacent listed contracts. ✅
+- **ML pipeline health restored:** after the coverage gate (`MIN_BASIS_COVERAGE`,
+  see below), the retrain went from FAILED (ML tiers wiped → MetaPredictor
+  degenerate-model failure) to SUCCESS with both tiers populated
+  (ml: 2491 | statistical: 3659; tree leaves=7681; top feature
+  `fedfunds_surprise_z`). ✅
+
+**Verdict on the carry signal itself: ⚠️ INCONCLUSIVE — features are dormant.**
+The stitched M2/M1-raw series are very shallow today (M2 ≈ 47 rows, M1-raw ≈ 14
+rows vs a 749-row / 3y training window) because Yahoo only serves currently-listed
++ recently-expired dated contracts (older ones 404 as "delisted"). That is ~3–6%
+coverage — far below the 0.50 coverage gate — so **the basis / basis_zscore /
+roll_yield columns are intentionally dropped from the ML feature matrix** and do
+NOT yet contribute. The post-run IC (ml avg ≈ −0.026, statistical ≈ −0.010) is
+therefore the *base* feature set, not carry; no IC improvement is expected or
+claimed at this depth. The Gorton–Hayashi–Rouwenhorst carry premium is
+well-documented externally, but it cannot be realised here until the stitched
+series accrues forward depth (months of daily observations). This is by design
+(graceful degradation), not a defect.
+
+**Code changes shipped this session (bug fixes surfaced by the run).**
+1. **Coverage gate** — `models/config.py::MIN_BASIS_COVERAGE = 0.50`;
+   `models/features.py::build_feature_matrix` drops term-structure columns whose
+   non-NaN coverage over the training window is below the gate. Prevents shallow
+   basis columns from making `feat.join(target).dropna()` wipe every row (the
+   zero-sample regression). Regression test: `test_backtest_harness.py` #26.
+2. **Ticker-based commodity resolution** — `config/futures_calendar.py` gains
+   `ContractSpec.yf_ticker`; `pipeline/stitch_m2.py::resolve_commodity_id` joins
+   on the stable unique `commodities.ticker` (the `name` column is seeded
+   inconsistently). Fixes 12 "commodity not seeded" skips. Used by both
+   `stitch_m2` and `ingest_contracts`.
+3. **OutOfMemory / max_locks_per_transaction crash** — `ingest_contracts` now
+   commits per contract. `ingest_commodity` wraps each row insert in a SAVEPOINT;
+   PostgreSQL holds those subtransaction XID locks until the top-level commit, so
+   backfilling 26×25 contracts in one transaction exhausted shared memory
+   (crashed mid-Brent, starving the other 23 commodities). Per-contract commit
+   caps held locks at ~one contract and preserves partial progress.
+4. **Legacy fixed-contract M2 disabled** — `pipeline/ingest.py` no longer calls
+   `_run_m2_ingestion` (it wrote economically-invalid fixed-contract rows to
+   `1d_m2`, which would clobber the stitched series on every daily run).
+5. **causal_monitoring_log tuple-key JSON crash** — `daily_retrain._jsonify_keys`
+   stringifies `(sector, tier)` tuple keys before `json.dumps` so the row persists
+   instead of being silently dropped.
+6. **covariance_snapshots table** — added ORM model `CovarianceSnapshot` so
+   `init_db()` creates the table the raw-SQL upsert in `cross_asset.py` targets.
+
+**Still pending.** Re-run `ingest_contracts` (now that the OOM crash is fixed) so
+all 26 futures populate their near-dated contracts and forward accrual begins for
+the whole universe; the carry IC contribution remains to be measured once the
+stitched depth crosses the coverage gate.

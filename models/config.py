@@ -90,6 +90,18 @@ ROLLING_MOM_WINDOW_LONG = 21           # medium momentum lookback (~calendar mon
 ZSCORE_WINDOW        = 63              # rolling z-score window (~quarter)
 CORRELATION_WINDOW   = 21              # rolling pairwise correlation window
 
+# ── Term-structure (basis / roll-yield) coverage gate ───────────────────────────
+# Stitched constant-maturity M2/M1-raw series are SHALLOW at first (Yahoo serves
+# only ~12 months per dated contract) and grow forward over time.  If a basis
+# column is mostly NaN it would otherwise force `feat.join(target).dropna()` to
+# wipe the ENTIRE training matrix (every row has a NaN basis), zeroing out the ML
+# tiers.  So a term-structure column is only admitted to the feature matrix once
+# its non-NaN coverage over the training window reaches this fraction; below it,
+# the column is dropped (graceful fallback — the model trains exactly as it did
+# pre-M2).  As the stitched series deepens past this threshold the carry features
+# switch on automatically.  Set to 0.0 to always include (legacy/testing).
+MIN_BASIS_COVERAGE   = 0.50
+
 # ── Train / test split ────────────────────────────────────────────────────────
 TEST_FRACTION  = 0.20    # hold out last 20 % of dates as test set
 RANDOM_SEED    = 42

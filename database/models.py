@@ -239,6 +239,46 @@ class CorrelationSnapshot(Base):
         )
 
 
+class CovarianceSnapshot(Base):
+    """
+    Daily rolling pairwise covariances between commodity pairs.
+
+    Populated by models/cross_asset.py::store_covariance_snapshot().  One row per
+    (commodity_a, commodity_b, date, annualized).  Diagonal entries are
+    per-commodity variances; off-diagonal entries are covariances over a rolling
+    window of aligned_prices.  Both annualised (annualized=1) and raw
+    (annualized=0) variants may be stored, distinguished by the ``annualized``
+    column — hence it is part of the upsert key.
+
+    NOTE: This model exists so init_db() (Base.metadata.create_all) creates the
+    table.  store_covariance_snapshot upserts via raw SQL with
+    ``ON CONFLICT (date, commodity_a, commodity_b)``, so the UniqueConstraint
+    below must cover exactly those three columns for the upsert to bind.
+    """
+    __tablename__ = "covariance_snapshots"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    date        = Column(Date,    nullable=False)
+    commodity_a = Column(String(100), nullable=False)
+    commodity_b = Column(String(100), nullable=False)
+    covariance  = Column(Float,   nullable=False)
+    window_days = Column(Integer, nullable=False, default=21)
+    annualized  = Column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("date", "commodity_a", "commodity_b",
+                         name="uq_cov_date_pair"),
+        Index("ix_cov_date", "date"),
+        Index("ix_cov_pair", "commodity_a", "commodity_b"),
+    )
+
+    def __repr__(self):
+        return (
+            f"<CovarianceSnapshot {self.date} "
+            f"{self.commodity_a}↔{self.commodity_b} cov={self.covariance:.4f}>"
+        )
+
+
 class ForecastLog(Base):
     """
     Immutable record of every forecast produced by each model.

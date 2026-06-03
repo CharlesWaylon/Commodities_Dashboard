@@ -63,6 +63,67 @@ prior in multiplicatively rather than overriding the data:
 
 ---
 
+## ⚠️ DASHBOARD EVOLUTION RULE — MANDATORY FOR ALL FUTURE WORK
+This project is being built toward a **Bloomberg-terminal-grade subscription product
+for banks and hedge funds**, focused on the macro-economic ecological structure of
+commodities markets. Every change must preserve a comprehensible, auditable history
+and must be reversible if it goes too far. Any agent (human or AI) doing work in this
+repo **must** follow all five rules below. They are not optional and apply to every
+task, however small.
+
+### 1. Git is the audit trail — branch + atomic commits
+- **One branch per coherent change.** Never do unrelated work on the same branch.
+  Name it for its purpose (`feat/vol-forecasting`, `fix/oos-harness`).
+- **Small, focused commits with honest messages.** One logical change per commit.
+  **Do NOT** write giant catch-all commits ("…and so much more"). An auditor must be
+  able to read the commit graph and understand exactly how and why the dashboard
+  evolved.
+- **Merge via reviewable diffs**, never by force-pushing over history.
+- Reverting a change that went too far must be a `git revert`, not manual archaeology.
+
+### 2. Every new analytical surface ships behind a feature flag
+- Follow the existing `MACRO_TRIGGERS_ENABLED` pattern: gate every new model, page,
+  or signal path behind an env-var flag (e.g. `OOS_HARNESS_ENABLED`,
+  `VOL_FORECAST_ENABLED`).
+- **The old code path stays live and default until the new one is proven.** Rollback
+  in production must be a flag flip — no redeploy, no code revert, no downtime.
+
+### 3. Additive evolution — build beside the old, retire only after proof
+- **Never destructively rewrite a working page or model in place.** Build the new
+  surface alongside the old (e.g. a flagged tab, or `4b_Models_v2.py` beside
+  `4_Models.py`) so the two can be compared directly.
+- **Do NOT create a separate Streamlit app.** Forking the data/model layer destroys
+  the continuity that makes the product auditable. Evolve the single app.
+- A new approach is only allowed to **replace** an old one after it demonstrably wins
+  on the out-of-sample evaluation harness (walk-forward, purged/embargoed,
+  cost-adjusted IC at the live forecast horizon). "It looks better" is not proof.
+- Retire the old path in a single clean commit (recoverable from git history).
+
+### 4. Record every model/analytical change in the append-only log
+- `MODEL_VERIFICATION_LOG.md` is the human-readable narrative on top of git. Append
+  (never edit/delete) an entry for every model, weight, prior, or signal change:
+  what changed, sources checked, verdict (confirmed / refuted / inconclusive — report
+  negatives too), and what changed in code. This is also a credibility asset for the
+  institutional audience.
+
+### 5. Respect the layered architecture — keep computation out of pages
+- Maintain four seams: **data layer** (ingest, DB) → **research/signal layer**
+  (forecast models, macro-causality engine) → **risk/portfolio layer** (volatility,
+  covariance, sizing, cascade) → **presentation layer** (Streamlit pages).
+- **Push computation down into the model/feature modules; keep pages thin.** A model
+  must be swappable and testable headlessly (through the OOS harness) without touching
+  the UI. Do not add heavy logic into page files (e.g. the oversized `4_Models.py`).
+
+### Why
+Drastic upheavals are expected as the predictive engines are rebuilt to extract
+small-but-repeatable, economically-grounded edges (carry, volatility, cross-sectional
+relative value, macro-surprise signals) instead of near-random daily-direction
+forecasts. These rules guarantee that every such upheaval is comprehensible to an
+auditor, comparable against what it replaces, and reversible — properties required of
+a product sold to banks and hedge funds.
+
+---
+
 ## Database
 - **Backend:** PostgreSQL — `postgresql://charlesmerkel@localhost/commodities`
 - **SQLite is no longer used.** The old `data/commodities.db` file still exists but is not read by any code.

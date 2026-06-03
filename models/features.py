@@ -33,6 +33,7 @@ from models.config import (
     ROLLING_MOM_WINDOW_LONG,
     ZSCORE_WINDOW,
     N_QUBITS,
+    MIN_BASIS_COVERAGE,
 )
 
 # Commodities that receive PDSI (Corn Belt drought) features during training.
@@ -157,6 +158,7 @@ def build_feature_matrix(
     prices: pd.DataFrame,
     sector: str | None = None,
     second_contract_prices: pd.DataFrame | None = None,
+    front_raw_prices: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Construct a wide feature DataFrame from a price matrix.
@@ -188,6 +190,15 @@ def build_feature_matrix(
         handled identically to other rolling features.
         When None (the default), output is identical to the pre-M2 behaviour, so
         all existing call sites remain unaffected.
+
+    front_raw_prices : pd.DataFrame or None, optional
+        Genuine front (M1) RAW price matrix from pipeline/stitch_m2.py
+        (interval='1d_m1_raw'), same column names as ``prices``.  When supplied
+        alongside ``second_contract_prices``, the basis is computed as
+        log(M1_raw / M2_raw) — both legs from the same dated-contract universe on
+        the same dates (the only economically valid construction).  When None, the
+        roll-adjusted continuous front in ``prices`` is used as the M1 leg
+        (legacy behaviour), which mixes an adjusted front with a raw M2.
 
     Output
     ------
@@ -252,9 +263,35 @@ def build_feature_matrix(
             columns=[c for c in second_contract_prices.columns if c in price_data.columns]
         )
         if not m2_filtered.empty:
-            ts_features = build_term_structure_features(price_data, m2_filtered)
+            # Restrict the raw-front matrix to the same sector-active columns so
+            # basis = log(M1_raw / M2_raw) is computed leg-consistently.
+            m1_raw_filtered = None
+            if front_raw_prices is not None and not front_raw_prices.empty:
+                m1_raw_filtered = front_raw_prices.reindex(
+                    columns=[c for c in front_raw_prices.columns if c in price_data.columns]
+                )
+            ts_features = build_term_structure_features(
+                price_data, m2_filtered, front_raw_prices=m1_raw_filtered,
+            )
+            # Coverage gate: stitched M2/M1-raw series are shallow at first and
+            # are ~99% NaN over a multi-year training window.  Admitting such a
+            # column would make `feat.join(target).dropna()` wipe EVERY row (each
+            # has a NaN basis), zeroing out the ML tiers.  So keep only columns
+            # whose non-NaN coverage over the feature window reaches
+            # MIN_BASIS_COVERAGE; drop the rest (the model then trains exactly as
+            # it did pre-M2).  As the stitched series deepens, columns switch on
+            # automatically.  MIN_BASIS_COVERAGE = 0.0 disables the gate.
             if not ts_features.empty:
-                parts.append(ts_features)
+                n_rows = len(price_data.index)
+                if n_rows > 0 and MIN_BASIS_COVERAGE > 0.0:
+                    min_obs = MIN_BASIS_COVERAGE * n_rows
+                    keep = [
+                        c for c in ts_features.columns
+                        if ts_features[c].notna().sum() >= min_obs
+                    ]
+                    ts_features = ts_features[keep]
+                if not ts_features.empty:
+                    parts.append(ts_features)
 
     # Append any external signal columns (DXY, VIX, TLT, PDSI, etc.) unchanged.
     if external_cols:
@@ -305,6 +342,7 @@ def augment_with_climate(
 def build_term_structure_features(
     prices: pd.DataFrame,
     second_contract_prices: pd.DataFrame | None = None,
+    front_raw_prices: pd.DataFrame | None = None,
     zscore_window: int = ZSCORE_WINDOW,
 ) -> pd.DataFrame:
     """
@@ -318,14 +356,20 @@ def build_term_structure_features(
     Parameters
     ----------
     prices : pd.DataFrame
-        Front-contract (or continuous) price matrix — same as passed to
-        build_feature_matrix().
+        Continuous front-contract price matrix (roll-adjusted) — same as passed
+        to build_feature_matrix().  Used as the M1 leg ONLY as a fallback for
+        commodities that have no stitched raw-front series.
     second_contract_prices : pd.DataFrame or None
-        Next-maturity prices, same columns as prices.  When None (the current
-        state of the ingest pipeline), an empty DataFrame is returned so callers
-        are unaffected.  To unlock these features, extend pipeline/ingest.py to
-        fetch a second-nearby ticker per commodity (e.g. CLH=F alongside CL=F)
-        and pass the resulting matrix here.
+        Genuine second-nearby (M2) RAW prices from pipeline/stitch_m2.py
+        (interval='1d_m2'), same column names as prices.  When None/empty an empty
+        DataFrame is returned so callers are unaffected.
+    front_raw_prices : pd.DataFrame or None
+        Genuine front (M1) RAW prices from pipeline/stitch_m2.py
+        (interval='1d_m1_raw'), same column names as prices.  When supplied, the
+        basis for each shared column is log(M1_raw / M2_raw) — both legs drawn
+        from the SAME dated-contract universe on the SAME dates, which is the only
+        economically valid construction.  Columns absent here fall back to the
+        roll-adjusted continuous front in ``prices`` (legacy behaviour).
     zscore_window : int
         Window for normalising the basis series.
 
@@ -333,7 +377,7 @@ def build_term_structure_features(
     -------
     pd.DataFrame
         Columns per commodity (when second_contract_prices is supplied):
-          {c}_basis         — log(front / next) = log spread proxy
+          {c}_basis         — log(front / M2) = log spread
           {c}_basis_zscore  — rolling z-score of basis
           {c}_roll_yield    — annualised basis (basis * 252)
         Empty DataFrame when second_contract_prices is None.
@@ -345,8 +389,19 @@ def build_term_structure_features(
     if not shared:
         return pd.DataFrame(index=prices.index)
 
-    p1 = prices[shared]
     p2 = second_contract_prices[shared]
+
+    # M1 leg: prefer the stitched RAW front (same universe/dates as M2); fall back
+    # to the roll-adjusted continuous front for any column with no raw-front series.
+    if front_raw_prices is not None and not front_raw_prices.empty:
+        p1 = pd.DataFrame(index=p2.index)
+        for col in shared:
+            if col in front_raw_prices.columns:
+                p1[col] = front_raw_prices[col].reindex(p2.index)
+            else:
+                p1[col] = prices[col].reindex(p2.index)
+    else:
+        p1 = prices[shared].reindex(p2.index)
 
     basis = np.log(p1 / p2)
 

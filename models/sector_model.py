@@ -258,6 +258,7 @@ class SectorSpecificModel(SignalBroadcaster):
         # Stored during fit() for feature re-construction at predict time
         self._prices:    Optional[pd.DataFrame] = None
         self._m2_prices: Optional[pd.DataFrame] = None   # second-nearby for basis features
+        self._m1_raw_prices: Optional[pd.DataFrame] = None  # genuine raw front for basis
         self._feat_df:   Optional[pd.DataFrame] = None
         self._target:    Optional[pd.Series]    = None
         self._ic_score:  float                  = 0.0
@@ -279,18 +280,29 @@ class SectorSpecificModel(SignalBroadcaster):
         self,
         prices: pd.DataFrame,
         m2_prices: Optional[pd.DataFrame] = None,
+        m1_raw_prices: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
-        """Build sector-filtered features, including M2 term-structure if available."""
+        """Build sector-filtered features, including M2 term-structure if available.
+
+        When both ``m2_prices`` and ``m1_raw_prices`` are supplied the basis is
+        log(M1_raw / M2_raw) — both legs from the stitched dated-contract universe.
+        """
         try:
             return build_feature_matrix(
-                prices, sector=self.sector, second_contract_prices=m2_prices
+                prices, sector=self.sector,
+                second_contract_prices=m2_prices,
+                front_raw_prices=m1_raw_prices,
             )
         except ValueError as exc:
             log.warning(
                 "Sector filter failed for '%s' (%s) — falling back to full feature matrix.",
                 self.sector, exc,
             )
-            return build_feature_matrix(prices, second_contract_prices=m2_prices)
+            return build_feature_matrix(
+                prices,
+                second_contract_prices=m2_prices,
+                front_raw_prices=m1_raw_prices,
+            )
 
     def _ensure_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -299,7 +311,7 @@ class SectorSpecificModel(SignalBroadcaster):
         otherwise assume raw prices and apply sector filtering.
         """
         if self._xgb._feature_names is None:
-            return self._build_sector_features(data, self._m2_prices)
+            return self._build_sector_features(data, self._m2_prices, self._m1_raw_prices)
 
         # If at least one expected feature column is present, assume features
         feature_set = set(self._xgb._feature_names)
@@ -307,7 +319,7 @@ class SectorSpecificModel(SignalBroadcaster):
             return data
 
         # Raw prices → build sector features
-        return self._build_sector_features(data, self._m2_prices)
+        return self._build_sector_features(data, self._m2_prices, self._m1_raw_prices)
 
     # ── Fit ───────────────────────────────────────────────────────────────────
 
@@ -332,15 +344,25 @@ class SectorSpecificModel(SignalBroadcaster):
         # Non-fatal: if the M2 table is empty (first run before M2 ingest),
         # _m2_prices stays None and term-structure features are simply absent.
         try:
-            from models.data_loader import load_m2_price_matrix_from_db
+            from models.data_loader import (
+                load_m2_price_matrix_from_db,
+                load_m1_raw_matrix_from_db,
+            )
             m2 = load_m2_price_matrix_from_db()
             self._m2_prices = m2 if not m2.empty else None
+            # Genuine raw front (stitched) so basis = log(M1_raw / M2_raw).
+            # Absent on first run before stitch_m2 → basis falls back to continuous.
+            m1_raw = load_m1_raw_matrix_from_db()
+            self._m1_raw_prices = m1_raw if not m1_raw.empty else None
         except Exception as exc:
-            log.debug("M2 price load skipped (%s) — basis features disabled.", exc)
+            log.debug("M2/M1-raw price load skipped (%s) — basis features disabled.", exc)
             self._m2_prices = None
+            self._m1_raw_prices = None
 
         # Sector-filtered feature matrix (reduced dimensionality)
-        self._feat_df = self._build_sector_features(prices, self._m2_prices)
+        self._feat_df = self._build_sector_features(
+            prices, self._m2_prices, self._m1_raw_prices,
+        )
 
         if target is None:
             target = build_target(prices, self.commodity)

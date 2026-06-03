@@ -327,12 +327,19 @@ def run_ingestion(backfill: bool = False):
     log.info(f"Ingestion complete.  Inserted={total_inserted}  Skipped={total_skipped}")
     log.info("=" * 60)
 
-    # ── M2 (second-nearby) ingest ──────────────────────────────────────────────
-    # Stored with interval="1d_m2" under the same commodity_id as the front
-    # series.  ETF/equity proxies are not in FUTURES_M2_TICKERS and are skipped.
-    # Failures are non-fatal: if a specific contract ticker is expired or
-    # unavailable on yfinance, that commodity is silently skipped for this run.
-    _run_m2_ingestion(run_id=run_id, backfill=backfill)
+    # ── M2 (second-nearby) ingest — DISABLED (legacy fixed-contract path) ───────
+    # `_run_m2_ingestion` used FUTURES_M2_TICKERS (single fixed dated contract per
+    # commodity, e.g. CLQ26) and wrote them under interval="1d_m2".  That is
+    # economically INVALID for history: a contract that is genuine M2 today was an
+    # M13 a year ago, so basis = log(front / fixed_M2) mislabels long-dated
+    # calendar spreads as near-term carry.  The constant-maturity stitcher
+    # (pipeline/ingest_contracts.py → pipeline/stitch_m2.py) replaces it and
+    # delete-then-inserts the '1d_m2' / '1d_m1_raw' rows.  Calling the legacy path
+    # here would re-pollute '1d_m2' on every daily run and clobber the stitched
+    # series — so it is intentionally NOT invoked.  Refresh the constant-maturity
+    # M2 by running the dedicated two-step flow (not on the 2:05pm daily ingest):
+    #   python -m pipeline.ingest_contracts && python -m pipeline.stitch_m2
+    # _run_m2_ingestion(run_id=run_id, backfill=backfill)  # legacy — do not re-enable
 
     # ── Alert report ───────────────────────────────────────────────────────────
     try:

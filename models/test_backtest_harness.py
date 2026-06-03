@@ -581,6 +581,81 @@ def test_build_feature_matrix_without_m2_matches_baseline():
         _fail("build_feature_matrix without M2 matches baseline", e)
 
 
+def test_build_feature_matrix_front_raw_overrides_continuous_for_basis():
+    print("25. build_feature_matrix with front_raw_prices — basis uses M1_raw/M2_raw, not continuous/M2")
+    try:
+        # Continuous (roll-adjusted) front, the legacy M1 leg.
+        m1_cont = _make_prices(300)
+        # Genuine raw front differs from the continuous front by a constant factor
+        # (mimics roll adjustment): M1_raw = continuous * 1.10.
+        m1_raw = m1_cont * 1.10
+        # M2 is contango relative to the RAW front.
+        m2 = _make_m2_prices(m1_raw)
+
+        feat = build_feature_matrix(
+            m1_cont, second_contract_prices=m2, front_raw_prices=m1_raw,
+        )
+
+        # basis must equal log(M1_raw / M2), NOT log(continuous / M2).
+        for commodity in m1_cont.columns:
+            basis_col = feat[f"{commodity}_basis"].dropna()
+            expected_raw  = np.log(m1_raw[commodity] / m2[commodity]).reindex(basis_col.index)
+            expected_cont = np.log(m1_cont[commodity] / m2[commodity]).reindex(basis_col.index)
+            assert np.allclose(basis_col.values, expected_raw.values, atol=1e-9), (
+                f"{commodity}: basis does not match log(M1_raw/M2)"
+            )
+            # And it must clearly differ from the continuous-front basis (factor 1.10).
+            assert not np.allclose(basis_col.values, expected_cont.values, atol=1e-3), (
+                f"{commodity}: basis still using continuous front (raw override ignored)"
+            )
+
+        _ok(
+            "front_raw_prices wins: basis == log(M1_raw/M2) and differs from "
+            "log(continuous/M2) for all commodities"
+        )
+    except Exception as e:
+        _fail("build_feature_matrix front_raw basis override", e)
+
+
+def test_shallow_m2_does_not_wipe_feature_matrix():
+    print("26. build_feature_matrix with SHALLOW M2 — coverage gate drops sparse basis, matrix survives")
+    try:
+        from models.features import build_target
+
+        # 300 trading days of prices, but M2 only exists for the most recent 30
+        # (10% coverage) — mimics a freshly-stitched constant-maturity series that
+        # is shallow because Yahoo only serves ~12 months per dated contract.
+        m1 = _make_prices(300)
+        m2_full = _make_m2_prices(m1)
+        m2_shallow = m2_full.iloc[-30:]  # last 30 rows only → ~10% coverage
+
+        feat = build_feature_matrix(m1, second_contract_prices=m2_shallow)
+
+        # Coverage gate (MIN_BASIS_COVERAGE=0.50) must DROP the sparse basis cols.
+        cols = feat.columns.tolist()
+        basis_cols = [c for c in cols if c.endswith(("_basis", "_basis_zscore", "_roll_yield"))]
+        assert not basis_cols, (
+            f"sparse basis columns should have been dropped by the coverage gate; "
+            f"found {basis_cols}"
+        )
+
+        # And critically: feat.join(target).dropna() must retain rows (the bug was
+        # that ~99%-NaN basis cols wiped EVERY row, zeroing out the ML tiers).
+        target = build_target(m1)
+        aligned = feat.join(target).dropna()
+        assert len(aligned) > 100, (
+            f"shallow M2 wiped the training matrix: only {len(aligned)} rows survived "
+            f"feat.join(target).dropna() (expected >100)"
+        )
+
+        _ok(
+            f"shallow M2 (10% cov) dropped all basis cols; "
+            f"{len(aligned)} training rows preserved (no wipe)"
+        )
+    except Exception as e:
+        _fail("shallow M2 coverage gate", e)
+
+
 # ── IC horizon / embargo tests (Prompt 3) ─────────────────────────────────────
 
 def test_actual_return_equals_h_day_cumulative():
@@ -696,6 +771,8 @@ if __name__ == "__main__":
         # ── Term-structure features (Prompt 2) ────────────────────────────────
         test_build_feature_matrix_with_m2_gains_basis_columns,
         test_build_feature_matrix_without_m2_matches_baseline,
+        test_build_feature_matrix_front_raw_overrides_continuous_for_basis,
+        test_shallow_m2_does_not_wipe_feature_matrix,
         # ── IC horizon / embargo (Prompt 3) ───────────────────────────────────
         test_actual_return_equals_h_day_cumulative,
         test_split_indices_embargo_reserves_forecast_horizon,

@@ -267,6 +267,7 @@ class XGBoostAdapter(TierAdapter):
         self._commodity = None
         self._climate_df: Optional[pd.DataFrame] = None
         self._m2_prices:  Optional[pd.DataFrame] = None   # second-nearby for basis features
+        self._m1_raw_prices: Optional[pd.DataFrame] = None  # genuine raw front for basis
 
     @property
     def tier(self) -> str:
@@ -276,7 +277,8 @@ class XGBoostAdapter(TierAdapter):
         from models.ml.xgboost_shap import XGBoostForecaster
         from models.features import build_feature_matrix, build_target, augment_with_climate
         feat_train = build_feature_matrix(
-            prices_train, second_contract_prices=self._m2_prices
+            prices_train, second_contract_prices=self._m2_prices,
+            front_raw_prices=self._m1_raw_prices,
         )
         feat_train = augment_with_climate(feat_train, self._climate_df, commodity)
         target_train = build_target(prices_train, commodity)
@@ -300,7 +302,8 @@ class XGBoostAdapter(TierAdapter):
             return pd.Series(np.nan, index=test_idx)
         from models.features import build_feature_matrix, augment_with_climate
         feat_full = build_feature_matrix(
-            prices_full, second_contract_prices=self._m2_prices
+            prices_full, second_contract_prices=self._m2_prices,
+            front_raw_prices=self._m1_raw_prices,
         )
         feat_full = augment_with_climate(feat_full, self._climate_df, commodity)
         test_feats = feat_full.loc[feat_full.index.isin(test_idx)].dropna()
@@ -328,6 +331,7 @@ class ElasticNetAdapter(TierAdapter):
         self._model = None
         self._climate_df: Optional[pd.DataFrame] = None
         self._m2_prices:  Optional[pd.DataFrame] = None   # second-nearby for basis features
+        self._m1_raw_prices: Optional[pd.DataFrame] = None  # genuine raw front for basis
 
     @property
     def tier(self) -> str:
@@ -337,7 +341,8 @@ class ElasticNetAdapter(TierAdapter):
         from models.ml.elastic_net import ElasticNetFactorModel
         from models.features import build_feature_matrix, build_target, augment_with_climate
         feat = build_feature_matrix(
-            prices_train, second_contract_prices=self._m2_prices
+            prices_train, second_contract_prices=self._m2_prices,
+            front_raw_prices=self._m1_raw_prices,
         )
         feat = augment_with_climate(feat, self._climate_df, commodity)
         target = build_target(prices_train, commodity)
@@ -360,7 +365,8 @@ class ElasticNetAdapter(TierAdapter):
             return pd.Series(np.nan, index=test_idx)
         from models.features import build_feature_matrix, augment_with_climate
         feat_full = build_feature_matrix(
-            prices_full, second_contract_prices=self._m2_prices
+            prices_full, second_contract_prices=self._m2_prices,
+            front_raw_prices=self._m1_raw_prices,
         )
         feat_full = augment_with_climate(feat_full, self._climate_df, commodity)
         test_feats = feat_full.loc[feat_full.index.isin(test_idx)].dropna()
@@ -417,6 +423,7 @@ class BacktestHarness:
         n_splits: int = 5,
         climate_df: Optional[pd.DataFrame] = None,
         m2_prices: Optional[pd.DataFrame] = None,
+        m1_raw_prices: Optional[pd.DataFrame] = None,
     ):
         self.adapters = adapters if adapters is not None else list(DEFAULT_ADAPTERS)
         self.test_fraction = test_fraction
@@ -424,6 +431,7 @@ class BacktestHarness:
         self.n_splits = max(1, int(n_splits))
         self.climate_df = climate_df
         self.m2_prices  = m2_prices   # second-nearby price matrix for basis features
+        self.m1_raw_prices = m1_raw_prices  # genuine raw front matrix for basis
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -683,6 +691,8 @@ class BacktestHarness:
                     adapter._climate_df = climate_df
                 if hasattr(adapter, "_m2_prices"):
                     adapter._m2_prices = self.m2_prices
+                if hasattr(adapter, "_m1_raw_prices"):
+                    adapter._m1_raw_prices = self.m1_raw_prices
 
             tier_forecasts: Dict[str, pd.Series] = {}
             for adapter in self.adapters:

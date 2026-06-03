@@ -601,6 +601,26 @@ def _run_cascade_validation_step(
     return result
 
 
+def _jsonify_keys(obj):
+    """
+    Make a dict JSON-serialisable when its keys are tuples.
+
+    sector_ic (and some cascade/route maps) are keyed by ``(sector, tier)``
+    tuples, e.g. ``('Energy', 'ml')``.  ``json.dumps`` rejects non-str/num keys
+    ("keys must be str, int, float, bool or None, not tuple"), which silently
+    dropped the entire causal_monitoring_log row.  This joins tuple keys with
+    '|' (recursively) so the data is preserved instead of lost.
+    """
+    if isinstance(obj, dict):
+        return {
+            ("|".join(map(str, k)) if isinstance(k, tuple) else k): _jsonify_keys(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, (list, tuple)):
+        return [_jsonify_keys(v) for v in obj]
+    return obj
+
+
 def _persist_causal_monitoring(
     logged_at:  str,
     run_type:   str,
@@ -616,12 +636,12 @@ def _persist_causal_monitoring(
             "logged_at":               logged_at,
             "run_type":                run_type,
             "granger_refreshed":       1 if granger.get("refreshed") else 0,
-            "granger_summary_json":    json.dumps(granger.get("summary", {})),
-            "route_coefficients_json": json.dumps(routes.get("coefficients", {})),
-            "route_shift_pct_json":    json.dumps(routes.get("shift_pcts", {})),
-            "sector_ic_json":          json.dumps(sector_ic),
+            "granger_summary_json":    json.dumps(_jsonify_keys(granger.get("summary", {}))),
+            "route_coefficients_json": json.dumps(_jsonify_keys(routes.get("coefficients", {}))),
+            "route_shift_pct_json":    json.dumps(_jsonify_keys(routes.get("shift_pcts", {}))),
+            "sector_ic_json":          json.dumps(_jsonify_keys(sector_ic)),
             "cascade_status":          cascade.get("status", ""),
-            "cascade_accuracy_json":   json.dumps(cascade.get("accuracy", {})),
+            "cascade_accuracy_json":   json.dumps(_jsonify_keys(cascade.get("accuracy", {}))),
             "cascade_n_events":        cascade.get("n_events", 0),
             "alerts_json":             json.dumps(all_alerts),
             "n_alerts":                len(all_alerts),
@@ -839,23 +859,35 @@ def run_daily_retrain(
         # Non-fatal: if M2 ingest has not run yet, m2 is empty and basis features
         # are simply absent — models fall back to the existing sharpe carry proxy.
         m2_prices_for_harness: Optional[pd.DataFrame] = None
+        m1_raw_for_harness: Optional[pd.DataFrame] = None
         try:
-            from models.data_loader import load_m2_price_matrix_from_db
+            from models.data_loader import (
+                load_m2_price_matrix_from_db,
+                load_m1_raw_matrix_from_db,
+            )
             from models.config import MODELING_COMMODITIES
             m2 = load_m2_price_matrix_from_db()
             if not m2.empty:
                 m2_prices_for_harness = m2
                 log.info("M2 prices loaded: %d rows × %d cols", len(m2), m2.shape[1])
             else:
-                log.info("M2 prices: empty (M2 ingest not yet run — basis features inactive)")
+                log.info("M2 prices: empty (M2 stitch not yet run — basis features inactive)")
+            # Genuine raw front (stitched) so basis = log(M1_raw / M2_raw).
+            m1_raw = load_m1_raw_matrix_from_db()
+            if not m1_raw.empty:
+                m1_raw_for_harness = m1_raw
+                log.info("M1-raw prices loaded: %d rows × %d cols", len(m1_raw), m1_raw.shape[1])
+            else:
+                log.info("M1-raw prices: empty (stitch not yet run — basis uses continuous front)")
         except Exception as exc:
-            log.warning("M2 price load skipped (%s) — basis features inactive.", exc)
+            log.warning("M2/M1-raw price load skipped (%s) — basis features inactive.", exc)
 
         from models.backtest_harness import BacktestHarness, DEFAULT_ADAPTERS
         harness = BacktestHarness(
             adapters=list(DEFAULT_ADAPTERS),
             climate_df=climate if not climate.empty else None,
             m2_prices=m2_prices_for_harness,
+            m1_raw_prices=m1_raw_for_harness,
         )
         records = harness.run(prices, macro, commodities)
 
