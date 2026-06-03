@@ -488,3 +488,71 @@ series accrues forward depth (months of daily observations). This is by design
 all 26 futures populate their near-dated contracts and forward accrual begins for
 the whole universe; the carry IC contribution remains to be measured once the
 stitched depth crosses the coverage gate.
+
+---
+
+## 2026-06-03 — Phase 0: the out-of-sample evaluation gate + layer seams
+
+**What was built.** The foundation of the dashboard restructure — the *gate* that
+every future signal must pass before going live (North Star principle #1). This is
+infrastructure, not a model promotion, but the first real signal was run through
+it and its verdict is reported here per the rule.
+
+New code (branch `feat/phase0-eval-gate`, behind no user-facing flag — it is
+headless research infrastructure):
+- `signals/base.py` — the single `Signal` interface every edge implements
+  (`compute(asof, panel)`, mandatory non-empty `economic_rationale`, multi-horizon
+  `{5,10,21}`) + a name registry.
+- `signals/momentum.py` — `momentum_xs`, the first real signal: 12-1
+  cross-sectional momentum (long winners / short losers), vol-scaled, z-scored.
+- `evaluation/harness.py` — the gate: per-date cross-sectional Spearman IC,
+  IC information ratio + t-stat on a **de-overlapped** subsample (dates spaced ≥ H
+  apart, so overlapping H-day targets don't inflate significance), directional hit
+  rate, **net-of-cost** long-short PnL (`evaluation/costs.py`, 10 bps/side),
+  walk-forward fold sign-stability, and a PROMOTE/REJECT contract. Writes the
+  `signal_scorecard` table and a human-readable diff vs the prior run.
+- `evaluation/point_in_time.py` + `evaluation/test_point_in_time.py` — the
+  anti-look-ahead property test: for every registered signal, `compute(asof=t)`
+  must not change when future rows are appended. A deliberately-leaky fixture
+  confirms the test bites.
+- `signal_scorecard` table (`database/models.py::SignalScorecardRow`) — the
+  append-only experiment ledger backing this log.
+- `.importlinter` — layer-boundary contracts (signals must not import
+  streamlit/pages/app/portfolio/evaluation; portfolio/evaluation must not import
+  presentation). `lint-imports` → **3 kept, 0 broken**.
+
+**Verification of `momentum_xs` against external sources.** Cross-sectional
+commodity momentum is one of the most robustly documented factor premia
+(Erb & Harvey 2006; Miffre & Rallis 2007; Asness, Moskowitz & Pedersen 2013 "Value
+and Momentum Everywhere"). So the *economic rationale is confirmed* — this is not a
+data-mined pattern. The question the gate answers is whether THIS construction, on
+THIS 40-instrument universe, after costs, clears the bar.
+
+**Verdict: ⚠️ REJECT (gate working as designed; result is honest, not a failure).**
+On ~5y of daily data (1,580 daily IC obs):
+
+| H  | OOS IC | IC IR | t-stat | hit | net LS Sharpe | fold sign-stability |
+|----|--------|-------|--------|-----|---------------|---------------------|
+| 5  | 0.032  | 0.136 | 2.42   | 51.0% | 0.38 | 5/5 positive |
+| 10 | 0.038  | 0.160 | 2.01   | 51.3% | 0.43 | 5/5 positive |
+| 21 | 0.040  | 0.191 | 1.67   | 51.5% | 0.47 | 4/5 positive |
+
+The IC is **positive, sign-stable across every walk-forward fold, and the IC
+t-stat exceeds 2 at H=5/10** — i.e. there is a real, weak edge, exactly as theory
+predicts (and it strengthens with horizon, as momentum should). It is rejected
+only because the IC **information ratio (0.14–0.19) is below the 0.30 promotion
+bar**. This is the intended behaviour: a single weak signal is not promotable
+alone. The North Star is breadth (Edge = IC × √breadth) — momentum_xs is a
+*survivor to be combined*, not a standalone live model. It will re-enter the gate
+as one input to the honest ensemble in Phase 4. No code was changed in response to
+the verdict; the signal is recorded as a validated-but-not-yet-promotable edge.
+
+**Reproduce:** `python -m evaluation.harness --signal momentum_xs --horizons 5,10,21`
+(persists to `signal_scorecard`; add `--no-db` to skip). Tests:
+`pytest signals/ evaluation/`. Boundaries: `lint-imports`.
+
+**Pending (Phase 0 follow-ups, not blocking).** Wire `lint-imports` + `pytest` into
+CI once a CI provider is chosen (deferred per Charles's call this session — local
+runner only for now). The presentation layer is not yet a single package, so it is
+enforced as a forbidden *target*, not a root package; the page-taxonomy move lands
+in Phase 6.
