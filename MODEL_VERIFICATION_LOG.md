@@ -1208,3 +1208,53 @@ composite (in-sample component selection noted in its docstring), NOT promoted l
 **What changed in code.** Added `EnsembleV2MultiRegime` (`ensemble_v2`) to
 `signals/ensemble.py` (inherits the equal-weight combine logic; only COMPONENTS
 differ). Tests `pytest signals/ evaluation/` green (34); `lint-imports` 4/4.
+
+---
+
+## 2026-06-04 — Layer 3 (risk) foundation: Ledoit-Wolf shrinkage covariance VERIFIED
+
+**What was built.** `portfolio/risk.py` — the first concrete piece of the Layer-3
+risk/portfolio layer (whose `Allocator` seam was laid in Phase 0). A point-in-time
+`RiskModel` provider: a returns window (only data ≤ asof), a sample covariance, and
+the Ledoit-Wolf (2004) CONSTANT-CORRELATION shrinkage estimator with the
+analytically optimal intensity δ. Exposes `cov`, `vol`, `shrinkage`, plus
+`correlation()` and `annualized_vol()`. numpy/pandas only; no streamlit/pages/app
+(import-linter 4/4 kept).
+
+**What was verified (MODEL VERIFICATION RULE) — against Ledoit-Wolf 2004.**
+A bug was caught during verification and fixed: the θ_jj,ij asymptotic-covariance
+building block used (1/T)Σ xᵢxⱼ² instead of (1/T)Σ xᵢxⱼ³ (squared vs cubed),
+which produced spurious δ=0 on some draws. Corrected to `cube.T − var_j·s_ij`.
+
+Post-fix verification vs the ORACLE shrinkage (the δ that minimises Frobenius
+distance to a KNOWN true covariance, computable only in simulation), averaged over
+200-300 Monte-Carlo draws per cell:
+
+| true Σ | N | T | analytic δ | oracle δ |
+|---|---|---|---|---|
+| const-corr | 20 | 60 | 0.936 | 0.985 |
+| const-corr | 20 | 1000 | 0.956 | 0.989 |
+| 3-factor | 20 | 60 | 0.119 | 0.092 |
+| 3-factor | 20 | 250 | 0.026 | 0.034 |
+| 3-factor | 20 | 1000 | 0.011 | 0.016 |
+| 3-factor | 40 | 80 | 0.082 | 0.074 |
+
+The analytic intensity tracks the oracle in BOTH regimes and the correct direction:
+heavy shrinkage when the constant-correlation target is near-true; light, T→0
+shrinkage when the target is misspecified and data is plentiful. Structural
+guarantees hold by construction and in tests: symmetric, PSD, variance-preserving
+diagonal, δ∈[0,1], and shrinkage reduces the condition number when N≈T.
+
+**Real-data sanity (long_core, 252-day window, 25 futures).** δ=0.126 (light, as
+expected at N/T≈0.1). Annualised vols are economically correct: Natural Gas 103%,
+OJ 70%, Silver 66% (the famously wild) down to Soybeans 16%, Cotton/Live Cattle
+18% (the calm). Covariance PSD, condition number ≈124.
+
+**Verdict: confirmed.** The shrinkage estimator matches Ledoit-Wolf 2004 in
+behaviour and the oracle in level; vols are realistic. Foundation is solid for the
+allocators and portfolio backtest to build on next.
+
+**Tests.** `portfolio/test_risk.py` (8 tests): structure/PSD/symmetry, diagonal
+preservation, conditioning improvement, sample-method equivalence, the point-in-time
+property (future rows can't change an as-of estimate), insufficient-history → None,
+unit-diagonal correlation, vol annualisation. All green.
