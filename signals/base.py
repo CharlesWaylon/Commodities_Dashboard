@@ -165,6 +165,8 @@ def _ensure_signals_imported() -> None:
         "signals.cot",
         "signals.inventory",
         "signals.macro",
+        "signals.reversal",
+        "signals.lowvol",
         "signals.ensemble",
     ):
         try:
