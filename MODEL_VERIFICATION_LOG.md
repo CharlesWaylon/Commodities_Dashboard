@@ -859,3 +859,51 @@ registered in `signals/base`. Added a general `--min-cross-section` flag to
 `evaluation/harness.py` (default unchanged at 5) so sub-universe signals are
 scoreable without weakening the default gate. Tests `pytest signals/ evaluation/`
 green (22 passed); `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — Macro-surprise (per-instrument betas): betas CONFIRMED, alpha REJECTED
+
+**What was verified — the betas (MODEL VERIFICATION RULE).** Before gating, the
+learned trailing factor betas were checked against economic priors at 2026-05-29
+(252-day window, factors T10YIE/DGS10/DTWEXBGS/VIXCLS):
+- Gold: USD −0.0050, 10y rates −0.0014, inflation +0.0009 — textbook (gold rises
+  as the dollar/real rates fall; mild inflation hedge).
+- Silver: USD −0.0123 (even more dollar-sensitive than gold). ✓
+- Copper: USD −0.0067, VIX −0.0027 (industrial metal; risk-off hurts it). ✓
+- WTI: inflation +0.0107 (strong — oil is an inflation driver). ✓
+- Nat gas: near-zero macro betas (correctly identified as weather-driven). ✓
+**Verdict: the factor-beta structure is economically sound** — the model captures
+real macro transmission, not noise. (Two small off-signs — crude's mildly positive
+USD/VIX beta — are explainable by the recent oil-as-geopolitical-risk regime.)
+
+**Result of the alpha signal (walk-forward, purged/embargoed, cost-adjusted; full
+40-instrument cross-section).** ❌ REJECTED at all horizons. IC negative at H5/H10
+(−0.022 / −0.023; t = −1.31 / −0.99) and only weakly positive at H21 (+0.027,
+t=0.75, not significant). Net LS Sharpe −0.79 / −0.58 / +0.15, with very high
+turnover (0.83 / 1.11 / 1.30 per period).
+
+**Verdict — macro betas are real, but "beta × recent move" is not standalone
+alpha.** Two interpretable failures: (1) the construction uses CONTEMPORANEOUS
+betas (r_t on f_t) applied to a recent factor move that the cross-section has
+largely already repriced — hence the negative short-horizon IC (a reversal/
+already-in-the-price effect dominates the lagged-diffusion hypothesis). (2) The
+recent-move "surprise" is noisy day-to-day, churning the book (turnover >1.0/
+period) so even the weakly right-signed H21 edge is eaten by costs. The economic
+diffusion hypothesis is at best faintly present at 21 days and not significant.
+
+**Product insight + revisit path (not done now).** The verified beta structure is
+genuinely valuable, but its home is the **risk/covariance layer** (portfolio
+construction, factor-hedging, regime conditioning) — NOT as a cross-sectional
+alpha. As an alpha, the principled re-tests are: (a) LAGGED betas (regress r_t on
+f_{t-k}) to test prediction rather than contemporaneous co-movement; (b) heavy
+smoothing of the factor surprise to cut turnover; (c) feed the betas to the risk
+layer and let macro shape sizing/hedging instead of direction. No passing variant
+was manufactured — flipping the sign does not yield a clean win (only H5/H10 would
+turn positive, still sub-0.30 IC IR and still turnover-killed).
+
+**What changed in code.** Added `signals/macro.py` (`MacroSurprise`): vectorised
+multivariate OLS betas for the whole cross-section at once (one K×K solve per date),
+PIT factor panel from the FRED store (daily unrevised series stamped by
+release_date). Registered in `signals/base`. Tests `pytest signals/ evaluation/`
+green; `lint-imports` 4/4. Scorecard rows persisted.
