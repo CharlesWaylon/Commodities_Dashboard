@@ -1007,3 +1007,42 @@ can be justified out-of-sample.
 to `ensemble_v1.COMPONENTS` (low_vol excluded as a null). Tests `pytest signals/
 evaluation/` green (27 in the PIT/contract set); `lint-imports` 4/4. Scorecards
 persisted.
+
+---
+
+## 2026-06-04 — Value factor: wrong-signed on a single-regime sample (REJECTED, not added)
+
+**What was built.** `value` — commodity long-horizon mean reversion (Asness-
+Moskowitz-Pedersen 2013): forecast = +z(reference log-price − current log-price),
+reference = mean log-price ~1.4-2.75y back. Cheap-vs-own-history → long. Intended
+as the orthogonal value/momentum complement to push the ensemble over the bar.
+
+**History constraint.** The aligned panel has only ~5y of COMMON history (start
+gated by the youngest instruments) and is calendar-day aligned, so a textbook 5y
+reference is infeasible; the reference is ~1.4-2.75y back — the deepest the data
+supports.
+
+**Result (walk-forward, purged/embargoed, cost-adjusted; full universe).** ❌
+WRONG-SIGNED. IC NEGATIVE at all horizons (−0.034 / −0.030 / −0.015; t = −1.91 /
+−1.17 / −0.38), net LS Sharpe negative throughout. Over this sample, cheap-vs-
+multi-year UNDERperformed: multi-year trend persisted rather than reverted.
+
+**Why no sign-flip / not added to the ensemble.** Value is strongly NEGATIVELY
+correlated with momentum (measured H10 rank-corr −0.654 — the canonical value/
+momentum relationship). So a sign-flipped "value" (+IC) would be ~+0.65 correlated
+with momentum_xs — i.e. just long-horizon MOMENTUM, redundant with a signal we
+already have, NOT a new orthogonal edge. Flipping would add no breadth, so the
+ensemble is unchanged (momentum_xs + cot_risk_premium + reversal_st).
+
+**Verdict — inconclusive on the merits; AMP value NOT refuted.** The ~5-year panel
+is a single, strongly-trending commodity regime (2021-2026), and value is well
+known to underperform in trending regimes (cf. equity value's 2010s drawdown).
+A multi-decade, multi-regime factor cannot be fairly judged on 5 years of one
+regime. Honest read: value is wrong-signed IN THIS SAMPLE, which is itself
+consistent with a trend-dominated regime, not evidence the factor is dead. Revisit
+once the panel's common history deepens to span multiple regimes (and ideally with
+the canonical ~5y reference).
+
+**What changed in code.** Added `signals/value.py` (`value`), registered in
+`signals/base`. NOT added to `ensemble_v1`. Tests `pytest signals/ evaluation/`
+green; `lint-imports` 4/4. Scorecard rows persisted.
