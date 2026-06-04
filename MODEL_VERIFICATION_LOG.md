@@ -1297,3 +1297,48 @@ inverse-vol favours low-vol names, name-cap binds when tight, sleeve weights cha
 the blend, vol-target scaling is proportional (0.05 vs 0.20 → ~4× gross),
 leverage-cap binds, empty forecast → empty. `pytest portfolio/` 15 green;
 `lint-imports` 4/4.
+
+---
+
+## 2026-06-04 — Layer 3 (3.3): portfolio backtest built & cross-validates the gate
+
+**What was built.** `portfolio/backtest.py` — walk-forward portfolio backtest, the
+Layer-3 analogue of the signal gate. Each rebalance: estimate the risk model (PIT),
+compute signal forecasts (PIT), map to weights via the SleeveAllocator, charge
+transaction cost on turnover, then hold and let weights DRIFT with prices until the
+next rebalance. Costs are folded into the equity curve (same TransactionCostModel
+as the gate), so every metric is net of cost: Sharpe, ann return/vol, max drawdown,
+turnover, gross. CLI: `python -m portfolio.backtest --signal S --panel {aligned,
+long_core} --rebalance-days N --cost-bps B --target-vol V`.
+
+**Results (long_core 21y, 21-day rebalance, target vol 10%).**
+| signal | net Sharpe | ann.ret | max DD | turnover/reb |
+|---|---|---|---|---|
+| value @10bps | +0.79 | +9.5% | −29.2% | 0.35 |
+| value @30bps | +0.73 | +8.8% | −29.5% | 0.35 |
+| momentum_xs @10bps | −0.25 | −2.9% | −69.4% | 0.70 |
+| ensemble_v2 @10bps | +0.75 | +9.7% | −30.7% | 1.35 |
+
+**Cross-validation (this is the value of the backtest).**
+1. It reflects SIGNAL QUALITY in realized P&L: value (positive multi-regime IC)
+   earns +0.79 net Sharpe; momentum_xs (negative IC on long_core) LOSES money
+   (−0.25, −69% drawdown). The portfolio layer independently agrees with the gate.
+2. value is COST-ROBUST: Sharpe 0.79 → 0.73 from 10 → 30 bps, because turnover is
+   low (0.35/reb) — value is a slow factor. A real, not paper, edge.
+3. ensemble_v2 < value ALONE at the portfolio level too (Sharpe 0.75 vs 0.79) AND
+   churns ~4× more (1.35 vs 0.35 turnover, from reversal_st). This reproduces the
+   gate finding — equal-weight blending dilutes the dominant value signal — now in
+   costed, risk-managed terms. value standalone remains the best book.
+
+Realized vol lands ~12% vs the 10% target (the normal ex-ante/realized gap; a
+shorter risk window or realized-vol scaling would tighten it — a future tweak).
+
+**Test-design note.** A CONSTANT forecast is NOT a no-view under inverse-vol sizing
+(const/σ still varies → a low-vol tilt, which is intended: equal expected return
+favours higher-Sharpe low-vol names). The genuine no-view is an all-NaN forecast,
+which correctly yields a flat book (test updated accordingly).
+
+**Tests.** `portfolio/test_backtest.py` (5): runs end-to-end with finite metrics,
+higher cost reduces net return + Sharpe, no-view → flat equity, more frequent
+rebalancing raises total turnover, realized vol in a sane range. `pytest portfolio/`
+20 green; `lint-imports` 4/4.
