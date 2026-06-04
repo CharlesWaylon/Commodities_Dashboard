@@ -165,6 +165,7 @@ def _ensure_signals_imported() -> None:
         "signals.cot",
         "signals.inventory",
         "signals.macro",
+        "signals.ensemble",
     ):
         try:
             import_module(mod)

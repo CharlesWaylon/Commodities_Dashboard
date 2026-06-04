@@ -1,0 +1,120 @@
+"""
+Ensemble — the parameter-free composite of the right-signed sub-threshold edges.
+
+WHY THIS EXISTS
+───────────────
+Edge = IC × √breadth. Several signals came back through the gate economically
+confirmed and right-signed but too NOISY to promote alone (IC IR ~0.10-0.19 vs the
+0.30 bar): cross-sectional momentum, time-series momentum, and the COT
+hedging-pressure risk premium. The textbook way to convert near-orthogonal,
+sub-threshold edges into a promotable one is to COMBINE them — averaging
+diversifies away idiosyncratic signal noise while keeping the shared directional
+edge, lifting the information ratio.
+
+CONSTRUCTION (deliberately parameter-free)
+──────────────────────────────────────────
+For each horizon we take each component's cross-sectional forecast, standardise it
+(z-score across the instruments that have a view), and average the standardised
+scores across whichever components cover each instrument, then re-standardise. No
+weights are fitted — equal weight is the honest default because fitting component
+weights on the same history the gate scores would be in-sample optimisation (the
+overfitting failure mode this whole rebuild exists to avoid). IC- or risk-weighted
+blending is a later step that must itself be justified out-of-sample.
+
+Because each component already enforces the point-in-time contract, the ensemble
+inherits it — it reads nothing but its components' ``compute(asof, panel)`` output.
+The look-ahead property test and the contract test cover it via ``list_signals()``.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import List, Optional
+
+import numpy as np
+import pandas as pd
+
+from signals.base import CONFIDENCE_FIELD, FORECAST_FIELD, Signal, get_signal, register_signal
+
+
+@register_signal
+class EnsembleComposite(Signal):
+    """Equal-weight composite of right-signed, sub-threshold component signals."""
+
+    name = "ensemble_v1"
+    #: Right-signed, gate-confirmed-but-sub-threshold, mutually DISTINCT edges
+    #: (2026-06-04). trend_ts is deliberately excluded: under cross-sectional
+    #: ranking it is identical to momentum_xs (corr +1.000 — both are the 12-1
+    #: vol-scaled trailing return, and demeaning does not change ranks), so adding
+    #: it would just double-weight momentum rather than add breadth.
+    COMPONENTS = ("momentum_xs", "cot_risk_premium")
+    economic_rationale = (
+        "Equal-weight composite of economically-confirmed, right-signed but "
+        "individually sub-threshold and mutually distinct edges — cross-sectional "
+        "momentum and the COT hedging-pressure risk premium (cross-sectional "
+        "rank-corr ~0.59). Diversifying across imperfectly-correlated signals raises "
+        "the information ratio (Edge = IC × √breadth) without fitting in-sample "
+        "weights."
+    )
+
+    def __init__(self):
+        self._components: Optional[List[Signal]] = None
+
+    def _comps(self) -> List[Signal]:
+        if self._components is None:
+            self._components = [get_signal(n) for n in self.COMPONENTS]
+        return self._components
+
+    @staticmethod
+    def _zscore(s: pd.Series) -> Optional[pd.Series]:
+        s = s.dropna()
+        if s.empty:
+            return None
+        sd = s.std()
+        if not np.isfinite(sd) or sd == 0:
+            return None
+        return (s - s.mean()) / sd
+
+    def compute(self, asof: date, panel: pd.DataFrame) -> pd.DataFrame:
+        # Collect each component's standardised per-horizon forecast.
+        per_h: dict[int, List[pd.Series]] = {h: [] for h in self.horizons}
+        for sig in self._comps():
+            try:
+                out = sig.compute(asof, panel)
+            except Exception:  # a broken component must not sink the ensemble
+                continue
+            if out is None or out.dropna(how="all").empty:
+                continue
+            for h in self.horizons:
+                if (h, FORECAST_FIELD) not in out.columns:
+                    continue
+                z = self._zscore(out[(h, FORECAST_FIELD)])
+                if z is not None:
+                    per_h[h].append(z)
+
+        cols = pd.MultiIndex.from_product(
+            [self.horizons, [FORECAST_FIELD, CONFIDENCE_FIELD]], names=["horizon", "field"]
+        )
+        out = pd.DataFrame(index=pd.Index(panel.columns, name="instrument"), columns=cols, dtype=float)
+
+        produced = False
+        for h in self.horizons:
+            comps = per_h[h]
+            if not comps:
+                continue
+            # instruments × components, then mean across available components.
+            # Restrict to the panel universe (a component may score instruments
+            # outside this panel, e.g. COT reads all instruments in the store).
+            mat = pd.concat(comps, axis=1)
+            combined = mat.mean(axis=1, skipna=True).dropna()
+            combined = combined[combined.index.isin(panel.columns)]
+            z = self._zscore(combined)
+            if z is None:
+                continue
+            out.loc[z.index, (h, FORECAST_FIELD)] = z
+            out.loc[z.index, (h, CONFIDENCE_FIELD)] = z.abs().clip(upper=3.0) / 3.0
+            produced = True
+
+        if not produced:
+            return self._empty_frame(panel.columns)
+        return out
