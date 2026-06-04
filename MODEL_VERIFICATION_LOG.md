@@ -705,3 +705,68 @@ motivated candidates, zero cleared the bar, and each rejection is interpretable
 (trend = real but noisy, carry-proxy = wrong-signed placeholder, seasonality =
 not cross-sectional). This is the intended behaviour — the spine rejects honestly
 rather than shipping near-random forecasts.
+
+---
+
+## 2026-06-04 — Phase 2 data-layer expansion (COT breadth, EIA labels, FRED feed)
+
+**Context.** Wave-2's fundamental signals (COT positioning-reversal, macro-surprise,
+real term-structure carry) were blocked not on signal code but on **data breadth**:
+the point-in-time fundamental store held only 1 COT series (WTI), 4 EIA energy
+series with no instrument labels, and zero FRED rows — far too narrow for a
+cross-sectional gate (`min_cross_section = 5`). This entry records widening the
+data layer so those signals become gate-scoreable next.
+
+**What was verified — CFTC contract-market codes (against the live source).**
+Every code in `services/cot_ingest.py::DEFAULT_SERIES` was checked on 2026-06-04
+against the live CFTC Disaggregated Futures-Only catalog (Socrata resource
+`72hh-3qpy`, fields `contract_market_name` / `market_and_exchange_names`, grouped
+over 2025+ reports). **Finding (refuted prior map): the previous grain codes were
+wrong.** The old map had `001602 → "Corn"`, but CFTC `001602` is **WHEAT-SRW**;
+`002602` is CORN; `005602` is SOYBEANS; `007601` is SOYBEAN OIL. The old map also
+used instrument *names* ("Gold", "Corn") that do not match the price-panel display
+names ("Gold (COMEX)", "Corn (CBOT)"), so even the correct codes would not have
+joined. Only WTI (`067651`) had ever actually been ingested, so the bad codes
+never produced visibly wrong data — but they would have on the next run. **Verdict:
+prior grain mapping refuted and corrected; 27 liquid futures now carry
+source-verified codes mapped to exact `data.universe` display names.**
+
+**What was verified — FRED publication lags (against release calendars).** FRED's
+REST helper keys observations on the *reference* date, not the first-print date
+(true vintages need ALFRED — a still-open upgrade, flagged in
+`data/adapters/fred_adapter.py`). We approximate `release_date = reference_date +
+lag_bdays`, rounded UP so we never lead the real print. **Caught a 1-day leak in
+testing:** at a 31-bday lag, April-2024 CPI (ref `2024-04-01`) resolved to a
+`2024-05-14` release, one day *before* the actual BLS print of `2024-05-15`.
+Corrected to 34 bdays (CPI/PPI), 35 (INDPRO), 27 (employment); April-2024 CPI now
+resolves to `2024-05-17` — 2 days *after* the real print (safe), and is correctly
+invisible as-of `2024-05-14`. Verdict: monthly-macro PIT timing confirmed
+non-leaking after the fix; daily market series carry a 1-bday lag.
+
+**What changed in code.**
+- `services/cot_ingest.py` — `DEFAULT_SERIES` rebuilt: 1 → **27** source-verified
+  CFTC codes (energy/metals/grains/softs/livestock), values are exact universe
+  display names; the ingest now persists the `instrument` column so cross-sectional
+  COT signals join straight onto price-panel columns. ETF/index proxies and crypto
+  (no managed-money line in this report) are intentionally omitted.
+- `services/eia_ingest.py` — added `SERIES_TO_INSTRUMENT` (crude→WTI Crude Oil,
+  gasoline→Gasoline (RBOB), distillate→Heating Oil, nat-gas→Natural Gas) and
+  attaches `instrument` on write. Existing EIA rows backfilled in place via SQL
+  (label-only update; values/dates untouched).
+- `services/fred_ingest.py` — **new** release-dated macro feed: 12 series
+  (CPIAUCSL, PPIACO, T10YIE, UNRATE, PAYEMS, INDPRO, DGS10, DGS2, T10Y2Y, DFF,
+  VIXCLS, DTWEXBGS) with per-series publication lags.
+
+**DB after expansion** (`fundamental_observations`): cftc 22,162 rows / 27 series
+/ 27 instruments (was 1/1/0); eia 7,314 rows / 4 series / 4 instruments (was
+4 series/0 instruments); fred 31,644 rows / 12 series (new); usda unchanged. All
+27 COT instruments verified to join the live price panel (0 unmatched). Tests:
+`pytest data/ services/` → 264 passed; `lint-imports` 4/4 contracts kept.
+
+**Open items (flagged, not silently assumed).** (1) FRED/CFTC release dates remain
+calendar approximations — ALFRED (FRED) and exact COT publish timestamps are the
+vintage-truth upgrade. (2) EIA refetch needs `EIA_API_KEY` in the launchd env
+(present in `.env`); this session backfilled labels by SQL because the key was not
+loaded in the interactive shell. (3) No signal shipped here — this is data-layer
+groundwork; the COT-reversal / inventory-surprise / macro-surprise signals are the
+next wave and must each clear the gate on their own.
