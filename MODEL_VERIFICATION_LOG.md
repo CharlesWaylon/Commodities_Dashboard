@@ -955,3 +955,55 @@ deferred until it can be justified on an independent window.
 universe (a component such as COT may score instruments beyond the given panel).
 Tests `pytest signals/ evaluation/` green (26 passed incl. the look-ahead property
 test over the ensemble); `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — Orthogonal wave: reversal_st (strong), low_vol (null), ensemble_v1 rebuilt
+
+**What was built.** Two price-only edges intended to add breadth orthogonal to
+momentum: `reversal_st` (1-month short-term reversal, -z of the trailing 21-day
+vol-scaled return; Jegadeesh 1990, Lehmann 1990) and `low_vol` (betting-against-vol,
+-z of trailing realised volatility; Frazzini-Pedersen 2014).
+
+**Standalone gate results (walk-forward, purged/embargoed, cost-adjusted; full
+universe).**
+- `reversal_st` — ⚠️ right-signed, sub-threshold, STRONG at H10. IC 0.017 / 0.049 /
+  0.034; IC IR 0.075 / 0.208 / 0.144; t-stat 1.33 / 2.63 / 1.26; net LS Sharpe
+  0.17 / 0.53 / 0.26. The H10 IC (0.049, t=2.63) is the best single-signal IC in
+  the project so far. High turnover (0.70-1.43) as expected for a reversal. REJECTED
+  standalone but a clear ensemble candidate. Note this confirms the carry_proxy
+  finding (short-horizon momentum reverses) with a sign-correct factor.
+- `low_vol` — ❌ NULL. IC ≈ 0 at every horizon (0.007 / 0.001 / 0.009; |t| < 0.5)
+  and net LS Sharpe NEGATIVE (-0.50 / -0.39 / -0.27). The low-risk anomaly does not
+  rank this commodity cross-section: it is an equity-centric effect, and here a vol
+  ranking is largely a static low-vol-ETF vs high-vol (BTC/nat-gas) tilt that lost
+  over the sample. Not an ensemble candidate (orthogonal, but orthogonal NOISE).
+  Verdict: low-vol anomaly not present cross-sectionally in this universe.
+
+**Orthogonality check (mean cross-sectional rank-corr, H10).** momentum/cot +0.59,
+momentum/reversal **-0.10**, cot/reversal **-0.28**, low_vol vs all ≈ 0. reversal_st
+is genuinely orthogonal (indeed anti-correlated) — exactly the breadth the ensemble
+needed; low_vol is orthogonal but null.
+
+**ensemble_v1 rebuilt (momentum_xs + cot_risk_premium + reversal_st, equal
+weight).** Best composite to date, still REJECTED: IC 0.034 / 0.055 / 0.050; IC IR
+0.159 / **0.253** / 0.241; t-stat 2.82 / **3.19** / 2.10; net LS Sharpe 0.41 /
+**0.71** / 0.53; turnover 0.50 / 0.71 / 1.01. Versus the 2-component composite, H10
+IC IR rose 0.182 → 0.253 and net LS Sharpe 0.46 → 0.71 (Δ+0.25) — the
+anti-correlated reversal added real diversification. t-stats are now strongly
+significant (>3 at H10).
+
+**Verdict — methodology validated, bar not yet cleared.** IC IR has tracked
+0.19 → 0.21 → 0.25 (H10) as genuinely orthogonal edges are added; the gate's
+0.30 IC IR bar remains unmet but is now close, with a t-stat > 3 and a
+cost-adjusted LS Sharpe of 0.71 at the 10-day horizon. The bar was NOT moved.
+Path to promotion: one or two more orthogonal edges (e.g. a true term-structure
+carry/basis once the stitched-M2 series exists; a commodity value / long-run
+mean-reversion factor), then re-form. Weight-optimisation remains deferred until it
+can be justified out-of-sample.
+
+**What changed in code.** Added `signals/reversal.py` (`reversal_st`) and
+`signals/lowvol.py` (`low_vol`), registered in `signals/base`; added `reversal_st`
+to `ensemble_v1.COMPONENTS` (low_vol excluded as a null). Tests `pytest signals/
+evaluation/` green (27 in the PIT/contract set); `lint-imports` 4/4. Scorecards
+persisted.
