@@ -907,3 +907,51 @@ multivariate OLS betas for the whole cross-section at once (one K×K solve per d
 PIT factor panel from the FRED store (daily unrevised series stamped by
 release_date). Registered in `signals/base`. Tests `pytest signals/ evaluation/`
 green; `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — ensemble_v1: composite lifts significance, still sub-threshold (REJECTED)
+
+**What was built.** `ensemble_v1` — a deliberately parameter-free equal-weight
+composite of the right-signed, gate-confirmed-but-sub-threshold edges. For each
+horizon it standardises each component's cross-sectional forecast, averages across
+the components covering each instrument, and re-standardises. No weights are fitted
+(fitting them on the same history the gate scores would be the in-sample
+optimisation this rebuild exists to avoid).
+
+**Finding — two of the three candidates were the SAME signal.** Measured mean
+cross-sectional rank-correlation of the component forecasts (H10, 41 sampled
+dates): `momentum_xs` vs `trend_ts` = **+1.000**; each vs `cot_risk_premium` =
++0.59. The perfect correlation is correct-by-construction: both momentum signals
+are the identical 12-1 vol-scaled trailing return, differing only in that
+`momentum_xs` cross-sectionally demeans — and demeaning does not change RANKS, so
+under the gate's rank-IC + dollar-neutral book they are indistinguishable. (Their
+standalone scorecards were already near-identical.) The time-series vs
+cross-sectional distinction only matters for net-directional exposure, which the
+dollar-neutral gate does not reward. `trend_ts` was therefore dropped from the
+composite to avoid silently double-weighting momentum; the distinct edges are
+`momentum_xs` + `cot_risk_premium`.
+
+**Result (walk-forward, purged/embargoed, cost-adjusted; momentum_xs +
+cot_risk_premium, equal weight).** Still REJECTED, but the best composite so far:
+IC 0.029 / 0.039 / 0.041, IC IR 0.131 / 0.182 / 0.208, t-stat 2.20 / 2.29 / 1.81,
+net LS Sharpe 0.33 / 0.46 / 0.46, turnover 0.20-0.42. Versus the best standalone
+(momentum IC IR 0.191 at H21), the ensemble nudges H21 IR to 0.208 and — more
+importantly — pushes the short-horizon t-stats to significance (>2). But IC IR
+remains < 0.30 at every horizon.
+
+**Verdict — combining two positively-correlated edges is not enough breadth.**
+With effective breadth ≈ 2 and component correlation 0.59, the IR lift is modest
+(0.19 → 0.21). Clearing 0.30 requires genuinely ORTHOGONAL components, not more
+momentum. The clear path: build the price-only edges deferred when we chose to
+expand the data layer first — short-term reversal (≈ anti-momentum at short
+horizon; empirically motivated by the carry_proxy negative-IC finding) and
+low-volatility / betting-against-vol (Frazzini-Pedersen 2014) — both near-orthogonal
+to momentum, then re-form the ensemble. Weight-optimisation (IC/risk-weighting) is
+deferred until it can be justified on an independent window.
+
+**What changed in code.** Added `signals/ensemble.py` (`EnsembleComposite`,
+`ensemble_v1`), registered in `signals/base`; restricts output to the panel
+universe (a component such as COT may score instruments beyond the given panel).
+Tests `pytest signals/ evaluation/` green (26 passed incl. the look-ahead property
+test over the ensemble); `lint-imports` 4/4. Scorecard rows persisted.
