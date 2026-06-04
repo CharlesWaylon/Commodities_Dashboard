@@ -480,6 +480,12 @@ def render_sidebar_nav():
         st.page_link("pages/11_Macro_Exposure.py",       label="Macro Exposure")
         st.page_link("pages/12_Alerts.py",               label="Alerts")
 
+        # Research-grade surface — only listed when its feature flag is on.
+        import os
+        if os.getenv("SIGNAL_RESEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            st.divider()
+            st.page_link("pages/13_Signal_Lab.py",       label="Signal Lab ⚗️")
+
 
 def panel_header(title: str, badge: str = "", badge_color: str = SIGNAL):
     """Styled panel section label with optional badge."""
