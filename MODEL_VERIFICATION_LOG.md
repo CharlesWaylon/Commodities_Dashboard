@@ -648,3 +648,60 @@ Grain Stocks release calendar would be exact.
 
 **Reproduce.** ``FUNDAMENTAL_FEEDS_ENABLED=true python -m services.{cot,eia,usda}_ingest``
 (needs EIA_API_KEY / USDA_QUICKSTATS_KEY in .env). Tests: ``pytest data/``.
+
+---
+
+## 2026-06-03 — Phase 2 wave-1 signals through the gate (trend_ts, carry_proxy, seasonality)
+
+**What was verified.** Three new price-only Signal producers, each run through the
+walk-forward / purged-embargoed / cost-adjusted IC gate
+(`python -m evaluation.harness --signal NAME --horizons 5,10,21`). Promotion bar:
+IC mean > 0, IC IR ≥ 0.30, fold-sign-frac ≥ 0.60, net LS Sharpe ≥ 0.
+
+**trend_ts (time-series momentum, 12-1 vol-scaled) — ⚠️ inconclusive (right sign,
+under the bar).** IC is positive and rising with horizon (H5 0.032, H10 0.037,
+H21 0.040) with positive t-stats (2.40 / 1.98 / 1.67) and positive net LS returns
+— exactly the direction Moskowitz-Ooi-Pedersen (2012) predict, and the horizon
+profile (premium strengthening out to a month) matches the literature. But IC IR
+tops out at 0.19 < 0.30, so it is too noisy on this 40-instrument universe/sample
+to promote. **Verdict: economically confirmed, statistically not yet promotable —
+held out of the ensemble.** Candidate for promotion once breadth grows or it is
+combined with the cross-sectional book (the two trend forms are near-orthogonal).
+
+**carry_proxy (mom10/vol21 risk-adjusted short momentum) — ❌ refuted as a proxy.**
+The placeholder hypothesis (short-horizon front strength stands in for
+backwardation) is wrong in this universe: IC is *negative* at every horizon
+(−0.029 / −0.045 / −0.064), t-stats significantly negative, net LS Sharpe ≈ −1.1
+to −1.4 with turnover > 1.0/period. Short-horizon momentum here *reverses*, and
+costs make the short-leg book actively lose. This is a useful negative: it
+confirms the proxy must NOT be trusted as carry — the signal stays gated as
+inconclusive-by-construction exactly as its docstring warns, and the real edge
+waits on the stitched-M2 term-structure basis (Erb-Harvey 2006,
+Gorton-Rouwenhorst 2006, Koijen 2018). **Verdict: refuted as a carry stand-in; do
+not promote; prioritise the true basis series.**
+
+**seasonality (forward-window expected return from calendar-month means) — ⚠️
+inconclusive (no cross-sectional edge).** IC ≈ 0 and weakly negative
+(−0.006 / −0.009 / −0.011), t-stats |·| < 0.5 — indistinguishable from noise.
+The physical rationale is sound (Sorensen 2002; energy seasonality), but a single
+pooled monthly-mean read does not produce a *cross-sectionally* rankable edge net
+of cost on this universe — likely because seasonal effects are
+instrument-specific (nat-gas winter, gasoline summer, grains harvest) and cancel
+when ranked against each other on the same calendar month. **Verdict: no promotable
+cross-sectional edge as constructed; revisit as a per-instrument timing overlay
+rather than a cross-sectional ranker.**
+
+**What changed in code.** Added `signals/trend.py` (TimeSeriesMomentum / trend_ts),
+`signals/carry.py` (CarryProxy / carry_proxy), `signals/seasonality.py`
+(Seasonality); registered all three in `signals/base._ensure_signals_imported()`.
+No promotions — all three correctly REJECTED by the gate and held out of the
+ensemble. Scorecard rows persisted to `signal_scorecard`. The contract test and
+the look-ahead property test both parametrize over `list_signals()`, so the three
+new signals are covered automatically (`pytest signals/ evaluation/` green;
+`lint-imports` 4/4 contracts kept).
+
+**Takeaway.** The gate did its job on the first real wave: of three economically-
+motivated candidates, zero cleared the bar, and each rejection is interpretable
+(trend = real but noisy, carry-proxy = wrong-signed placeholder, seasonality =
+not cross-sectional). This is the intended behaviour — the spine rejects honestly
+rather than shipping near-random forecasts.
