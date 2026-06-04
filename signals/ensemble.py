@@ -43,18 +43,20 @@ class EnsembleComposite(Signal):
 
     name = "ensemble_v1"
     #: Right-signed, gate-confirmed-but-sub-threshold, mutually DISTINCT edges
-    #: (2026-06-04). trend_ts is deliberately excluded: under cross-sectional
-    #: ranking it is identical to momentum_xs (corr +1.000 — both are the 12-1
-    #: vol-scaled trailing return, and demeaning does not change ranks), so adding
-    #: it would just double-weight momentum rather than add breadth.
-    COMPONENTS = ("momentum_xs", "cot_risk_premium")
+    #: (2026-06-04). Pairwise cross-sectional rank-corr (H10): momentum/cot +0.59,
+    #: momentum/reversal -0.10, cot/reversal -0.28 — reversal_st adds genuinely
+    #: orthogonal (indeed anti-correlated) breadth.
+    #: Excluded: trend_ts (corr +1.000 with momentum_xs under ranking — demeaning
+    #: doesn't change ranks, so it would only double-weight momentum); low_vol
+    #: (near-zero IC in this universe — orthogonal but a null, would add noise).
+    COMPONENTS = ("momentum_xs", "cot_risk_premium", "reversal_st")
     economic_rationale = (
         "Equal-weight composite of economically-confirmed, right-signed but "
         "individually sub-threshold and mutually distinct edges — cross-sectional "
-        "momentum and the COT hedging-pressure risk premium (cross-sectional "
-        "rank-corr ~0.59). Diversifying across imperfectly-correlated signals raises "
-        "the information ratio (Edge = IC × √breadth) without fitting in-sample "
-        "weights."
+        "momentum, the COT hedging-pressure risk premium, and short-term reversal. "
+        "Their low / negative mutual correlation (momentum/cot +0.59, "
+        "momentum/reversal -0.10, cot/reversal -0.28) raises the information ratio "
+        "(Edge = IC × √breadth) without fitting any in-sample weights."
     )
 
     def __init__(self):
