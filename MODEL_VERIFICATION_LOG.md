@@ -818,3 +818,44 @@ with a shared `_CotPositioning` base and two registered signals (`cot_reversal`,
 property test and contract test cover both automatically via `list_signals()`
 (`pytest signals/ evaluation/` green; `lint-imports` 4/4). Scorecard rows persisted
 to `signal_scorecard`.
+
+---
+
+## 2026-06-04 — Inventory-surprise signal: no cross-sectional edge as built (REJECTED)
+
+**What was verified.** `inventory_surprise` — EIA weekly stocks deseasonalised by
+week-of-year, forecast = -z(level vs trailing seasonal norm), i.e. surplus bearish
+/ deficit bullish (theory of storage: Working 1949; Gorton-Hayashi-Rouwenhorst
+2013). Scored on the EIA-covered energy sub-universe (crude→WTI, gasoline→RBOB,
+distillate→Heating Oil, nat-gas→Natural Gas) with `--min-cross-section 4`.
+
+**Result (walk-forward, purged/embargoed, cost-adjusted; 4-instrument
+cross-section).** ❌ REJECTED at all horizons. IC ≈ 0 at H5 (+0.008, t=0.22),
+mildly negative at H10/H21 (−0.033 / −0.087; t = −0.69 / −1.25); net LS Sharpe
+negative throughout (−0.42 / −0.29 / −0.32). The near-zero short-horizon IC and
+weak t-stats indicate NOISE, not a clean wrong sign — flipping would not rescue
+it (H5 stays ~0), so unlike cot_reversal no risk-premium variant is warranted.
+
+**Verdict — inconclusive / not cross-sectionally rankable as built; theory of
+storage NOT refuted.** Two structural reasons, both economic rather than coding:
+(1) **Degenerate cross-section** — the 4 EIA instruments are one tightly
+co-moving energy complex (dominated by the common crude factor), so ranking them
+against each other each week is close to meaningless; the theory-of-storage edge
+in the literature is cross-sectional across DOZENS of commodities or time-series
+per instrument, neither of which a 4-name energy book tests. (2) **News
+absorption** — the weekly EIA print moves prices on release day; by the next daily
+decision date the surprise is largely in the price, leaving little for a 5–21 day
+cross-sectional book. This mirrors the `seasonality` finding: economically sound,
+not a cross-sectional ranker in this form.
+
+**Revisit path (not done now).** (a) a per-instrument TIME-SERIES overlay (long
+each energy contract when its OWN inventory is tight) evaluated with a time-series
+harness; (b) re-test cross-sectionally once inventory breadth spans many more
+commodities (LME metals stocks, USDA/CONAB ags), so the cross-section is genuinely
+diverse. Until then it ships rejected and is held out of the ensemble.
+
+**What changed in code.** Added `signals/inventory.py` (`InventorySurprise`),
+registered in `signals/base`. Added a general `--min-cross-section` flag to
+`evaluation/harness.py` (default unchanged at 5) so sub-universe signals are
+scoreable without weakening the default gate. Tests `pytest signals/ evaluation/`
+green (22 passed); `lint-imports` 4/4. Scorecard rows persisted.
