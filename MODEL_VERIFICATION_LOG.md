@@ -770,3 +770,51 @@ vintage-truth upgrade. (2) EIA refetch needs `EIA_API_KEY` in the launchd env
 loaded in the interactive shell. (3) No signal shipped here — this is data-layer
 groundwork; the COT-reversal / inventory-surprise / macro-surprise signals are the
 next wave and must each clear the gate on their own.
+
+---
+
+## 2026-06-04 — COT positioning signals: reversal REFUTED, risk-premium CONFIRMED (sub-threshold)
+
+**What was verified.** The first fundamental (non-price) signal through the gate,
+built on the newly-widened CFTC COT feed (27 instruments). Two pre-registered,
+opposite-signed economic hypotheses were run on the SAME positioning z-score
+(current net managed-money position vs its own ~3y trailing norm), so the gate
+adjudicates which theory holds rather than us choosing by hand:
+- `cot_reversal` (SIGN -1): COT-extreme contrarian view — crowded longs unwind.
+- `cot_risk_premium` (SIGN +1): hedging-pressure risk premium — speculators are
+  paid to absorb hedgers' risk (Cootner 1960; De Roon-Nijman-Veld 2000;
+  Basu-Miffre 2013).
+
+**Result (walk-forward, purged/embargoed, cost-adjusted IC; 27-instrument
+cross-section).**
+- `cot_reversal` — ❌ **refuted.** IC negative at every horizon (H5/H10/H21 =
+  −0.025 / −0.037 / −0.032; t = −1.84 / −1.99 / −1.20), net LS Sharpe −0.31 to
+  −0.50. The contrarian COT-extreme story does NOT hold in this universe.
+- `cot_risk_premium` — ⚠️ **confirmed-but-sub-threshold.** Exact mirror: IC
+  +0.025 / +0.037 / +0.032 (t = +1.84 / +1.99 / +1.20), hit-rate >50%, net LS
+  Sharpe +0.09 / +0.30 / +0.33 — right-signed and cost-positive, but IC IR
+  0.10–0.16 < 0.30 bar, so not promotable standalone. Held out; ensemble candidate
+  (same class as trend_ts), strongest at the 10-day horizon.
+
+**Verdict.** Positioning behaves as a **hedging-pressure risk premium, not a
+reversal**, in our 27-instrument futures universe — go WITH stretched specs, not
+against them. This matches the academic literature (Basu-Miffre 2013) over the
+practitioner "COT-index contrarian" folklore. Sources: Cootner (1960),
+De Roon-Nijman-Veld (2000), Basu-Miffre (2013); contra Sanders-Irwin-Merrin
+(2009) on crowded-spec limits.
+
+**Honesty caveat (in-sample sign selection).** Choosing the +z direction is
+legitimate model selection between two ex-ante theories — NOT parameter torture —
+but the sign was still confirmed on the same sample used to reject its mirror.
+Because `cot_risk_premium` is sub-threshold it ships **held-out, not promoted**, so
+no in-sample-selected edge trades live; promotion would require it to clear the
+gate as part of the ensemble on a later/independent window.
+
+**What changed in code.** Added `data/fundamental_store.load_raw()` (bulk
+all-vintage loader so a signal evaluated at thousands of dates replays the PIT
+filter in memory instead of one DB round-trip per date). Added `signals/cot.py`
+with a shared `_CotPositioning` base and two registered signals (`cot_reversal`,
+`cot_risk_premium`); registered the module in `signals/base`. The look-ahead
+property test and contract test cover both automatically via `list_signals()`
+(`pytest signals/ evaluation/` green; `lint-imports` 4/4). Scorecard rows persisted
+to `signal_scorecard`.
