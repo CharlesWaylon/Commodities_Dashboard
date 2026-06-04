@@ -430,10 +430,22 @@ def render(card: SignalScorecard, previous: Optional[Dict[int, dict]] = None) ->
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────
-def _load_panel():
-    """Canonical point-in-time price panel from the data layer."""
-    from models.data_loader import load_price_matrix_from_db
+def _load_panel(source: str = "aligned"):
+    """
+    Point-in-time price panel from the data layer.
 
+    source="aligned"   -> production ~5y common panel (load_price_matrix_from_db).
+    source="long_core" -> deep ~24y core-futures panel (research; multi-regime).
+    """
+    from models.data_loader import load_long_history_core_panel, load_price_matrix_from_db
+
+    if source == "long_core":
+        panel = load_long_history_core_panel()
+        if panel is None or panel.empty:
+            raise RuntimeError(
+                "long_core panel is empty — run `python -m services.deep_history_ingest` first."
+            )
+        return panel
     return load_price_matrix_from_db()
 
 
@@ -451,11 +463,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         "signals, e.g. 4 for the energy-only inventory feed). Default 5.",
     )
     ap.add_argument("--no-db", action="store_true", help="do not persist to signal_scorecard")
+    ap.add_argument(
+        "--panel", default="aligned", choices=["aligned", "long_core"],
+        help="price panel: 'aligned' (production ~5y) or 'long_core' (deep ~24y "
+        "core futures, research/multi-regime). Default aligned.",
+    )
     args = ap.parse_args(argv)
 
     horizons = tuple(int(x) for x in args.horizons.split(",") if x.strip())
     signal = get_signal(args.signal)
-    panel = _load_panel()
+    panel = _load_panel(args.panel)
     config = HarnessConfig(
         n_splits=args.n_splits,
         cost_bps=args.cost_bps,
