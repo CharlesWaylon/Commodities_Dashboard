@@ -1258,3 +1258,42 @@ allocators and portfolio backtest to build on next.
 preservation, conditioning improvement, sample-method equivalence, the point-in-time
 property (future rows can't change an as-of estimate), insufficient-history → None,
 unit-diagonal correlation, vol annualisation. All green.
+
+---
+
+## 2026-06-04 — Layer 3 (3.2): forecast → position allocator built & verified
+
+**What was built.** `portfolio/allocators.py` — the forecast→position mapping that
+sits on the risk model. Four ingredients, all standard institutional practice:
+1. Risk-parity-aware inverse-vol sizing (each bet scaled by 1/σ_i from the risk
+   model, equalising risk contributions rather than dollars).
+2. Concentration caps — per-name and per-sector gross caps via iterated
+   water-filling.
+3. Portfolio-vol targeting — scale the whole book so ex-ante annualised vol
+   (sqrt(wᵀΣw)) hits a target; gross leverage is the output, capped for safety.
+4. Horizon sleeves — the {5,10,21}-day forecasts are three separate capped books
+   blended with tunable sleeve weights, making turnover/decay an explicit dial.
+`RiskScaledAllocator` (single horizon, implements the Phase-0 `Allocator` ABC) and
+`SleeveAllocator` (multi-horizon blend → `AllocationResult` with diagnostics).
+
+**Two bugs caught and fixed during verification.**
+1. Concentration caps broke dollar-neutrality (asymmetric clipping left net ≈ -0.26
+   on real data). Fixed by re-imposing neutrality inside the cap water-filling loop
+   (centering preserves zero-sum through the later global vol-target scaling).
+2. Blending independently-capped sleeves could violate the per-name cap: cross-
+   sleeve cancellation shrinks gross faster than individual weights, inflating a
+   name's fraction past the cap. Fixed by RE-APPLYING the caps to the blended book
+   (the final portfolio is what must satisfy the constraints) before vol-targeting.
+
+**Verification (real data — value signal on long_core, 252-day risk window).**
+Across equal / fast-only / slow-only sleeve mixes the book hits every constraint
+exactly: ex-ante vol 0.100 (target 0.10), net exposure ~1e-17 (dollar-neutral),
+max single-name 0.100 (cap 0.10), max sector 0.350 (cap 0.35), 25 names. Verdict:
+constraints provably satisfied; sizing is risk-parity-aware (low-vol names carry
+more weight for equal signal).
+
+**Tests.** `portfolio/test_allocators.py` (7): all-constraints-respected,
+inverse-vol favours low-vol names, name-cap binds when tight, sleeve weights change
+the blend, vol-target scaling is proportional (0.05 vs 0.20 → ~4× gross),
+leverage-cap binds, empty forecast → empty. `pytest portfolio/` 15 green;
+`lint-imports` 4/4.
