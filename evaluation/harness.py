@@ -443,13 +443,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--horizons", default="5,10,21", help="comma-separated trading-day horizons")
     ap.add_argument("--cost-bps", type=float, default=10.0, help="per-side transaction cost (bps)")
     ap.add_argument("--n-splits", type=int, default=5, help="walk-forward folds for sign-stability")
+    ap.add_argument(
+        "--min-cross-section",
+        type=int,
+        default=HarnessConfig.min_cross_section,
+        help="min instruments with a view to score a date (lower for sub-universe "
+        "signals, e.g. 4 for the energy-only inventory feed). Default 5.",
+    )
     ap.add_argument("--no-db", action="store_true", help="do not persist to signal_scorecard")
     args = ap.parse_args(argv)
 
     horizons = tuple(int(x) for x in args.horizons.split(",") if x.strip())
     signal = get_signal(args.signal)
     panel = _load_panel()
-    config = HarnessConfig(n_splits=args.n_splits, cost_bps=args.cost_bps)
+    config = HarnessConfig(
+        n_splits=args.n_splits,
+        cost_bps=args.cost_bps,
+        min_cross_section=args.min_cross_section,
+    )
 
     card = run_signal(signal, panel, horizons=horizons, config=config)
     previous = load_previous(card.signal_name, card.run_at) if not args.no_db else None
