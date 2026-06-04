@@ -1099,3 +1099,69 @@ test (needs the aligned panel's common history to deepen past one commodity-bull
 regime). macro betas should be deployed in the risk/covariance layer rather than as
 alpha. Component weighting remains equal-weight until an out-of-sample (nested
 walk-forward) scheme can justify otherwise.
+
+---
+
+## 2026-06-04 — Multi-regime value: FIRST GATE PASS (PROMOTE on deep panel) + regime findings
+
+**Context.** The 5-year aligned panel rejected `value` (wrong-signed). Hypothesis:
+that sample is a single trend-dominated commodity-bull regime, which is exactly
+when value underperforms — not evidence the factor is dead. To test fairly we
+backfilled ~24y of deep history for the core futures and re-gated.
+
+**What was built.** `services/deep_history_ingest.py` backfills 25 core genuine
+futures (~21 trading-years, 2001→2026) from Yahoo into `price_history` under a
+DISTINCT `interval='1d_deep'` (production `'1d'` untouched). `load_long_history_core_panel()`
+reads it; `evaluation/harness.py` gains `--panel aligned|long_core` (default
+aligned). Multi-regime runs use `--no-db` (the ledger has no panel column yet), so
+the machine scorecard stays aligned-panel-only; results recorded here.
+
+**Result on long_core (21y, 25 instruments, walk-forward / purged / cost-adjusted).**
+- `value` — ✅ **PROMOTE** (project's first). H5 IC 0.036 (IR 0.131, t 3.86);
+  H10 IC 0.059 (IR 0.219, t 4.55, LS Sharpe 1.26); **H21 IC 0.098 (IR 0.348,
+  t 4.99, net LS Sharpe 1.18) — clears the 0.30 bar.** Strengthens with horizon,
+  exactly as a slow mean-reversion factor should.
+- `momentum_xs` — ❌ now NEGATIVE IC (−0.004 / −0.010 / −0.023) on the true 21y
+  sample (note: on long_core's trading-day index, 252 rows = a true 12-1 window).
+  Cross-sectional commodity momentum is weak/regime-dependent over the full cycle —
+  its positive 5y reading was regime-specific.
+- `reversal_st` — ❌ right-signed and robust across regimes (IC 0.021 / 0.037 /
+  0.044; IR up to 0.173; t 2.5-3.0), consistent with the 5y result.
+
+**External verification (MODEL VERIFICATION RULE) — CONFIRMED.** The multi-regime
+value result matches the literature: Asness-Moskowitz-Pedersen (2013, "Value and
+Momentum Everywhere") document a significant commodity value premium and a strong
+NEGATIVE value/momentum correlation. We measure value vs momentum rank-corr −0.65
+and value t≈5 at the monthly horizon — consistent in sign, magnitude and the
+value/momentum diversification. Verdict: confirmed; value is a genuine,
+economically-grounded, gate-clearing edge over a proper multi-regime sample.
+
+**Regime insight.** value and momentum are two sides of one coin: value was in
+drawdown over 2021-26 (trend regime) precisely when momentum worked, and vice
+versa over the full cycle. This is the textbook case FOR combining them — neither is
+reliable alone, but their −0.65 correlation makes the pair powerful across regimes.
+
+**Caveats (do not over-claim a live promotion).**
+1. **Panel.** value PROMOTES on the research long_core panel (25 core futures, 21y)
+   but is REJECTED on the production aligned panel (41 instruments, 5y) — because
+   the production sample is value's drawdown regime. It must NOT be naively added to
+   the current production ensemble, where it is presently adverse.
+2. **Series construction.** `1d_deep` is RAW Yahoo continuous front-month, NOT
+   roll-adjusted (unlike the production pipeline). Multi-year value uses price
+   ratios, which carry some roll noise; the result should be re-confirmed on a
+   cleanly roll-adjusted (or spot/index) deep series before any live deployment.
+3. **Promotion is at H21 only**, on a deep research universe; treat as validated-in-
+   research, not yet wired live.
+
+**Path forward.** (a) Re-gate the ENSEMBLE on long_core (value + reversal + cot
+post-2010) to see whether the value/momentum/positioning blend clears the bar
+across a full cycle. (b) Add a `panel` column to `signal_scorecard` so multi-regime
+runs are first-class in the machine ledger. (c) Roll-adjust the deep series and
+re-confirm. (d) For production, treat value as a regime-diversifier to be combined,
+not a standalone live signal yet.
+
+**What changed in code.** `services/deep_history_ingest.py` (new),
+`models/data_loader.py::load_long_history_core_panel` (new),
+`evaluation/harness.py` `--panel` flag. Tests `pytest signals/ evaluation/` green
+(32); `lint-imports` 4/4. 157,944 `1d_deep` rows ingested; production `1d`
+unaffected.
