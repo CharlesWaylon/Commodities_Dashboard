@@ -1046,3 +1046,56 @@ the canonical ~5y reference).
 **What changed in code.** Added `signals/value.py` (`value`), registered in
 `signals/base`. NOT added to `ensemble_v1`. Tests `pytest signals/ evaluation/`
 green; `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — Phase 2 conclusion: research ensemble shipped behind a flag (NOT promoted)
+
+**Decision.** Stop adding signals for now and accept the composite as the honest
+Phase-2 research output. Wire it into the dashboard as a research-grade, NOT-promoted
+surface behind a feature flag, and move on. (No goalposts moved; the 0.30 IC IR bar
+stands and remains unmet.)
+
+**Phase-2 signal scorecard (all gate verdicts, full universe unless noted).**
+| signal | best horizon | IC IR | verdict | note |
+|---|---|---|---|---|
+| momentum_xs | H21 | 0.191 | reject | right-signed, sub-threshold |
+| trend_ts | H21 | 0.191 | reject | == momentum_xs under ranking (corr +1.000) |
+| carry_proxy | — | <0 | reject | wrong-signed proxy; needs real basis |
+| seasonality | — | ~0 | reject | not cross-sectional as built |
+| cot_reversal | — | <0 | reject | reversal refuted |
+| cot_risk_premium | H10 | 0.158 | reject | right-signed (hedging pressure) — KEEP |
+| inventory_surprise | — | ~0 | reject | degenerate 4-name energy cross-section |
+| macro_surprise | — | <0/~0 | reject | betas real → belong in risk layer |
+| reversal_st | H10 | 0.208 | reject | right-signed, strong — KEEP |
+| low_vol | — | ~0 | reject | low-risk anomaly absent here |
+| value | — | <0 | reject | wrong-signed on single-regime 5y sample |
+| **ensemble_v1** | **H10** | **0.253** | **reject** | **best honest result** |
+
+**ensemble_v1** = equal-weight(momentum_xs, cot_risk_premium, reversal_st), the
+three right-signed, mutually-distinct edges. Best at H10: IC 0.055, IC IR 0.253,
+t-stat 3.19, cost-adjusted net LS Sharpe 0.71 — significant and economically
+meaningful, but below the 0.30 IC IR promotion bar. The IR climbed 0.19 → 0.21 →
+0.25 as orthogonal breadth was added, validating the Edge = IC × √breadth approach;
+it simply has not crossed the bar yet.
+
+**What shipped (Dashboard Evolution Rule compliant).**
+- `evaluation/reporting.py` — read-only, presentation-agnostic helpers (latest
+  scorecard; current ensemble cross-sectional tilts), defensive/empty-on-failure.
+- `pages/13_Signal_Lab.py` — new ADDITIVE page gated by `SIGNAL_RESEARCH_ENABLED`
+  (default OFF). Loud "RESEARCH-GRADE — NOT PROMOTED" banner; renders the gate
+  scorecard and the current dollar-neutral ensemble tilts. Thin: all computation
+  stays in the signal/eval layers. No existing page or model was modified or
+  replaced.
+- `utils/theme.py` — sidebar lists "Signal Lab ⚗️" only when the flag is on.
+
+**Rollback.** `unset SIGNAL_RESEARCH_ENABLED` (or set false) removes the surface
+entirely — no redeploy. Old paths untouched.
+
+**Open path to promotion (future).** The two most promising orthogonal edges remain
+data-blocked or regime-blocked: a true term-structure carry/basis (needs the
+stitched-M2 deferred-contract series — a data-layer build) and a multi-regime value
+test (needs the aligned panel's common history to deepen past one commodity-bull
+regime). macro betas should be deployed in the risk/covariance layer rather than as
+alpha. Component weighting remains equal-weight until an out-of-sample (nested
+walk-forward) scheme can justify otherwise.
