@@ -157,7 +157,7 @@ def _ensure_signals_imported() -> None:
     _IMPORTED = True
     from importlib import import_module
 
-    for mod in ("signals.momentum", "signals.trend", "signals.carry", "signals.seasonality"):
+    for mod in ("signals.momentum", "signals.trend", "signals.carry", "signals.seasonality", "signals.cot"):
         try:
             import_module(mod)
         except Exception:  # pragma: no cover - a broken signal module shouldn't kill the registry
