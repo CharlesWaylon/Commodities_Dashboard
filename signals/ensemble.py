@@ -120,3 +120,34 @@ class EnsembleComposite(Signal):
         if not produced:
             return self._empty_frame(panel.columns)
         return out
+
+
+@register_signal
+class EnsembleV2MultiRegime(EnsembleComposite):
+    """Multi-regime composite: value + short-term reversal + COT risk premium.
+
+    Built for the deep ~21y ``long_core`` panel, where ``value`` PROMOTES (H21 IC IR
+    0.348) and cross-sectional ``momentum_xs`` flips wrong-signed over the full cycle
+    — so momentum is dropped and the gate-clearing multi-regime value factor leads.
+    On long_core (H21) the three are well-diversified: value/reversal +0.18,
+    value/cot -0.21, reversal/cot -0.22. Inherits the equal-weight combine logic;
+    only the component set differs.
+
+    HONESTY CAVEAT: the component set was chosen partly from long_core results
+    (include value because it promoted there; drop momentum because it is
+    wrong-signed there). That is in-sample component selection — legitimate model
+    selection among economically-motivated, individually-validated edges, but a
+    LIVE promotion still requires nested / out-of-sample component selection. Until
+    then this is a research composite, not a promoted live signal.
+    """
+
+    name = "ensemble_v2"
+    COMPONENTS = ("value", "reversal_st", "cot_risk_premium")
+    economic_rationale = (
+        "Equal-weight multi-regime composite of value (long-horizon mean reversion; "
+        "gate-clearing on the 21y panel), short-term reversal, and the COT "
+        "hedging-pressure risk premium. Low/negative mutual correlation (value/"
+        "reversal +0.18, value/cot -0.21, reversal/cot -0.22) gives genuine breadth; "
+        "cross-sectional momentum is excluded as wrong-signed over the full cycle. "
+        "Equal weight, no in-sample weight fitting."
+    )
