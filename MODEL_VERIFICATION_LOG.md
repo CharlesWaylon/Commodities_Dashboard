@@ -1165,3 +1165,46 @@ not a standalone live signal yet.
 `evaluation/harness.py` `--panel` flag. Tests `pytest signals/ evaluation/` green
 (32); `lint-imports` 4/4. 157,944 `1d_deep` rows ingested; production `1d`
 unaffected.
+
+---
+
+## 2026-06-04 — Ensemble on the multi-regime panel: value alone beats the blend
+
+**What was tested.** Re-gated the ensemble on the deep 21y long_core panel, and
+built `ensemble_v2` = value + reversal_st + cot_risk_premium (dropping momentum_xs,
+which is wrong-signed over the full cycle) as the multi-regime-appropriate blend.
+On long_core (H21) the three are well diversified (value/reversal +0.18, value/cot
+-0.21, reversal/cot -0.22).
+
+**Results (long_core, walk-forward / purged / cost-adjusted; --no-db).**
+- `ensemble_v1` (momentum+cot+reversal) — ❌ REJECT, IC ≈ 0 (0.003/0.008/0.005).
+  The production ensemble does NOT survive a full cycle: it leaned on momentum,
+  which flips wrong-signed multi-regime. Its 5y success was regime-specific.
+- `value` (standalone) — ✅ PROMOTE. H21 IC 0.098, IR 0.348, t 4.99, LS Sharpe 1.18.
+- `ensemble_v2` (value+reversal+cot) — ✅ PROMOTE at H21 (IC 0.074, IR 0.311,
+  t 4.84, LS Sharpe 0.93), but **WEAKER than value alone at every horizon**
+  (H10: ensemble IR 0.189 / Sharpe 0.85 vs value 0.219 / 1.26; H21: 0.311 / 0.93
+  vs 0.348 / 1.18).
+
+**Verdict — value is the multi-regime edge; equal-weight blending DILUTES it.**
+The diversification thesis (Edge = IC × √breadth) helps when component strengths
+are COMPARABLE (the 5y case, where momentum≈cot≈reversal and the blend lifted IR
+0.19→0.25). It HURTS when one component dominates: equal-weighting value (IR 0.35)
+with two weaker edges (reversal IR 0.17, cot) pulls the composite below value
+alone. So on a multi-regime basis the honest conclusion is that VALUE at the
+monthly horizon is the real promotable edge — not the equal-weight ensemble.
+
+**Implication.** The remaining lever is principled, OUT-OF-SAMPLE component
+weighting (IC- or risk-weighting via nested walk-forward), which would up-weight
+value rather than equal-weight it. That is the deferred weight-optimisation step
+and must be done with nested CV to avoid in-sample fitting — NOT attempted inline
+here. Equal-weight remains the honest default until then.
+
+**Caveats carry over** from the value entry: research long_core panel (not the live
+5y production universe, where value is in a trend-regime drawdown), raw
+non-roll-adjusted deep series, H21-only. `ensemble_v2` is registered as a research
+composite (in-sample component selection noted in its docstring), NOT promoted live.
+
+**What changed in code.** Added `EnsembleV2MultiRegime` (`ensemble_v2`) to
+`signals/ensemble.py` (inherits the equal-weight combine logic; only COMPONENTS
+differ). Tests `pytest signals/ evaluation/` green (34); `lint-imports` 4/4.
