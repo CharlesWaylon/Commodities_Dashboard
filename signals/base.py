@@ -167,6 +167,7 @@ def _ensure_signals_imported() -> None:
         "signals.macro",
         "signals.reversal",
         "signals.lowvol",
+        "signals.value",
         "signals.ensemble",
     ):
         try:
