@@ -1342,3 +1342,18 @@ which correctly yields a flat book (test updated accordingly).
 higher cost reduces net return + Sharpe, no-view → flat equity, more frequent
 rebalancing raises total turnover, realized vol in a sane range. `pytest portfolio/`
 20 green; `lint-imports` 4/4.
+
+---
+
+## 2026-06-04 — Layer 3 (3.4): portfolio backtest surfaced in Signal Lab (flagged)
+
+Presentation-only: added a portfolio-backtest panel to `pages/13_Signal_Lab.py`
+(gated by `SIGNAL_RESEARCH_ENABLED`, default off) — signal/panel/cost/rebalance
+controls, a net Sharpe / ann-ret / ann-vol / max-DD / turnover / gross metrics row,
+a net-of-cost equity curve (log scale) and an underwater drawdown chart. No new
+model: it renders `portfolio.backtest.run_backtest` via an `@st.cache_data` wrapper.
+The backtest call lives in the page, NOT in `evaluation/reporting.py`, to keep layer
+order (the research/signal layer must not depend on the risk/portfolio layer above
+it). Smoke-tested across signal×panel combos (no crashes); the surface is honest by
+construction — e.g. `value` shows its strong long_core curve but a negative aligned
+(5y drawdown-regime) curve. Loud NOT-PROMOTED banner retained. `lint-imports` 4/4.
