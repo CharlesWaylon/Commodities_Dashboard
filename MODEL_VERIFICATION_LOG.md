@@ -1357,3 +1357,68 @@ order (the research/signal layer must not depend on the risk/portfolio layer abo
 it). Smoke-tested across signal×panel combos (no crashes); the surface is honest by
 construction — e.g. `value` shows its strong long_core curve but a negative aligned
 (5y drawdown-regime) curve. Loud NOT-PROMOTED banner retained. `lint-imports` 4/4.
+
+---
+
+## 2026-06-05 — Layer 3 (3.4): QAOA recast as a gated allocator, LOSES the bake-off
+
+**What was built.** A clean three-way allocator competition on the IDENTICAL
+walk-forward, net-of-cost backtest:
+- `MeanVarianceSelectAllocator` — classical EXACT cardinality-constrained
+  mean-variance: enumerates all C(n,k) subsets and returns the global minimiser of
+  `xᵀΣx − λμᵀx`. At n=12, k=5 this is 792 combinations (~3 ms) — the strict upper
+  bound QAOA is measured against.
+- `RiskScaledAllocator` (risk-parity-aware inverse-vol, already shipped) — second
+  classical baseline.
+- `QAOAAllocator` (new, `portfolio/quantum_allocator.py`) — re-casts the legacy
+  QAOA solver as a first-class `Allocator`, gated by `QAOA_ALLOCATOR_ENABLED`
+  (default off). Reuses the QUBO/QAOA building blocks from
+  `models/quantum/qaoa_portfolio.py` but takes μ and Σ from the Layer-3 risk model
+  and the signal forecast, so all three allocators solve EXACTLY the same problem.
+  Graceful fallback to the classical exact optimum if PennyLane is unavailable —
+  quantum is never a single point of failure.
+- `SingleHorizonFrameAllocator` — adapter so selection allocators run in the
+  backtest's frame interface.
+- `portfolio/compete.py::run_bakeoff` — runs all three on the same backtest and
+  ranks by realised net Sharpe; `production_allocator` enforces "ships only where
+  it wins": QAOA is returned ONLY if its flag is on AND it beat the best classical
+  baseline; otherwise the classical winner is returned. The legacy
+  `models/portfolio_optimizer.py` stays untouched for existing pages
+  (Evolution Rule).
+
+**Bake-off — value on long_core, 21-day horizon, 126-day rebalance, k=5/12, 10 bps.**
+
+| allocator | net Sharpe | ann. ret | ann. vol | max DD | turnover/reb |
+|---|---|---|---|---|---|
+| classical_mv | **+0.54** | +6.6% | 12.2% | −28.1% | 0.49 |
+| risk_parity  | +0.54 | +6.7% | 12.4% | −32.6% | 0.82 |
+| qaoa         | +0.37 | +4.2% | 11.3% | −34.1% | 0.87 |
+
+**Verdict — QAOA does NOT beat the classical baseline; stays gated off.** Production
+will use `classical_mv` (or `risk_parity` — within noise). This is exactly the
+mathematically expected outcome: at n=12 the optimisation has only 792 combinations,
+which classical brute-force solves EXACTLY in ~3 ms; QAOA is an APPROXIMATION
+algorithm, so it cannot beat the exact optimum in solution quality — only in
+runtime (and even there, classical was ~700× faster: 3 ms vs ~2 s per solve here).
+Quantum advantage requires combinatorially large problems beyond classical reach;
+12 assets is not that regime.
+
+**Why we still keep QAOA first-class.** The legacy QAOA page stays live untouched.
+The new `QAOAAllocator` and the `compete.py` harness mean we can re-run the bake-off
+at any time (different signal, larger universe, more rebalances, future hardware)
+and ship QAOA *the moment* it wins — flag-flip only. This is the "first-class but
+must compete" structure the rebuild calls for.
+
+**External verification (MODEL VERIFICATION RULE).** The "QAOA cannot beat
+classical exact optimisation on small problems" result is the well-documented
+finding of the NISQ-era quantum-optimisation literature (Hadfield-Wang 2018; Farhi-
+Goldstone 2014; many empirical follow-ups) and is the standard practitioner gate
+for paid quantum hardware. Our observation matches: QAOA gives an approximate
+optimum at n=12 and a worse net Sharpe (~0.17 below) than the exact classical
+solver on the same backtest, despite running ~700× slower.
+
+**Tests.** `portfolio/test_compete.py` (5): MV-select returns the global optimum
+(verified vs an independent re-enumeration), the SingleHorizonFrameAllocator picks
+the right horizon, `run_bakeoff` ranks correctly, and `production_allocator`
+blocks QAOA when it loses AND promotes it when it wins WITH the flag on. Full
+portfolio suite `pytest portfolio/` 25 green; `lint-imports` 4/4.
