@@ -39,6 +39,7 @@ class BacktestConfig:
     risk_lookback: int = 252          # covariance/vol window
     warmup: int = 252                 # min rows before the first rebalance
     cost_bps: float = 10.0            # per-side transaction cost
+    risk_method: str = "lw_cc"        # "lw_cc" | "sample" | "factor" (see portfolio.risk)
     periods_per_year: float = 252.0
     allocator: AllocatorConfig = field(default_factory=AllocatorConfig)
 
@@ -103,7 +104,7 @@ def run_backtest(
         d = dates[i]
         # ── rebalance? ────────────────────────────────────────────────────────
         if (i - start_i) % cfg.rebalance_days == 0:
-            rm = estimate_risk_model(panel, d, lookback=cfg.risk_lookback)
+            rm = estimate_risk_model(panel, d, lookback=cfg.risk_lookback, method=cfg.risk_method)
             if rm is not None:
                 fc = signal.compute(d, panel)
                 if fc is not None and not fc.dropna(how="all").empty:
@@ -182,12 +183,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--rebalance-days", type=int, default=21)
     ap.add_argument("--cost-bps", type=float, default=10.0)
     ap.add_argument("--target-vol", type=float, default=0.10)
+    ap.add_argument("--risk-method", default="lw_cc", choices=["lw_cc", "sample", "factor"])
     args = ap.parse_args(argv)
 
     panel = _load_panel(args.panel)
     cfg = BacktestConfig(
         rebalance_days=args.rebalance_days,
         cost_bps=args.cost_bps,
+        risk_method=args.risk_method,
         allocator=AllocatorConfig(target_vol=args.target_vol),
     )
     res = run_backtest(get_signal(args.signal), panel, cfg)

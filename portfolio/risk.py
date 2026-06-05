@@ -191,9 +191,21 @@ def estimate_risk_model(
 
     method = "lw_cc"  -> Ledoit-Wolf constant-correlation shrinkage (default).
     method = "sample" -> plain sample covariance (baseline / comparison).
+    method = "factor" -> macro-factor structural model Bᵀ Σ_f B + D; falls back
+                        to Ledoit-Wolf when factor data are unavailable at asof
+                        (e.g. dates before FRED ingest coverage starts).
 
     Returns None if there is insufficient history for a usable estimate.
     """
+    if method == "factor":
+        from portfolio.factor_risk import estimate_factor_risk_model
+
+        fm = estimate_factor_risk_model(panel, asof, lookback=lookback, min_obs=min_obs)
+        if fm is not None:
+            return fm
+        # Fall through to LW so the backtest stays continuous through pre-2010.
+        method = "lw_cc"
+
     rets = _returns_window(panel, asof, lookback, min_obs)
     if rets.empty:
         return None
@@ -204,7 +216,7 @@ def estimate_risk_model(
     elif method == "lw_cc":
         cov, delta = ledoit_wolf_constant_correlation(rets)
     else:
-        raise ValueError(f"unknown risk method {method!r} (use 'lw_cc' or 'sample')")
+        raise ValueError(f"unknown risk method {method!r} (use 'lw_cc' / 'sample' / 'factor')")
 
     vol = pd.Series(np.sqrt(np.diag(cov.values)), index=cov.index, name="vol")
     return RiskModel(
