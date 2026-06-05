@@ -1422,3 +1422,73 @@ solver on the same backtest, despite running ~700× slower.
 the right horizon, `run_bakeoff` ranks correctly, and `production_allocator`
 blocks QAOA when it loses AND promotes it when it wins WITH the flag on. Full
 portfolio suite `pytest portfolio/` 25 green; `lint-imports` 4/4.
+
+---
+
+## 2026-06-05 — Layer 3: macro-factor risk model (factor R² real but small N → ties LW)
+
+**What was built.** `portfolio/factor_risk.py` — a structural risk model
+`Σ = Bᵀ Σ_f B + D`, cashing in the verified `signals/macro.py` betas in the
+correct layer (risk, not alpha). Reads point-in-time FRED factor changes
+(T10YIE / DGS10 / DTWEXBGS / VIXCLS) from the fundamental store, regresses each
+instrument's daily return on factor changes over a trailing window, exposes
+`betas`, `factor_cov`, `idiosyncratic`, `r2`. Drop-in `RiskModel` (subclass), so
+allocators and the backtest need no API change. Wired into
+`estimate_risk_model(..., method="factor")` with a clean fallback to Ledoit-Wolf
+when factor data are absent (pre-2010 dates), so the backtest stays continuous.
+Includes an optional shrinkage `α` toward LW (default 0.5) — the standard
+Ledoit-Wolf 2003 / Fan-Liao-Mincheva (POET 2008) remedy when factor R² is
+moderate; α=0 is pure factor, α=1 is pure LW.
+
+**Verification — economic (MODEL VERIFICATION RULE).** Real-data betas on
+long_core asof 2026-06-03, 252-day window: Gold short USD (−0.022) / short rates
+(−0.026) / long inflation (+0.045); Silver more dollar-sensitive than gold
+(−0.053); Copper short USD short VIX (cyclical); Crude long inflation (+0.72);
+Nat Gas R² = 0.01 (correctly identified as weather-driven / macro-neutral).
+Mean R² = 0.10, max 0.39 — the macro block captures shared co-movement but
+honestly identifies most variance as idiosyncratic.
+
+**Verification — structural & isolation (tests).** PSD + symmetric + positive
+diagonal in tests. Isolation test on synthetic factor-truth data (T=500, K=3,
+N=15): the factor model recovers Σ in STRICTLY FEWER Frobenius distance units
+than both LW and sample — formal evidence the structural form adds information
+when the truth is factor-structured. Endpoints (α=0 vs α=1) distinguishable and
+PSD; mixed lies between. Falls back cleanly to LW when factors are absent.
+
+**Bake-off vs LW on the real backtest (value / long_core; same target-vol /
+allocator; 21d and 10d rebalance).** Essentially TIED:
+
+| risk method | rebal | net Sharpe | ann. ret | ann. vol | max DD |
+|---|---|---|---|---|---|
+| lw_cc  | 21d | +0.79 | +9.5%  | 12.1% | −29.2% |
+| factor | 21d | +0.78 | +9.9%  | 12.7% | −30.2% |
+| lw_cc  | 10d | +0.79 | +9.5%  | 12.1% | −26.4% |
+| factor | 10d | +0.79 | +10.0% | 12.7% | −28.1% |
+
+Same on `ensemble_v2` (0.74 vs 0.75). Differences are well within noise.
+
+**Verdict — factor risk does NOT beat LW on this universe; stays available, not
+default.** This is the mathematically expected result on a small-N universe and
+matches the literature: the factor-risk advantage scales with N (Fan-Liao-Mincheva
+2008's POET is a high-dimensional result; at N=25 LW shrinkage already does most
+of the work). Our measured factor R²≈10% reinforces it — 4 macro factors do not
+explain most of commodity covariance, which is dominated by supply/demand/weather/
+inventory. Per "ships only where it wins": `method='lw_cc'` remains the default;
+`method='factor'` is available for institutional users wanting interpretable
+factor-attributed risk and is the obvious win the day the universe expands to
+many more instruments (where N/T pressure makes shrinkage alone insufficient).
+
+**What the cash-in achieved (it's not nothing).** (a) The verified betas are now
+in the correct layer, ready for factor-mimicking sizing or factor-hedging
+allocators. (b) `FactorRiskModel.betas` / `factor_cov` / `idiosyncratic` / `r2`
+give institutional users a defensible, auditable risk decomposition — the
+"interpretable risk" story Bloomberg-grade buyers ask for. (c) `risk_method`
+threads through `BacktestConfig` and the CLI, so any future allocator that
+benefits from factor risk picks it up via `--risk-method factor` without code
+change.
+
+**Tests.** `portfolio/test_factor_risk.py` (5): structural properties, isolation
+property (factor beats LW under factor truth in Frobenius distance), α-shrinkage
+interpolation endpoints, PIT factor-absent → None, and `method='factor'`
+fallback to LW. Full portfolio suite `pytest portfolio/` 30 green; `lint-imports`
+4/4.
