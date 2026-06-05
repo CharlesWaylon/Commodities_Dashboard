@@ -195,6 +195,111 @@ class RiskScaledAllocator(Allocator):
         return _vol_target(book, risk_model, cfg.target_vol, cfg.periods_per_year, cfg.max_leverage)
 
 
+# ── cardinality-constrained selection allocators (QAOA & its classical rival) ──
+class _SelectAllocator(Allocator):
+    """
+    Base for long-only, cardinality-constrained mean-variance SELECTION allocators
+    — the paradigm of the legacy QAOA optimizer (pick k assets minimising
+    ``xᵀΣx − λ·μᵀx``, equal-weight the chosen, then vol-target).
+
+    Subclasses differ ONLY in ``_select`` (which indices to hold): a classical exact
+    solver vs the quantum QAOA approximation. Same μ, Σ, k and post-processing, so
+    the backtest comparison is apples-to-apples.
+
+    μ is built from the signal forecast as an expected DAILY return,
+    ``μ_i = forecast_i · σ_i`` (Grinold: a +1σ score ⇒ +1 own-vol of expected
+    return), putting μ in the same units as the daily covariance so λ trades off
+    risk and return meaningfully.
+    """
+
+    def __init__(self, k: int = 5, lam: float = 2.0, n_universe: int = 12,
+                 target_vol: float = 0.10, periods_per_year: float = 252.0, max_leverage: float = 3.0):
+        self.k = int(k)
+        self.lam = float(lam)
+        self.n_universe = int(n_universe)
+        self.target_vol = float(target_vol)
+        self.periods_per_year = float(periods_per_year)
+        self.max_leverage = float(max_leverage)
+
+    def _candidates(self, forecasts: pd.Series, risk_model: RiskModel):
+        common = forecasts.dropna().index.intersection(risk_model.vol.dropna().index)
+        f = forecasts.reindex(common).astype(float)
+        if f.empty:
+            return [], None, None
+        cand = f.nlargest(min(self.n_universe, len(f))).index.tolist()  # long candidates
+        mu = (f.reindex(cand) * risk_model.vol.reindex(cand)).to_numpy()  # daily-return units
+        cov = risk_model.cov.reindex(index=cand, columns=cand).to_numpy()
+        return cand, mu, cov
+
+    def _select(self, mu: np.ndarray, cov: np.ndarray) -> list:
+        raise NotImplementedError
+
+    def allocate(self, forecasts: pd.Series, risk_model: RiskModel) -> pd.Series:
+        cand, mu, cov = self._candidates(forecasts, risk_model)
+        if not cand or len(cand) < self.k:
+            return pd.Series(dtype=float)
+        idx = self._select(mu, cov)
+        if not idx:
+            return pd.Series(dtype=float)
+        sel = [cand[i] for i in idx]
+        w = pd.Series(1.0 / len(sel), index=sel)  # equal-weight long-only
+        return _vol_target(w, risk_model, self.target_vol, self.periods_per_year, self.max_leverage)
+
+
+class MeanVarianceSelectAllocator(_SelectAllocator):
+    """Classical EXACT cardinality-constrained mean-variance selection (QAOA's rival).
+
+    Enumerates all C(n, k) subsets and returns the global minimiser of
+    ``xᵀΣx − λ·μᵀx``. At n≈12 this is ~hundreds of combinations — instant and exact,
+    so it is the strict upper bound the QAOA approximation is measured against.
+    """
+
+    def _select(self, mu, cov):
+        from itertools import combinations
+
+        n = len(mu)
+        best_obj, best = None, None
+        for c in combinations(range(n), self.k):
+            x = np.zeros(n)
+            x[list(c)] = 1.0
+            obj = float(x @ cov @ x - self.lam * (mu @ x))
+            if best_obj is None or obj < best_obj:
+                best_obj, best = obj, list(c)
+        return best or []
+
+
+class SingleHorizonFrameAllocator:
+    """
+    Adapt a single-horizon ``Allocator`` to the frame → ``AllocationResult``
+    interface the backtest uses, by selecting one horizon's forecast column. Lets
+    selection allocators (MV-select, QAOA) compete in the same backtest as the
+    multi-horizon SleeveAllocator.
+    """
+
+    def __init__(self, base: Allocator, horizon: int = 21, periods_per_year: float = 252.0):
+        self.base = base
+        self.horizon = int(horizon)
+        self.ppy = float(periods_per_year)
+
+    def allocate(self, forecast_frame: pd.DataFrame, risk_model: RiskModel) -> AllocationResult:
+        col = (self.horizon, FORECAST_FIELD)
+        if col not in forecast_frame.columns:
+            return AllocationResult(pd.Series(dtype=float), {}, 0.0, 0.0, 0.0, 0)
+        f = forecast_frame[col].dropna()
+        if f.empty:
+            return AllocationResult(pd.Series(dtype=float), {}, 0.0, 0.0, 0.0, 0)
+        w = self.base.allocate(f, risk_model)
+        w = w[w != 0.0] if not w.empty else w
+        return AllocationResult(
+            weights=w,
+            sleeves={self.horizon: w},
+            gross_leverage=float(w.abs().sum()),
+            net_exposure=float(w.sum()),
+            ex_ante_vol=_ex_ante_vol(w, risk_model, self.ppy),
+            n_names=int((w != 0.0).sum()),
+        )
+
+
 # ── multi-horizon sleeve allocator ───────────────────────────────────────────
 class SleeveAllocator:
     """Blend per-horizon sleeve books into one vol-targeted portfolio."""

@@ -69,14 +69,26 @@ class BacktestResult:
         )
 
 
-def run_backtest(signal, panel: pd.DataFrame, config: Optional[BacktestConfig] = None) -> BacktestResult:
-    """Walk ``signal`` through ``panel`` with the SleeveAllocator; return realized P&L."""
+def run_backtest(
+    signal,
+    panel: pd.DataFrame,
+    config: Optional[BacktestConfig] = None,
+    allocator=None,
+) -> BacktestResult:
+    """
+    Walk ``signal`` through ``panel`` and return realized net-of-cost P&L.
+
+    ``allocator`` is any object exposing ``allocate(forecast_frame, risk_model) ->
+    AllocationResult`` (the default SleeveAllocator, or a SingleHorizonFrameAllocator
+    wrapping a selection allocator such as MV-select or QAOA). This is what lets the
+    classical and quantum allocators compete on the SAME backtest engine.
+    """
     cfg = config or BacktestConfig()
     panel = panel.sort_index()
     dates = panel.index
     simple_ret = panel.pct_change()
     cost_model = TransactionCostModel(cost_bps=cfg.cost_bps)
-    allocator = SleeveAllocator(cfg.allocator)
+    allocator = allocator if allocator is not None else SleeveAllocator(cfg.allocator)
 
     start_i = max(cfg.warmup, cfg.risk_lookback)
     equity = 1.0
