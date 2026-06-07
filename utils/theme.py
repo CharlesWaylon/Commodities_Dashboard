@@ -482,9 +482,14 @@ def render_sidebar_nav():
 
         # Research-grade surface — only listed when its feature flag is on.
         import os
-        if os.getenv("SIGNAL_RESEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        _flag_on = lambda n: os.getenv(n, "false").strip().lower() in {"1", "true", "yes", "on"}
+        if _flag_on("SIGNAL_RESEARCH_ENABLED"):
             st.divider()
             st.page_link("pages/13_Signal_Lab.py",       label="Signal Lab ⚗️")
+        if _flag_on("PRODUCTION_PORTFOLIO_ENABLED"):
+            if not _flag_on("SIGNAL_RESEARCH_ENABLED"):
+                st.divider()
+            st.page_link("pages/14_Live_Portfolio.py",   label="Live Portfolio ⚙️")
 
 
 def panel_header(title: str, badge: str = "", badge_color: str = SIGNAL):

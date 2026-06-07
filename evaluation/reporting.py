@@ -109,3 +109,70 @@ def asof_date() -> Optional[pd.Timestamp]:
         return None if panel is None or panel.empty else panel.index[-1]
     except Exception:
         return None
+
+
+# ── Production: bake-off winner → live target weights ────────────────────────
+def production_targets(
+    signal_name: str = "value",
+    panel_source: str = "long_core",
+    horizon: int = 21,
+    k: int = 5,
+    n_universe: int = 12,
+    target_vol: float = 0.10,
+    rebalance_days: int = 126,
+    cost_bps: float = 10.0,
+    risk_method: str = "lw_cc",
+) -> dict:
+    """
+    End-to-end production allocation: run the allocator bake-off on the chosen
+    signal + panel, pick the winner via ``portfolio.compete.production_allocator``,
+    and return today's target weights from that winner.
+
+    Returns a dict {bakeoff_table, winner, allocation, asof, signal, panel,
+    cascade_view, banner} suitable for direct rendering. Returns ``{}`` on failure
+    so the page degrades to an "unavailable" state rather than crashing.
+    """
+    try:
+        from models.data_loader import load_long_history_core_panel, load_price_matrix_from_db
+        from portfolio.allocators import AllocatorConfig
+        from portfolio.backtest import BacktestConfig
+        from portfolio.cascade_allocator import load_cascade_view
+        from portfolio.compete import production_allocator, run_bakeoff
+        from portfolio.risk import estimate_risk_model
+        from signals.base import get_signal
+    except Exception:
+        return {}
+
+    try:
+        panel = (load_long_history_core_panel() if panel_source == "long_core"
+                 else load_price_matrix_from_db())
+        if panel is None or panel.empty:
+            return {}
+
+        bt_cfg = BacktestConfig(
+            rebalance_days=int(rebalance_days), cost_bps=float(cost_bps),
+            risk_method=risk_method, allocator=AllocatorConfig(target_vol=target_vol),
+        )
+        sig = get_signal(signal_name)
+        bake = run_bakeoff(sig, panel, bt_cfg, horizon=int(horizon), k=int(k), n_universe=int(n_universe))
+        name, alloc = production_allocator(bake, horizon=int(horizon), k=int(k),
+                                           n_universe=int(n_universe), target_vol=float(target_vol))
+
+        asof = panel.index[-1]
+        rm = estimate_risk_model(panel, asof, lookback=252, method=risk_method)
+        fc = sig.compute(asof, panel)
+        allocation = alloc.allocate(fc, rm) if fc is not None else None
+        cascade = load_cascade_view(asof)
+        return {
+            "bakeoff_table": bake.table,
+            "verdict": bake.verdict(),
+            "winner": name,
+            "allocation": allocation,
+            "asof": asof,
+            "signal": signal_name,
+            "panel": panel_source,
+            "cascade_view_n": int(len(cascade)),
+            "cascade_view_asof": asof if not cascade.empty else None,
+        }
+    except Exception:
+        return {}
