@@ -27,10 +27,12 @@ from portfolio.allocators import (
     SingleHorizonFrameAllocator,
 )
 from portfolio.backtest import BacktestConfig, BacktestResult, run_backtest
+from portfolio.cascade_allocator import CascadeAugmentedAllocator
 from portfolio.quantum_allocator import QAOAAllocator, qaoa_allocator_enabled
 
 CLASSICAL = ("classical_mv", "risk_parity")
 QUANTUM = "qaoa"
+CASCADE = "cascade"
 
 
 @dataclass
@@ -72,6 +74,9 @@ def _build_allocators(horizon: int, k: int, n_universe: int, target_vol: float) 
         ),
         QUANTUM: SingleHorizonFrameAllocator(
             QAOAAllocator(k=k, n_universe=n_universe, target_vol=target_vol), horizon
+        ),
+        CASCADE: SingleHorizonFrameAllocator(
+            CascadeAugmentedAllocator(k=k, n_universe=n_universe, target_vol=target_vol), horizon
         ),
     }
 
