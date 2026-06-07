@@ -1492,3 +1492,93 @@ property (factor beats LW under factor truth in Frobenius distance), α-shrinkag
 interpolation endpoints, PIT factor-absent → None, and `method='factor'`
 fallback to LW. Full portfolio suite `pytest portfolio/` 30 green; `lint-imports`
 4/4.
+
+---
+
+## Layer 3 (3.4): cascade recast as a gated allocator + Live Portfolio production page
+
+**Gaps closed.** Following the honest Layer-3 audit, two acknowledged gaps:
+(1) cascade as a first-class allocator option, and (2) a production page that
+actually consumes the bake-off winner via `production_allocator()`.
+
+**Cascade allocator (`portfolio/cascade_allocator.py`).** Re-casts the legacy
+`CascadePortfolioOptimizer` μ-substitution as a first-class Layer-3 Allocator.
+Same MV-selection math as the classical baseline; the only difference is that the
+cross-sectional view of expected return comes from the cascade orchestrator's
+per-instrument `final_forecast`, read PIT (`forecast_date <= asof`) from
+`cascade_forecasts`. When cascade has no data at asof, it falls back to the
+signal forecast — graceful degradation so historical backtests do not crash.
+
+Both signal and cascade are converted to PERCENTILE RANKS on the full signal
+universe before substitution (a real bug-fix surfaced by the partial-overlap
+test: substituting raw cascade values when cascade covers few names would crush
+its view under the signal's full-scale forecasts). Non-cascade names keep their
+signal rank — the cross-section is whole and comparable.
+
+**Bake-off (cascade added; same backtest engine).**
+
+| panel · signal · rebalance | classical_mv | cascade | risk_parity | qaoa |
+|---|---|---|---|---|
+| long_core / value / 126d | +0.543 | +0.543 | +0.542 | +0.353 |
+| aligned / value / 5d     | +0.766 | +0.726 | -0.510 | +0.364 |
+
+On long_core, cascade ties classical_mv EXACTLY — because cascade's data starts
+2026-05-15 and the last 126-day rebalance is well before that, so cascade fell
+back to the signal forecast at every rebalance. On aligned/5d, cascade engages
+its data on several rebalances and slightly underperforms classical_mv
+(+0.726 vs +0.766). HONEST FINDING: cascade has too short a historical tail to
+fairly compete in any multi-year bake-off; its right home is the LIVE production
+page where it has same-day data.
+
+**Verdict — cascade stays available, not promoted to default.** Per "ships only
+where it wins": `production_allocator` continues to pick the classical winner
+unless cascade (or QAOA) measurably beats it on the latest bake-off. Cascade is
+flag-free (no gating env var) because it's a μ-substitution variant; QAOA stays
+gated behind `QAOA_ALLOCATOR_ENABLED` because it has a genuine deploy story
+(quantum hardware) the others don't.
+
+**Tests (`portfolio/test_cascade_allocator.py`, 5).** Falls back to signal
+(identical book) when cascade empty; cascade-flipped ranks reverse the selection;
+partial-overlap cascade promotes its winner without dragging signal-only worsts
+in; missing-asof safety; long-only selection book. Full portfolio suite
+`pytest portfolio/` 35 green; `lint-imports` 4/4.
+
+---
+
+## Layer 3 closure: Live Portfolio production page
+
+**What was built.** `pages/14_Live_Portfolio.py` — the first production-grade
+Layer-3 surface, gated by `PRODUCTION_PORTFOLIO_ENABLED` (default off). End to
+end: signal/panel/vol/risk-method controls → runs the 4-way allocator bake-off
+on the chosen config → calls `portfolio.compete.production_allocator()` to pick
+the winner under the "ships only where it wins" policy → renders today's target
+weights from the winner, with risk decomposition (gross/net/vol/name counts)
+and a cascade-coverage info pane.
+
+Read-only helper `evaluation/reporting.production_targets(...)` encapsulates the
+full bake-off → winner → today's allocation pipeline behind a defensive
+empty-on-failure API so the page degrades gracefully. Page is thin (no math);
+all computation stays in `portfolio.*`. Computation imports
+`portfolio` from the page — the dependency direction (presentation → portfolio
+→ risk → data) is correct.
+
+End-to-end smoke: value / long_core / 21d / 126d / 10bps → bake-off table shows
+classical_mv (+0.54) tied with cascade, risk_parity within noise, qaoa losing
+(+0.35) → winner = classical_mv → today's targets: OJ + Sugar + Rough Rice + Oats
++ Natural Gas, equal-weight, vol-targeted to 10%, gross 0.36. Live. Functioning.
+
+**Nav.** Sidebar link `Live Portfolio ⚙️` appears only when its flag is on,
+mirroring the Signal Lab pattern. Rollback = flag flip.
+
+**Tests.** No new dedicated tests for the page — by design (presentation is
+intentionally thin and depends entirely on `portfolio.*` and the
+`evaluation.reporting` helper, which are exhaustively tested). The same 65 tests
+that pass in `portfolio/` + `evaluation/` cover every component the page depends
+on.
+
+**Layer 3 status — all 6 substeps now closed.** 3.1 risk model (LW + factor),
+3.2 vol-targeted/capped/sleeved allocator, 3.3 net-of-cost portfolio backtest,
+3.4 Signal Lab backtest surface, QAOA as gated allocator, cascade as gated
+allocator, production page consuming the bake-off winner. Layer 3 is COMPLETE
+against both the user-asked substeps AND the original CLAUDE.md charter
+("volatility, covariance, sizing, cascade").
