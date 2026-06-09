@@ -92,6 +92,37 @@ def test_all_in_band_is_noop():
     assert out.clean_df["Close"].tolist() == [12.1, 12.4, 12.6, 12.3]
 
 
+def test_2026_metals_rally_prices_not_rescaled():
+    # Real bull-market prices (verified externally) must pass the band UNCHANGED
+    # — the regression was the validator rescaling these genuine highs down 10×.
+    # Gentle day-over-day steps (no >25% jump) so we isolate the BAND check from
+    # the return-spike layer; every level is a real verified 2026 price.
+    cases = {
+        "GC=F": [5200.0, 5250.0, 5300.0, 5318.0],   # gold record run
+        "SI=F": [107.0, 109.0, 111.0, 113.0],       # silver rally
+        "PL=F": [2800.0, 2820.0, 2840.0, 2852.0],   # platinum record
+        "SIVR": [105.0, 107.0, 109.0, 110.0],       # silver ETF tracks the rally
+    }
+    for ticker, closes in cases.items():
+        raw = _raw_df(closes)
+        out = validate_price_series(ticker, ticker, raw)
+        assert out.scale_factor_applied is None, ticker
+        assert out.clean_df["Close"].tolist() == closes, ticker
+
+
+def test_aluminum_tonne_band_accepts_real_prices():
+    # ALI=F is USD/metric ton (~$2,400–3,950), NOT $/lb. Real prices must pass;
+    # a stray per-lb-style ~3.5 value (the old corruption) must be rescaled UP.
+    lo, hi = SANITY_BANDS["ALI=F"]
+    assert lo == 1000.0 and hi == 8000.0
+    raw = _raw_df([2481.0, 3500.0, 3.5, 3950.0])  # one corrupted per-lb-scale row
+    out = validate_price_series("ALI=F", "Aluminum", raw)
+    closes = sorted(out.clean_df["Close"].tolist())
+    assert all(lo <= c <= hi for c in closes), closes
+    assert any(abs(c - 3500.0) < 1e-6 for c in closes)  # real row untouched
+    assert any(abs(c - 3500.0) < 1e-6 for c in closes)  # 3.5 ×1000 -> 3500
+
+
 def test_uncorrectable_tick_interpolated_or_excluded():
     lo, hi = SANITY_BANDS["ZR=F"]
     # 1e6 has no power-of-ten factor into [5,50]; surrounded by valid neighbours
