@@ -79,6 +79,46 @@ def load_price_matrix_from_db(
     return matrix
 
 
+def load_long_history_core_panel() -> pd.DataFrame:
+    """
+    Deep (~24y) price panel for the core long-history futures (RESEARCH use).
+
+    Reads the ``interval='1d_deep'`` series backfilled by
+    ``services.deep_history_ingest`` — a DISTINCT interval from production
+    ``'1d'``, so this never affects the live panel. Restricted to genuine futures
+    with deep Yahoo history, the common window reaches back to ~2001, spanning
+    multiple market regimes (unlike the ~5y production panel). Used to fairly test
+    multi-decade factors such as value.
+
+    Returns a wide DataFrame (dates × display names); empty if no 1d_deep rows
+    exist yet (run the backfill first).
+    """
+    ticker_to_name = {v: k for k, v in MODELING_COMMODITIES.items()}
+    query = """
+        SELECT c.ticker, ph.date,
+               COALESCE(ph.adjusted_close, ph.close) AS close
+        FROM price_history ph
+        JOIN commodities c ON c.id = ph.commodity_id
+        WHERE ph.interval = '1d_deep'
+          AND ph.close IS NOT NULL
+        ORDER BY ph.date
+    """
+    engine = get_engine()
+    with engine.connect() as _conn:
+        raw = pd.DataFrame(_conn.execute(text(query)).fetchall(),
+                           columns=["ticker", "date", "close"])
+    if raw.empty:
+        return pd.DataFrame()
+    raw["date"] = pd.to_datetime(raw["date"])
+    raw = raw[raw["ticker"].isin(ticker_to_name)]
+    matrix = raw.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
+    matrix.index.name = "Date"
+    matrix = matrix.rename(columns=ticker_to_name)
+    # ffill small gaps (cross-exchange holidays) then require a full cross-section.
+    matrix = matrix.ffill(limit=3).dropna()
+    return matrix
+
+
 def load_m2_price_matrix_from_db(
     commodities: Optional[dict] = None,
 ) -> pd.DataFrame:

@@ -648,3 +648,1015 @@ Grain Stocks release calendar would be exact.
 
 **Reproduce.** ``FUNDAMENTAL_FEEDS_ENABLED=true python -m services.{cot,eia,usda}_ingest``
 (needs EIA_API_KEY / USDA_QUICKSTATS_KEY in .env). Tests: ``pytest data/``.
+
+---
+
+## 2026-06-03 — Phase 2 wave-1 signals through the gate (trend_ts, carry_proxy, seasonality)
+
+**What was verified.** Three new price-only Signal producers, each run through the
+walk-forward / purged-embargoed / cost-adjusted IC gate
+(`python -m evaluation.harness --signal NAME --horizons 5,10,21`). Promotion bar:
+IC mean > 0, IC IR ≥ 0.30, fold-sign-frac ≥ 0.60, net LS Sharpe ≥ 0.
+
+**trend_ts (time-series momentum, 12-1 vol-scaled) — ⚠️ inconclusive (right sign,
+under the bar).** IC is positive and rising with horizon (H5 0.032, H10 0.037,
+H21 0.040) with positive t-stats (2.40 / 1.98 / 1.67) and positive net LS returns
+— exactly the direction Moskowitz-Ooi-Pedersen (2012) predict, and the horizon
+profile (premium strengthening out to a month) matches the literature. But IC IR
+tops out at 0.19 < 0.30, so it is too noisy on this 40-instrument universe/sample
+to promote. **Verdict: economically confirmed, statistically not yet promotable —
+held out of the ensemble.** Candidate for promotion once breadth grows or it is
+combined with the cross-sectional book (the two trend forms are near-orthogonal).
+
+**carry_proxy (mom10/vol21 risk-adjusted short momentum) — ❌ refuted as a proxy.**
+The placeholder hypothesis (short-horizon front strength stands in for
+backwardation) is wrong in this universe: IC is *negative* at every horizon
+(−0.029 / −0.045 / −0.064), t-stats significantly negative, net LS Sharpe ≈ −1.1
+to −1.4 with turnover > 1.0/period. Short-horizon momentum here *reverses*, and
+costs make the short-leg book actively lose. This is a useful negative: it
+confirms the proxy must NOT be trusted as carry — the signal stays gated as
+inconclusive-by-construction exactly as its docstring warns, and the real edge
+waits on the stitched-M2 term-structure basis (Erb-Harvey 2006,
+Gorton-Rouwenhorst 2006, Koijen 2018). **Verdict: refuted as a carry stand-in; do
+not promote; prioritise the true basis series.**
+
+**seasonality (forward-window expected return from calendar-month means) — ⚠️
+inconclusive (no cross-sectional edge).** IC ≈ 0 and weakly negative
+(−0.006 / −0.009 / −0.011), t-stats |·| < 0.5 — indistinguishable from noise.
+The physical rationale is sound (Sorensen 2002; energy seasonality), but a single
+pooled monthly-mean read does not produce a *cross-sectionally* rankable edge net
+of cost on this universe — likely because seasonal effects are
+instrument-specific (nat-gas winter, gasoline summer, grains harvest) and cancel
+when ranked against each other on the same calendar month. **Verdict: no promotable
+cross-sectional edge as constructed; revisit as a per-instrument timing overlay
+rather than a cross-sectional ranker.**
+
+**What changed in code.** Added `signals/trend.py` (TimeSeriesMomentum / trend_ts),
+`signals/carry.py` (CarryProxy / carry_proxy), `signals/seasonality.py`
+(Seasonality); registered all three in `signals/base._ensure_signals_imported()`.
+No promotions — all three correctly REJECTED by the gate and held out of the
+ensemble. Scorecard rows persisted to `signal_scorecard`. The contract test and
+the look-ahead property test both parametrize over `list_signals()`, so the three
+new signals are covered automatically (`pytest signals/ evaluation/` green;
+`lint-imports` 4/4 contracts kept).
+
+**Takeaway.** The gate did its job on the first real wave: of three economically-
+motivated candidates, zero cleared the bar, and each rejection is interpretable
+(trend = real but noisy, carry-proxy = wrong-signed placeholder, seasonality =
+not cross-sectional). This is the intended behaviour — the spine rejects honestly
+rather than shipping near-random forecasts.
+
+---
+
+## 2026-06-04 — Phase 2 data-layer expansion (COT breadth, EIA labels, FRED feed)
+
+**Context.** Wave-2's fundamental signals (COT positioning-reversal, macro-surprise,
+real term-structure carry) were blocked not on signal code but on **data breadth**:
+the point-in-time fundamental store held only 1 COT series (WTI), 4 EIA energy
+series with no instrument labels, and zero FRED rows — far too narrow for a
+cross-sectional gate (`min_cross_section = 5`). This entry records widening the
+data layer so those signals become gate-scoreable next.
+
+**What was verified — CFTC contract-market codes (against the live source).**
+Every code in `services/cot_ingest.py::DEFAULT_SERIES` was checked on 2026-06-04
+against the live CFTC Disaggregated Futures-Only catalog (Socrata resource
+`72hh-3qpy`, fields `contract_market_name` / `market_and_exchange_names`, grouped
+over 2025+ reports). **Finding (refuted prior map): the previous grain codes were
+wrong.** The old map had `001602 → "Corn"`, but CFTC `001602` is **WHEAT-SRW**;
+`002602` is CORN; `005602` is SOYBEANS; `007601` is SOYBEAN OIL. The old map also
+used instrument *names* ("Gold", "Corn") that do not match the price-panel display
+names ("Gold (COMEX)", "Corn (CBOT)"), so even the correct codes would not have
+joined. Only WTI (`067651`) had ever actually been ingested, so the bad codes
+never produced visibly wrong data — but they would have on the next run. **Verdict:
+prior grain mapping refuted and corrected; 27 liquid futures now carry
+source-verified codes mapped to exact `data.universe` display names.**
+
+**What was verified — FRED publication lags (against release calendars).** FRED's
+REST helper keys observations on the *reference* date, not the first-print date
+(true vintages need ALFRED — a still-open upgrade, flagged in
+`data/adapters/fred_adapter.py`). We approximate `release_date = reference_date +
+lag_bdays`, rounded UP so we never lead the real print. **Caught a 1-day leak in
+testing:** at a 31-bday lag, April-2024 CPI (ref `2024-04-01`) resolved to a
+`2024-05-14` release, one day *before* the actual BLS print of `2024-05-15`.
+Corrected to 34 bdays (CPI/PPI), 35 (INDPRO), 27 (employment); April-2024 CPI now
+resolves to `2024-05-17` — 2 days *after* the real print (safe), and is correctly
+invisible as-of `2024-05-14`. Verdict: monthly-macro PIT timing confirmed
+non-leaking after the fix; daily market series carry a 1-bday lag.
+
+**What changed in code.**
+- `services/cot_ingest.py` — `DEFAULT_SERIES` rebuilt: 1 → **27** source-verified
+  CFTC codes (energy/metals/grains/softs/livestock), values are exact universe
+  display names; the ingest now persists the `instrument` column so cross-sectional
+  COT signals join straight onto price-panel columns. ETF/index proxies and crypto
+  (no managed-money line in this report) are intentionally omitted.
+- `services/eia_ingest.py` — added `SERIES_TO_INSTRUMENT` (crude→WTI Crude Oil,
+  gasoline→Gasoline (RBOB), distillate→Heating Oil, nat-gas→Natural Gas) and
+  attaches `instrument` on write. Existing EIA rows backfilled in place via SQL
+  (label-only update; values/dates untouched).
+- `services/fred_ingest.py` — **new** release-dated macro feed: 12 series
+  (CPIAUCSL, PPIACO, T10YIE, UNRATE, PAYEMS, INDPRO, DGS10, DGS2, T10Y2Y, DFF,
+  VIXCLS, DTWEXBGS) with per-series publication lags.
+
+**DB after expansion** (`fundamental_observations`): cftc 22,162 rows / 27 series
+/ 27 instruments (was 1/1/0); eia 7,314 rows / 4 series / 4 instruments (was
+4 series/0 instruments); fred 31,644 rows / 12 series (new); usda unchanged. All
+27 COT instruments verified to join the live price panel (0 unmatched). Tests:
+`pytest data/ services/` → 264 passed; `lint-imports` 4/4 contracts kept.
+
+**Open items (flagged, not silently assumed).** (1) FRED/CFTC release dates remain
+calendar approximations — ALFRED (FRED) and exact COT publish timestamps are the
+vintage-truth upgrade. (2) EIA refetch needs `EIA_API_KEY` in the launchd env
+(present in `.env`); this session backfilled labels by SQL because the key was not
+loaded in the interactive shell. (3) No signal shipped here — this is data-layer
+groundwork; the COT-reversal / inventory-surprise / macro-surprise signals are the
+next wave and must each clear the gate on their own.
+
+---
+
+## 2026-06-04 — COT positioning signals: reversal REFUTED, risk-premium CONFIRMED (sub-threshold)
+
+**What was verified.** The first fundamental (non-price) signal through the gate,
+built on the newly-widened CFTC COT feed (27 instruments). Two pre-registered,
+opposite-signed economic hypotheses were run on the SAME positioning z-score
+(current net managed-money position vs its own ~3y trailing norm), so the gate
+adjudicates which theory holds rather than us choosing by hand:
+- `cot_reversal` (SIGN -1): COT-extreme contrarian view — crowded longs unwind.
+- `cot_risk_premium` (SIGN +1): hedging-pressure risk premium — speculators are
+  paid to absorb hedgers' risk (Cootner 1960; De Roon-Nijman-Veld 2000;
+  Basu-Miffre 2013).
+
+**Result (walk-forward, purged/embargoed, cost-adjusted IC; 27-instrument
+cross-section).**
+- `cot_reversal` — ❌ **refuted.** IC negative at every horizon (H5/H10/H21 =
+  −0.025 / −0.037 / −0.032; t = −1.84 / −1.99 / −1.20), net LS Sharpe −0.31 to
+  −0.50. The contrarian COT-extreme story does NOT hold in this universe.
+- `cot_risk_premium` — ⚠️ **confirmed-but-sub-threshold.** Exact mirror: IC
+  +0.025 / +0.037 / +0.032 (t = +1.84 / +1.99 / +1.20), hit-rate >50%, net LS
+  Sharpe +0.09 / +0.30 / +0.33 — right-signed and cost-positive, but IC IR
+  0.10–0.16 < 0.30 bar, so not promotable standalone. Held out; ensemble candidate
+  (same class as trend_ts), strongest at the 10-day horizon.
+
+**Verdict.** Positioning behaves as a **hedging-pressure risk premium, not a
+reversal**, in our 27-instrument futures universe — go WITH stretched specs, not
+against them. This matches the academic literature (Basu-Miffre 2013) over the
+practitioner "COT-index contrarian" folklore. Sources: Cootner (1960),
+De Roon-Nijman-Veld (2000), Basu-Miffre (2013); contra Sanders-Irwin-Merrin
+(2009) on crowded-spec limits.
+
+**Honesty caveat (in-sample sign selection).** Choosing the +z direction is
+legitimate model selection between two ex-ante theories — NOT parameter torture —
+but the sign was still confirmed on the same sample used to reject its mirror.
+Because `cot_risk_premium` is sub-threshold it ships **held-out, not promoted**, so
+no in-sample-selected edge trades live; promotion would require it to clear the
+gate as part of the ensemble on a later/independent window.
+
+**What changed in code.** Added `data/fundamental_store.load_raw()` (bulk
+all-vintage loader so a signal evaluated at thousands of dates replays the PIT
+filter in memory instead of one DB round-trip per date). Added `signals/cot.py`
+with a shared `_CotPositioning` base and two registered signals (`cot_reversal`,
+`cot_risk_premium`); registered the module in `signals/base`. The look-ahead
+property test and contract test cover both automatically via `list_signals()`
+(`pytest signals/ evaluation/` green; `lint-imports` 4/4). Scorecard rows persisted
+to `signal_scorecard`.
+
+---
+
+## 2026-06-04 — Inventory-surprise signal: no cross-sectional edge as built (REJECTED)
+
+**What was verified.** `inventory_surprise` — EIA weekly stocks deseasonalised by
+week-of-year, forecast = -z(level vs trailing seasonal norm), i.e. surplus bearish
+/ deficit bullish (theory of storage: Working 1949; Gorton-Hayashi-Rouwenhorst
+2013). Scored on the EIA-covered energy sub-universe (crude→WTI, gasoline→RBOB,
+distillate→Heating Oil, nat-gas→Natural Gas) with `--min-cross-section 4`.
+
+**Result (walk-forward, purged/embargoed, cost-adjusted; 4-instrument
+cross-section).** ❌ REJECTED at all horizons. IC ≈ 0 at H5 (+0.008, t=0.22),
+mildly negative at H10/H21 (−0.033 / −0.087; t = −0.69 / −1.25); net LS Sharpe
+negative throughout (−0.42 / −0.29 / −0.32). The near-zero short-horizon IC and
+weak t-stats indicate NOISE, not a clean wrong sign — flipping would not rescue
+it (H5 stays ~0), so unlike cot_reversal no risk-premium variant is warranted.
+
+**Verdict — inconclusive / not cross-sectionally rankable as built; theory of
+storage NOT refuted.** Two structural reasons, both economic rather than coding:
+(1) **Degenerate cross-section** — the 4 EIA instruments are one tightly
+co-moving energy complex (dominated by the common crude factor), so ranking them
+against each other each week is close to meaningless; the theory-of-storage edge
+in the literature is cross-sectional across DOZENS of commodities or time-series
+per instrument, neither of which a 4-name energy book tests. (2) **News
+absorption** — the weekly EIA print moves prices on release day; by the next daily
+decision date the surprise is largely in the price, leaving little for a 5–21 day
+cross-sectional book. This mirrors the `seasonality` finding: economically sound,
+not a cross-sectional ranker in this form.
+
+**Revisit path (not done now).** (a) a per-instrument TIME-SERIES overlay (long
+each energy contract when its OWN inventory is tight) evaluated with a time-series
+harness; (b) re-test cross-sectionally once inventory breadth spans many more
+commodities (LME metals stocks, USDA/CONAB ags), so the cross-section is genuinely
+diverse. Until then it ships rejected and is held out of the ensemble.
+
+**What changed in code.** Added `signals/inventory.py` (`InventorySurprise`),
+registered in `signals/base`. Added a general `--min-cross-section` flag to
+`evaluation/harness.py` (default unchanged at 5) so sub-universe signals are
+scoreable without weakening the default gate. Tests `pytest signals/ evaluation/`
+green (22 passed); `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — Macro-surprise (per-instrument betas): betas CONFIRMED, alpha REJECTED
+
+**What was verified — the betas (MODEL VERIFICATION RULE).** Before gating, the
+learned trailing factor betas were checked against economic priors at 2026-05-29
+(252-day window, factors T10YIE/DGS10/DTWEXBGS/VIXCLS):
+- Gold: USD −0.0050, 10y rates −0.0014, inflation +0.0009 — textbook (gold rises
+  as the dollar/real rates fall; mild inflation hedge).
+- Silver: USD −0.0123 (even more dollar-sensitive than gold). ✓
+- Copper: USD −0.0067, VIX −0.0027 (industrial metal; risk-off hurts it). ✓
+- WTI: inflation +0.0107 (strong — oil is an inflation driver). ✓
+- Nat gas: near-zero macro betas (correctly identified as weather-driven). ✓
+**Verdict: the factor-beta structure is economically sound** — the model captures
+real macro transmission, not noise. (Two small off-signs — crude's mildly positive
+USD/VIX beta — are explainable by the recent oil-as-geopolitical-risk regime.)
+
+**Result of the alpha signal (walk-forward, purged/embargoed, cost-adjusted; full
+40-instrument cross-section).** ❌ REJECTED at all horizons. IC negative at H5/H10
+(−0.022 / −0.023; t = −1.31 / −0.99) and only weakly positive at H21 (+0.027,
+t=0.75, not significant). Net LS Sharpe −0.79 / −0.58 / +0.15, with very high
+turnover (0.83 / 1.11 / 1.30 per period).
+
+**Verdict — macro betas are real, but "beta × recent move" is not standalone
+alpha.** Two interpretable failures: (1) the construction uses CONTEMPORANEOUS
+betas (r_t on f_t) applied to a recent factor move that the cross-section has
+largely already repriced — hence the negative short-horizon IC (a reversal/
+already-in-the-price effect dominates the lagged-diffusion hypothesis). (2) The
+recent-move "surprise" is noisy day-to-day, churning the book (turnover >1.0/
+period) so even the weakly right-signed H21 edge is eaten by costs. The economic
+diffusion hypothesis is at best faintly present at 21 days and not significant.
+
+**Product insight + revisit path (not done now).** The verified beta structure is
+genuinely valuable, but its home is the **risk/covariance layer** (portfolio
+construction, factor-hedging, regime conditioning) — NOT as a cross-sectional
+alpha. As an alpha, the principled re-tests are: (a) LAGGED betas (regress r_t on
+f_{t-k}) to test prediction rather than contemporaneous co-movement; (b) heavy
+smoothing of the factor surprise to cut turnover; (c) feed the betas to the risk
+layer and let macro shape sizing/hedging instead of direction. No passing variant
+was manufactured — flipping the sign does not yield a clean win (only H5/H10 would
+turn positive, still sub-0.30 IC IR and still turnover-killed).
+
+**What changed in code.** Added `signals/macro.py` (`MacroSurprise`): vectorised
+multivariate OLS betas for the whole cross-section at once (one K×K solve per date),
+PIT factor panel from the FRED store (daily unrevised series stamped by
+release_date). Registered in `signals/base`. Tests `pytest signals/ evaluation/`
+green; `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — ensemble_v1: composite lifts significance, still sub-threshold (REJECTED)
+
+**What was built.** `ensemble_v1` — a deliberately parameter-free equal-weight
+composite of the right-signed, gate-confirmed-but-sub-threshold edges. For each
+horizon it standardises each component's cross-sectional forecast, averages across
+the components covering each instrument, and re-standardises. No weights are fitted
+(fitting them on the same history the gate scores would be the in-sample
+optimisation this rebuild exists to avoid).
+
+**Finding — two of the three candidates were the SAME signal.** Measured mean
+cross-sectional rank-correlation of the component forecasts (H10, 41 sampled
+dates): `momentum_xs` vs `trend_ts` = **+1.000**; each vs `cot_risk_premium` =
++0.59. The perfect correlation is correct-by-construction: both momentum signals
+are the identical 12-1 vol-scaled trailing return, differing only in that
+`momentum_xs` cross-sectionally demeans — and demeaning does not change RANKS, so
+under the gate's rank-IC + dollar-neutral book they are indistinguishable. (Their
+standalone scorecards were already near-identical.) The time-series vs
+cross-sectional distinction only matters for net-directional exposure, which the
+dollar-neutral gate does not reward. `trend_ts` was therefore dropped from the
+composite to avoid silently double-weighting momentum; the distinct edges are
+`momentum_xs` + `cot_risk_premium`.
+
+**Result (walk-forward, purged/embargoed, cost-adjusted; momentum_xs +
+cot_risk_premium, equal weight).** Still REJECTED, but the best composite so far:
+IC 0.029 / 0.039 / 0.041, IC IR 0.131 / 0.182 / 0.208, t-stat 2.20 / 2.29 / 1.81,
+net LS Sharpe 0.33 / 0.46 / 0.46, turnover 0.20-0.42. Versus the best standalone
+(momentum IC IR 0.191 at H21), the ensemble nudges H21 IR to 0.208 and — more
+importantly — pushes the short-horizon t-stats to significance (>2). But IC IR
+remains < 0.30 at every horizon.
+
+**Verdict — combining two positively-correlated edges is not enough breadth.**
+With effective breadth ≈ 2 and component correlation 0.59, the IR lift is modest
+(0.19 → 0.21). Clearing 0.30 requires genuinely ORTHOGONAL components, not more
+momentum. The clear path: build the price-only edges deferred when we chose to
+expand the data layer first — short-term reversal (≈ anti-momentum at short
+horizon; empirically motivated by the carry_proxy negative-IC finding) and
+low-volatility / betting-against-vol (Frazzini-Pedersen 2014) — both near-orthogonal
+to momentum, then re-form the ensemble. Weight-optimisation (IC/risk-weighting) is
+deferred until it can be justified on an independent window.
+
+**What changed in code.** Added `signals/ensemble.py` (`EnsembleComposite`,
+`ensemble_v1`), registered in `signals/base`; restricts output to the panel
+universe (a component such as COT may score instruments beyond the given panel).
+Tests `pytest signals/ evaluation/` green (26 passed incl. the look-ahead property
+test over the ensemble); `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — Orthogonal wave: reversal_st (strong), low_vol (null), ensemble_v1 rebuilt
+
+**What was built.** Two price-only edges intended to add breadth orthogonal to
+momentum: `reversal_st` (1-month short-term reversal, -z of the trailing 21-day
+vol-scaled return; Jegadeesh 1990, Lehmann 1990) and `low_vol` (betting-against-vol,
+-z of trailing realised volatility; Frazzini-Pedersen 2014).
+
+**Standalone gate results (walk-forward, purged/embargoed, cost-adjusted; full
+universe).**
+- `reversal_st` — ⚠️ right-signed, sub-threshold, STRONG at H10. IC 0.017 / 0.049 /
+  0.034; IC IR 0.075 / 0.208 / 0.144; t-stat 1.33 / 2.63 / 1.26; net LS Sharpe
+  0.17 / 0.53 / 0.26. The H10 IC (0.049, t=2.63) is the best single-signal IC in
+  the project so far. High turnover (0.70-1.43) as expected for a reversal. REJECTED
+  standalone but a clear ensemble candidate. Note this confirms the carry_proxy
+  finding (short-horizon momentum reverses) with a sign-correct factor.
+- `low_vol` — ❌ NULL. IC ≈ 0 at every horizon (0.007 / 0.001 / 0.009; |t| < 0.5)
+  and net LS Sharpe NEGATIVE (-0.50 / -0.39 / -0.27). The low-risk anomaly does not
+  rank this commodity cross-section: it is an equity-centric effect, and here a vol
+  ranking is largely a static low-vol-ETF vs high-vol (BTC/nat-gas) tilt that lost
+  over the sample. Not an ensemble candidate (orthogonal, but orthogonal NOISE).
+  Verdict: low-vol anomaly not present cross-sectionally in this universe.
+
+**Orthogonality check (mean cross-sectional rank-corr, H10).** momentum/cot +0.59,
+momentum/reversal **-0.10**, cot/reversal **-0.28**, low_vol vs all ≈ 0. reversal_st
+is genuinely orthogonal (indeed anti-correlated) — exactly the breadth the ensemble
+needed; low_vol is orthogonal but null.
+
+**ensemble_v1 rebuilt (momentum_xs + cot_risk_premium + reversal_st, equal
+weight).** Best composite to date, still REJECTED: IC 0.034 / 0.055 / 0.050; IC IR
+0.159 / **0.253** / 0.241; t-stat 2.82 / **3.19** / 2.10; net LS Sharpe 0.41 /
+**0.71** / 0.53; turnover 0.50 / 0.71 / 1.01. Versus the 2-component composite, H10
+IC IR rose 0.182 → 0.253 and net LS Sharpe 0.46 → 0.71 (Δ+0.25) — the
+anti-correlated reversal added real diversification. t-stats are now strongly
+significant (>3 at H10).
+
+**Verdict — methodology validated, bar not yet cleared.** IC IR has tracked
+0.19 → 0.21 → 0.25 (H10) as genuinely orthogonal edges are added; the gate's
+0.30 IC IR bar remains unmet but is now close, with a t-stat > 3 and a
+cost-adjusted LS Sharpe of 0.71 at the 10-day horizon. The bar was NOT moved.
+Path to promotion: one or two more orthogonal edges (e.g. a true term-structure
+carry/basis once the stitched-M2 series exists; a commodity value / long-run
+mean-reversion factor), then re-form. Weight-optimisation remains deferred until it
+can be justified out-of-sample.
+
+**What changed in code.** Added `signals/reversal.py` (`reversal_st`) and
+`signals/lowvol.py` (`low_vol`), registered in `signals/base`; added `reversal_st`
+to `ensemble_v1.COMPONENTS` (low_vol excluded as a null). Tests `pytest signals/
+evaluation/` green (27 in the PIT/contract set); `lint-imports` 4/4. Scorecards
+persisted.
+
+---
+
+## 2026-06-04 — Value factor: wrong-signed on a single-regime sample (REJECTED, not added)
+
+**What was built.** `value` — commodity long-horizon mean reversion (Asness-
+Moskowitz-Pedersen 2013): forecast = +z(reference log-price − current log-price),
+reference = mean log-price ~1.4-2.75y back. Cheap-vs-own-history → long. Intended
+as the orthogonal value/momentum complement to push the ensemble over the bar.
+
+**History constraint.** The aligned panel has only ~5y of COMMON history (start
+gated by the youngest instruments) and is calendar-day aligned, so a textbook 5y
+reference is infeasible; the reference is ~1.4-2.75y back — the deepest the data
+supports.
+
+**Result (walk-forward, purged/embargoed, cost-adjusted; full universe).** ❌
+WRONG-SIGNED. IC NEGATIVE at all horizons (−0.034 / −0.030 / −0.015; t = −1.91 /
+−1.17 / −0.38), net LS Sharpe negative throughout. Over this sample, cheap-vs-
+multi-year UNDERperformed: multi-year trend persisted rather than reverted.
+
+**Why no sign-flip / not added to the ensemble.** Value is strongly NEGATIVELY
+correlated with momentum (measured H10 rank-corr −0.654 — the canonical value/
+momentum relationship). So a sign-flipped "value" (+IC) would be ~+0.65 correlated
+with momentum_xs — i.e. just long-horizon MOMENTUM, redundant with a signal we
+already have, NOT a new orthogonal edge. Flipping would add no breadth, so the
+ensemble is unchanged (momentum_xs + cot_risk_premium + reversal_st).
+
+**Verdict — inconclusive on the merits; AMP value NOT refuted.** The ~5-year panel
+is a single, strongly-trending commodity regime (2021-2026), and value is well
+known to underperform in trending regimes (cf. equity value's 2010s drawdown).
+A multi-decade, multi-regime factor cannot be fairly judged on 5 years of one
+regime. Honest read: value is wrong-signed IN THIS SAMPLE, which is itself
+consistent with a trend-dominated regime, not evidence the factor is dead. Revisit
+once the panel's common history deepens to span multiple regimes (and ideally with
+the canonical ~5y reference).
+
+**What changed in code.** Added `signals/value.py` (`value`), registered in
+`signals/base`. NOT added to `ensemble_v1`. Tests `pytest signals/ evaluation/`
+green; `lint-imports` 4/4. Scorecard rows persisted.
+
+---
+
+## 2026-06-04 — Phase 2 conclusion: research ensemble shipped behind a flag (NOT promoted)
+
+**Decision.** Stop adding signals for now and accept the composite as the honest
+Phase-2 research output. Wire it into the dashboard as a research-grade, NOT-promoted
+surface behind a feature flag, and move on. (No goalposts moved; the 0.30 IC IR bar
+stands and remains unmet.)
+
+**Phase-2 signal scorecard (all gate verdicts, full universe unless noted).**
+| signal | best horizon | IC IR | verdict | note |
+|---|---|---|---|---|
+| momentum_xs | H21 | 0.191 | reject | right-signed, sub-threshold |
+| trend_ts | H21 | 0.191 | reject | == momentum_xs under ranking (corr +1.000) |
+| carry_proxy | — | <0 | reject | wrong-signed proxy; needs real basis |
+| seasonality | — | ~0 | reject | not cross-sectional as built |
+| cot_reversal | — | <0 | reject | reversal refuted |
+| cot_risk_premium | H10 | 0.158 | reject | right-signed (hedging pressure) — KEEP |
+| inventory_surprise | — | ~0 | reject | degenerate 4-name energy cross-section |
+| macro_surprise | — | <0/~0 | reject | betas real → belong in risk layer |
+| reversal_st | H10 | 0.208 | reject | right-signed, strong — KEEP |
+| low_vol | — | ~0 | reject | low-risk anomaly absent here |
+| value | — | <0 | reject | wrong-signed on single-regime 5y sample |
+| **ensemble_v1** | **H10** | **0.253** | **reject** | **best honest result** |
+
+**ensemble_v1** = equal-weight(momentum_xs, cot_risk_premium, reversal_st), the
+three right-signed, mutually-distinct edges. Best at H10: IC 0.055, IC IR 0.253,
+t-stat 3.19, cost-adjusted net LS Sharpe 0.71 — significant and economically
+meaningful, but below the 0.30 IC IR promotion bar. The IR climbed 0.19 → 0.21 →
+0.25 as orthogonal breadth was added, validating the Edge = IC × √breadth approach;
+it simply has not crossed the bar yet.
+
+**What shipped (Dashboard Evolution Rule compliant).**
+- `evaluation/reporting.py` — read-only, presentation-agnostic helpers (latest
+  scorecard; current ensemble cross-sectional tilts), defensive/empty-on-failure.
+- `pages/13_Signal_Lab.py` — new ADDITIVE page gated by `SIGNAL_RESEARCH_ENABLED`
+  (default OFF). Loud "RESEARCH-GRADE — NOT PROMOTED" banner; renders the gate
+  scorecard and the current dollar-neutral ensemble tilts. Thin: all computation
+  stays in the signal/eval layers. No existing page or model was modified or
+  replaced.
+- `utils/theme.py` — sidebar lists "Signal Lab ⚗️" only when the flag is on.
+
+**Rollback.** `unset SIGNAL_RESEARCH_ENABLED` (or set false) removes the surface
+entirely — no redeploy. Old paths untouched.
+
+**Open path to promotion (future).** The two most promising orthogonal edges remain
+data-blocked or regime-blocked: a true term-structure carry/basis (needs the
+stitched-M2 deferred-contract series — a data-layer build) and a multi-regime value
+test (needs the aligned panel's common history to deepen past one commodity-bull
+regime). macro betas should be deployed in the risk/covariance layer rather than as
+alpha. Component weighting remains equal-weight until an out-of-sample (nested
+walk-forward) scheme can justify otherwise.
+
+---
+
+## 2026-06-04 — Multi-regime value: FIRST GATE PASS (PROMOTE on deep panel) + regime findings
+
+**Context.** The 5-year aligned panel rejected `value` (wrong-signed). Hypothesis:
+that sample is a single trend-dominated commodity-bull regime, which is exactly
+when value underperforms — not evidence the factor is dead. To test fairly we
+backfilled ~24y of deep history for the core futures and re-gated.
+
+**What was built.** `services/deep_history_ingest.py` backfills 25 core genuine
+futures (~21 trading-years, 2001→2026) from Yahoo into `price_history` under a
+DISTINCT `interval='1d_deep'` (production `'1d'` untouched). `load_long_history_core_panel()`
+reads it; `evaluation/harness.py` gains `--panel aligned|long_core` (default
+aligned). Multi-regime runs use `--no-db` (the ledger has no panel column yet), so
+the machine scorecard stays aligned-panel-only; results recorded here.
+
+**Result on long_core (21y, 25 instruments, walk-forward / purged / cost-adjusted).**
+- `value` — ✅ **PROMOTE** (project's first). H5 IC 0.036 (IR 0.131, t 3.86);
+  H10 IC 0.059 (IR 0.219, t 4.55, LS Sharpe 1.26); **H21 IC 0.098 (IR 0.348,
+  t 4.99, net LS Sharpe 1.18) — clears the 0.30 bar.** Strengthens with horizon,
+  exactly as a slow mean-reversion factor should.
+- `momentum_xs` — ❌ now NEGATIVE IC (−0.004 / −0.010 / −0.023) on the true 21y
+  sample (note: on long_core's trading-day index, 252 rows = a true 12-1 window).
+  Cross-sectional commodity momentum is weak/regime-dependent over the full cycle —
+  its positive 5y reading was regime-specific.
+- `reversal_st` — ❌ right-signed and robust across regimes (IC 0.021 / 0.037 /
+  0.044; IR up to 0.173; t 2.5-3.0), consistent with the 5y result.
+
+**External verification (MODEL VERIFICATION RULE) — CONFIRMED.** The multi-regime
+value result matches the literature: Asness-Moskowitz-Pedersen (2013, "Value and
+Momentum Everywhere") document a significant commodity value premium and a strong
+NEGATIVE value/momentum correlation. We measure value vs momentum rank-corr −0.65
+and value t≈5 at the monthly horizon — consistent in sign, magnitude and the
+value/momentum diversification. Verdict: confirmed; value is a genuine,
+economically-grounded, gate-clearing edge over a proper multi-regime sample.
+
+**Regime insight.** value and momentum are two sides of one coin: value was in
+drawdown over 2021-26 (trend regime) precisely when momentum worked, and vice
+versa over the full cycle. This is the textbook case FOR combining them — neither is
+reliable alone, but their −0.65 correlation makes the pair powerful across regimes.
+
+**Caveats (do not over-claim a live promotion).**
+1. **Panel.** value PROMOTES on the research long_core panel (25 core futures, 21y)
+   but is REJECTED on the production aligned panel (41 instruments, 5y) — because
+   the production sample is value's drawdown regime. It must NOT be naively added to
+   the current production ensemble, where it is presently adverse.
+2. **Series construction.** `1d_deep` is RAW Yahoo continuous front-month, NOT
+   roll-adjusted (unlike the production pipeline). Multi-year value uses price
+   ratios, which carry some roll noise; the result should be re-confirmed on a
+   cleanly roll-adjusted (or spot/index) deep series before any live deployment.
+3. **Promotion is at H21 only**, on a deep research universe; treat as validated-in-
+   research, not yet wired live.
+
+**Path forward.** (a) Re-gate the ENSEMBLE on long_core (value + reversal + cot
+post-2010) to see whether the value/momentum/positioning blend clears the bar
+across a full cycle. (b) Add a `panel` column to `signal_scorecard` so multi-regime
+runs are first-class in the machine ledger. (c) Roll-adjust the deep series and
+re-confirm. (d) For production, treat value as a regime-diversifier to be combined,
+not a standalone live signal yet.
+
+**What changed in code.** `services/deep_history_ingest.py` (new),
+`models/data_loader.py::load_long_history_core_panel` (new),
+`evaluation/harness.py` `--panel` flag. Tests `pytest signals/ evaluation/` green
+(32); `lint-imports` 4/4. 157,944 `1d_deep` rows ingested; production `1d`
+unaffected.
+
+---
+
+## 2026-06-04 — Ensemble on the multi-regime panel: value alone beats the blend
+
+**What was tested.** Re-gated the ensemble on the deep 21y long_core panel, and
+built `ensemble_v2` = value + reversal_st + cot_risk_premium (dropping momentum_xs,
+which is wrong-signed over the full cycle) as the multi-regime-appropriate blend.
+On long_core (H21) the three are well diversified (value/reversal +0.18, value/cot
+-0.21, reversal/cot -0.22).
+
+**Results (long_core, walk-forward / purged / cost-adjusted; --no-db).**
+- `ensemble_v1` (momentum+cot+reversal) — ❌ REJECT, IC ≈ 0 (0.003/0.008/0.005).
+  The production ensemble does NOT survive a full cycle: it leaned on momentum,
+  which flips wrong-signed multi-regime. Its 5y success was regime-specific.
+- `value` (standalone) — ✅ PROMOTE. H21 IC 0.098, IR 0.348, t 4.99, LS Sharpe 1.18.
+- `ensemble_v2` (value+reversal+cot) — ✅ PROMOTE at H21 (IC 0.074, IR 0.311,
+  t 4.84, LS Sharpe 0.93), but **WEAKER than value alone at every horizon**
+  (H10: ensemble IR 0.189 / Sharpe 0.85 vs value 0.219 / 1.26; H21: 0.311 / 0.93
+  vs 0.348 / 1.18).
+
+**Verdict — value is the multi-regime edge; equal-weight blending DILUTES it.**
+The diversification thesis (Edge = IC × √breadth) helps when component strengths
+are COMPARABLE (the 5y case, where momentum≈cot≈reversal and the blend lifted IR
+0.19→0.25). It HURTS when one component dominates: equal-weighting value (IR 0.35)
+with two weaker edges (reversal IR 0.17, cot) pulls the composite below value
+alone. So on a multi-regime basis the honest conclusion is that VALUE at the
+monthly horizon is the real promotable edge — not the equal-weight ensemble.
+
+**Implication.** The remaining lever is principled, OUT-OF-SAMPLE component
+weighting (IC- or risk-weighting via nested walk-forward), which would up-weight
+value rather than equal-weight it. That is the deferred weight-optimisation step
+and must be done with nested CV to avoid in-sample fitting — NOT attempted inline
+here. Equal-weight remains the honest default until then.
+
+**Caveats carry over** from the value entry: research long_core panel (not the live
+5y production universe, where value is in a trend-regime drawdown), raw
+non-roll-adjusted deep series, H21-only. `ensemble_v2` is registered as a research
+composite (in-sample component selection noted in its docstring), NOT promoted live.
+
+**What changed in code.** Added `EnsembleV2MultiRegime` (`ensemble_v2`) to
+`signals/ensemble.py` (inherits the equal-weight combine logic; only COMPONENTS
+differ). Tests `pytest signals/ evaluation/` green (34); `lint-imports` 4/4.
+
+---
+
+## 2026-06-04 — Layer 3 (risk) foundation: Ledoit-Wolf shrinkage covariance VERIFIED
+
+**What was built.** `portfolio/risk.py` — the first concrete piece of the Layer-3
+risk/portfolio layer (whose `Allocator` seam was laid in Phase 0). A point-in-time
+`RiskModel` provider: a returns window (only data ≤ asof), a sample covariance, and
+the Ledoit-Wolf (2004) CONSTANT-CORRELATION shrinkage estimator with the
+analytically optimal intensity δ. Exposes `cov`, `vol`, `shrinkage`, plus
+`correlation()` and `annualized_vol()`. numpy/pandas only; no streamlit/pages/app
+(import-linter 4/4 kept).
+
+**What was verified (MODEL VERIFICATION RULE) — against Ledoit-Wolf 2004.**
+A bug was caught during verification and fixed: the θ_jj,ij asymptotic-covariance
+building block used (1/T)Σ xᵢxⱼ² instead of (1/T)Σ xᵢxⱼ³ (squared vs cubed),
+which produced spurious δ=0 on some draws. Corrected to `cube.T − var_j·s_ij`.
+
+Post-fix verification vs the ORACLE shrinkage (the δ that minimises Frobenius
+distance to a KNOWN true covariance, computable only in simulation), averaged over
+200-300 Monte-Carlo draws per cell:
+
+| true Σ | N | T | analytic δ | oracle δ |
+|---|---|---|---|---|
+| const-corr | 20 | 60 | 0.936 | 0.985 |
+| const-corr | 20 | 1000 | 0.956 | 0.989 |
+| 3-factor | 20 | 60 | 0.119 | 0.092 |
+| 3-factor | 20 | 250 | 0.026 | 0.034 |
+| 3-factor | 20 | 1000 | 0.011 | 0.016 |
+| 3-factor | 40 | 80 | 0.082 | 0.074 |
+
+The analytic intensity tracks the oracle in BOTH regimes and the correct direction:
+heavy shrinkage when the constant-correlation target is near-true; light, T→0
+shrinkage when the target is misspecified and data is plentiful. Structural
+guarantees hold by construction and in tests: symmetric, PSD, variance-preserving
+diagonal, δ∈[0,1], and shrinkage reduces the condition number when N≈T.
+
+**Real-data sanity (long_core, 252-day window, 25 futures).** δ=0.126 (light, as
+expected at N/T≈0.1). Annualised vols are economically correct: Natural Gas 103%,
+OJ 70%, Silver 66% (the famously wild) down to Soybeans 16%, Cotton/Live Cattle
+18% (the calm). Covariance PSD, condition number ≈124.
+
+**Verdict: confirmed.** The shrinkage estimator matches Ledoit-Wolf 2004 in
+behaviour and the oracle in level; vols are realistic. Foundation is solid for the
+allocators and portfolio backtest to build on next.
+
+**Tests.** `portfolio/test_risk.py` (8 tests): structure/PSD/symmetry, diagonal
+preservation, conditioning improvement, sample-method equivalence, the point-in-time
+property (future rows can't change an as-of estimate), insufficient-history → None,
+unit-diagonal correlation, vol annualisation. All green.
+
+---
+
+## 2026-06-04 — Layer 3 (3.2): forecast → position allocator built & verified
+
+**What was built.** `portfolio/allocators.py` — the forecast→position mapping that
+sits on the risk model. Four ingredients, all standard institutional practice:
+1. Risk-parity-aware inverse-vol sizing (each bet scaled by 1/σ_i from the risk
+   model, equalising risk contributions rather than dollars).
+2. Concentration caps — per-name and per-sector gross caps via iterated
+   water-filling.
+3. Portfolio-vol targeting — scale the whole book so ex-ante annualised vol
+   (sqrt(wᵀΣw)) hits a target; gross leverage is the output, capped for safety.
+4. Horizon sleeves — the {5,10,21}-day forecasts are three separate capped books
+   blended with tunable sleeve weights, making turnover/decay an explicit dial.
+`RiskScaledAllocator` (single horizon, implements the Phase-0 `Allocator` ABC) and
+`SleeveAllocator` (multi-horizon blend → `AllocationResult` with diagnostics).
+
+**Two bugs caught and fixed during verification.**
+1. Concentration caps broke dollar-neutrality (asymmetric clipping left net ≈ -0.26
+   on real data). Fixed by re-imposing neutrality inside the cap water-filling loop
+   (centering preserves zero-sum through the later global vol-target scaling).
+2. Blending independently-capped sleeves could violate the per-name cap: cross-
+   sleeve cancellation shrinks gross faster than individual weights, inflating a
+   name's fraction past the cap. Fixed by RE-APPLYING the caps to the blended book
+   (the final portfolio is what must satisfy the constraints) before vol-targeting.
+
+**Verification (real data — value signal on long_core, 252-day risk window).**
+Across equal / fast-only / slow-only sleeve mixes the book hits every constraint
+exactly: ex-ante vol 0.100 (target 0.10), net exposure ~1e-17 (dollar-neutral),
+max single-name 0.100 (cap 0.10), max sector 0.350 (cap 0.35), 25 names. Verdict:
+constraints provably satisfied; sizing is risk-parity-aware (low-vol names carry
+more weight for equal signal).
+
+**Tests.** `portfolio/test_allocators.py` (7): all-constraints-respected,
+inverse-vol favours low-vol names, name-cap binds when tight, sleeve weights change
+the blend, vol-target scaling is proportional (0.05 vs 0.20 → ~4× gross),
+leverage-cap binds, empty forecast → empty. `pytest portfolio/` 15 green;
+`lint-imports` 4/4.
+
+---
+
+## 2026-06-04 — Layer 3 (3.3): portfolio backtest built & cross-validates the gate
+
+**What was built.** `portfolio/backtest.py` — walk-forward portfolio backtest, the
+Layer-3 analogue of the signal gate. Each rebalance: estimate the risk model (PIT),
+compute signal forecasts (PIT), map to weights via the SleeveAllocator, charge
+transaction cost on turnover, then hold and let weights DRIFT with prices until the
+next rebalance. Costs are folded into the equity curve (same TransactionCostModel
+as the gate), so every metric is net of cost: Sharpe, ann return/vol, max drawdown,
+turnover, gross. CLI: `python -m portfolio.backtest --signal S --panel {aligned,
+long_core} --rebalance-days N --cost-bps B --target-vol V`.
+
+**Results (long_core 21y, 21-day rebalance, target vol 10%).**
+| signal | net Sharpe | ann.ret | max DD | turnover/reb |
+|---|---|---|---|---|
+| value @10bps | +0.79 | +9.5% | −29.2% | 0.35 |
+| value @30bps | +0.73 | +8.8% | −29.5% | 0.35 |
+| momentum_xs @10bps | −0.25 | −2.9% | −69.4% | 0.70 |
+| ensemble_v2 @10bps | +0.75 | +9.7% | −30.7% | 1.35 |
+
+**Cross-validation (this is the value of the backtest).**
+1. It reflects SIGNAL QUALITY in realized P&L: value (positive multi-regime IC)
+   earns +0.79 net Sharpe; momentum_xs (negative IC on long_core) LOSES money
+   (−0.25, −69% drawdown). The portfolio layer independently agrees with the gate.
+2. value is COST-ROBUST: Sharpe 0.79 → 0.73 from 10 → 30 bps, because turnover is
+   low (0.35/reb) — value is a slow factor. A real, not paper, edge.
+3. ensemble_v2 < value ALONE at the portfolio level too (Sharpe 0.75 vs 0.79) AND
+   churns ~4× more (1.35 vs 0.35 turnover, from reversal_st). This reproduces the
+   gate finding — equal-weight blending dilutes the dominant value signal — now in
+   costed, risk-managed terms. value standalone remains the best book.
+
+Realized vol lands ~12% vs the 10% target (the normal ex-ante/realized gap; a
+shorter risk window or realized-vol scaling would tighten it — a future tweak).
+
+**Test-design note.** A CONSTANT forecast is NOT a no-view under inverse-vol sizing
+(const/σ still varies → a low-vol tilt, which is intended: equal expected return
+favours higher-Sharpe low-vol names). The genuine no-view is an all-NaN forecast,
+which correctly yields a flat book (test updated accordingly).
+
+**Tests.** `portfolio/test_backtest.py` (5): runs end-to-end with finite metrics,
+higher cost reduces net return + Sharpe, no-view → flat equity, more frequent
+rebalancing raises total turnover, realized vol in a sane range. `pytest portfolio/`
+20 green; `lint-imports` 4/4.
+
+---
+
+## 2026-06-04 — Layer 3 (3.4): portfolio backtest surfaced in Signal Lab (flagged)
+
+Presentation-only: added a portfolio-backtest panel to `pages/13_Signal_Lab.py`
+(gated by `SIGNAL_RESEARCH_ENABLED`, default off) — signal/panel/cost/rebalance
+controls, a net Sharpe / ann-ret / ann-vol / max-DD / turnover / gross metrics row,
+a net-of-cost equity curve (log scale) and an underwater drawdown chart. No new
+model: it renders `portfolio.backtest.run_backtest` via an `@st.cache_data` wrapper.
+The backtest call lives in the page, NOT in `evaluation/reporting.py`, to keep layer
+order (the research/signal layer must not depend on the risk/portfolio layer above
+it). Smoke-tested across signal×panel combos (no crashes); the surface is honest by
+construction — e.g. `value` shows its strong long_core curve but a negative aligned
+(5y drawdown-regime) curve. Loud NOT-PROMOTED banner retained. `lint-imports` 4/4.
+
+---
+
+## 2026-06-05 — Layer 3 (3.4): QAOA recast as a gated allocator, LOSES the bake-off
+
+**What was built.** A clean three-way allocator competition on the IDENTICAL
+walk-forward, net-of-cost backtest:
+- `MeanVarianceSelectAllocator` — classical EXACT cardinality-constrained
+  mean-variance: enumerates all C(n,k) subsets and returns the global minimiser of
+  `xᵀΣx − λμᵀx`. At n=12, k=5 this is 792 combinations (~3 ms) — the strict upper
+  bound QAOA is measured against.
+- `RiskScaledAllocator` (risk-parity-aware inverse-vol, already shipped) — second
+  classical baseline.
+- `QAOAAllocator` (new, `portfolio/quantum_allocator.py`) — re-casts the legacy
+  QAOA solver as a first-class `Allocator`, gated by `QAOA_ALLOCATOR_ENABLED`
+  (default off). Reuses the QUBO/QAOA building blocks from
+  `models/quantum/qaoa_portfolio.py` but takes μ and Σ from the Layer-3 risk model
+  and the signal forecast, so all three allocators solve EXACTLY the same problem.
+  Graceful fallback to the classical exact optimum if PennyLane is unavailable —
+  quantum is never a single point of failure.
+- `SingleHorizonFrameAllocator` — adapter so selection allocators run in the
+  backtest's frame interface.
+- `portfolio/compete.py::run_bakeoff` — runs all three on the same backtest and
+  ranks by realised net Sharpe; `production_allocator` enforces "ships only where
+  it wins": QAOA is returned ONLY if its flag is on AND it beat the best classical
+  baseline; otherwise the classical winner is returned. The legacy
+  `models/portfolio_optimizer.py` stays untouched for existing pages
+  (Evolution Rule).
+
+**Bake-off — value on long_core, 21-day horizon, 126-day rebalance, k=5/12, 10 bps.**
+
+| allocator | net Sharpe | ann. ret | ann. vol | max DD | turnover/reb |
+|---|---|---|---|---|---|
+| classical_mv | **+0.54** | +6.6% | 12.2% | −28.1% | 0.49 |
+| risk_parity  | +0.54 | +6.7% | 12.4% | −32.6% | 0.82 |
+| qaoa         | +0.37 | +4.2% | 11.3% | −34.1% | 0.87 |
+
+**Verdict — QAOA does NOT beat the classical baseline; stays gated off.** Production
+will use `classical_mv` (or `risk_parity` — within noise). This is exactly the
+mathematically expected outcome: at n=12 the optimisation has only 792 combinations,
+which classical brute-force solves EXACTLY in ~3 ms; QAOA is an APPROXIMATION
+algorithm, so it cannot beat the exact optimum in solution quality — only in
+runtime (and even there, classical was ~700× faster: 3 ms vs ~2 s per solve here).
+Quantum advantage requires combinatorially large problems beyond classical reach;
+12 assets is not that regime.
+
+**Why we still keep QAOA first-class.** The legacy QAOA page stays live untouched.
+The new `QAOAAllocator` and the `compete.py` harness mean we can re-run the bake-off
+at any time (different signal, larger universe, more rebalances, future hardware)
+and ship QAOA *the moment* it wins — flag-flip only. This is the "first-class but
+must compete" structure the rebuild calls for.
+
+**External verification (MODEL VERIFICATION RULE).** The "QAOA cannot beat
+classical exact optimisation on small problems" result is the well-documented
+finding of the NISQ-era quantum-optimisation literature (Hadfield-Wang 2018; Farhi-
+Goldstone 2014; many empirical follow-ups) and is the standard practitioner gate
+for paid quantum hardware. Our observation matches: QAOA gives an approximate
+optimum at n=12 and a worse net Sharpe (~0.17 below) than the exact classical
+solver on the same backtest, despite running ~700× slower.
+
+**Tests.** `portfolio/test_compete.py` (5): MV-select returns the global optimum
+(verified vs an independent re-enumeration), the SingleHorizonFrameAllocator picks
+the right horizon, `run_bakeoff` ranks correctly, and `production_allocator`
+blocks QAOA when it loses AND promotes it when it wins WITH the flag on. Full
+portfolio suite `pytest portfolio/` 25 green; `lint-imports` 4/4.
+
+---
+
+## 2026-06-05 — Layer 3: macro-factor risk model (factor R² real but small N → ties LW)
+
+**What was built.** `portfolio/factor_risk.py` — a structural risk model
+`Σ = Bᵀ Σ_f B + D`, cashing in the verified `signals/macro.py` betas in the
+correct layer (risk, not alpha). Reads point-in-time FRED factor changes
+(T10YIE / DGS10 / DTWEXBGS / VIXCLS) from the fundamental store, regresses each
+instrument's daily return on factor changes over a trailing window, exposes
+`betas`, `factor_cov`, `idiosyncratic`, `r2`. Drop-in `RiskModel` (subclass), so
+allocators and the backtest need no API change. Wired into
+`estimate_risk_model(..., method="factor")` with a clean fallback to Ledoit-Wolf
+when factor data are absent (pre-2010 dates), so the backtest stays continuous.
+Includes an optional shrinkage `α` toward LW (default 0.5) — the standard
+Ledoit-Wolf 2003 / Fan-Liao-Mincheva (POET 2008) remedy when factor R² is
+moderate; α=0 is pure factor, α=1 is pure LW.
+
+**Verification — economic (MODEL VERIFICATION RULE).** Real-data betas on
+long_core asof 2026-06-03, 252-day window: Gold short USD (−0.022) / short rates
+(−0.026) / long inflation (+0.045); Silver more dollar-sensitive than gold
+(−0.053); Copper short USD short VIX (cyclical); Crude long inflation (+0.72);
+Nat Gas R² = 0.01 (correctly identified as weather-driven / macro-neutral).
+Mean R² = 0.10, max 0.39 — the macro block captures shared co-movement but
+honestly identifies most variance as idiosyncratic.
+
+**Verification — structural & isolation (tests).** PSD + symmetric + positive
+diagonal in tests. Isolation test on synthetic factor-truth data (T=500, K=3,
+N=15): the factor model recovers Σ in STRICTLY FEWER Frobenius distance units
+than both LW and sample — formal evidence the structural form adds information
+when the truth is factor-structured. Endpoints (α=0 vs α=1) distinguishable and
+PSD; mixed lies between. Falls back cleanly to LW when factors are absent.
+
+**Bake-off vs LW on the real backtest (value / long_core; same target-vol /
+allocator; 21d and 10d rebalance).** Essentially TIED:
+
+| risk method | rebal | net Sharpe | ann. ret | ann. vol | max DD |
+|---|---|---|---|---|---|
+| lw_cc  | 21d | +0.79 | +9.5%  | 12.1% | −29.2% |
+| factor | 21d | +0.78 | +9.9%  | 12.7% | −30.2% |
+| lw_cc  | 10d | +0.79 | +9.5%  | 12.1% | −26.4% |
+| factor | 10d | +0.79 | +10.0% | 12.7% | −28.1% |
+
+Same on `ensemble_v2` (0.74 vs 0.75). Differences are well within noise.
+
+**Verdict — factor risk does NOT beat LW on this universe; stays available, not
+default.** This is the mathematically expected result on a small-N universe and
+matches the literature: the factor-risk advantage scales with N (Fan-Liao-Mincheva
+2008's POET is a high-dimensional result; at N=25 LW shrinkage already does most
+of the work). Our measured factor R²≈10% reinforces it — 4 macro factors do not
+explain most of commodity covariance, which is dominated by supply/demand/weather/
+inventory. Per "ships only where it wins": `method='lw_cc'` remains the default;
+`method='factor'` is available for institutional users wanting interpretable
+factor-attributed risk and is the obvious win the day the universe expands to
+many more instruments (where N/T pressure makes shrinkage alone insufficient).
+
+**What the cash-in achieved (it's not nothing).** (a) The verified betas are now
+in the correct layer, ready for factor-mimicking sizing or factor-hedging
+allocators. (b) `FactorRiskModel.betas` / `factor_cov` / `idiosyncratic` / `r2`
+give institutional users a defensible, auditable risk decomposition — the
+"interpretable risk" story Bloomberg-grade buyers ask for. (c) `risk_method`
+threads through `BacktestConfig` and the CLI, so any future allocator that
+benefits from factor risk picks it up via `--risk-method factor` without code
+change.
+
+**Tests.** `portfolio/test_factor_risk.py` (5): structural properties, isolation
+property (factor beats LW under factor truth in Frobenius distance), α-shrinkage
+interpolation endpoints, PIT factor-absent → None, and `method='factor'`
+fallback to LW. Full portfolio suite `pytest portfolio/` 30 green; `lint-imports`
+4/4.
+
+---
+
+## Layer 3 (3.4): cascade recast as a gated allocator + Live Portfolio production page
+
+**Gaps closed.** Following the honest Layer-3 audit, two acknowledged gaps:
+(1) cascade as a first-class allocator option, and (2) a production page that
+actually consumes the bake-off winner via `production_allocator()`.
+
+**Cascade allocator (`portfolio/cascade_allocator.py`).** Re-casts the legacy
+`CascadePortfolioOptimizer` μ-substitution as a first-class Layer-3 Allocator.
+Same MV-selection math as the classical baseline; the only difference is that the
+cross-sectional view of expected return comes from the cascade orchestrator's
+per-instrument `final_forecast`, read PIT (`forecast_date <= asof`) from
+`cascade_forecasts`. When cascade has no data at asof, it falls back to the
+signal forecast — graceful degradation so historical backtests do not crash.
+
+Both signal and cascade are converted to PERCENTILE RANKS on the full signal
+universe before substitution (a real bug-fix surfaced by the partial-overlap
+test: substituting raw cascade values when cascade covers few names would crush
+its view under the signal's full-scale forecasts). Non-cascade names keep their
+signal rank — the cross-section is whole and comparable.
+
+**Bake-off (cascade added; same backtest engine).**
+
+| panel · signal · rebalance | classical_mv | cascade | risk_parity | qaoa |
+|---|---|---|---|---|
+| long_core / value / 126d | +0.543 | +0.543 | +0.542 | +0.353 |
+| aligned / value / 5d     | +0.766 | +0.726 | -0.510 | +0.364 |
+
+On long_core, cascade ties classical_mv EXACTLY — because cascade's data starts
+2026-05-15 and the last 126-day rebalance is well before that, so cascade fell
+back to the signal forecast at every rebalance. On aligned/5d, cascade engages
+its data on several rebalances and slightly underperforms classical_mv
+(+0.726 vs +0.766). HONEST FINDING: cascade has too short a historical tail to
+fairly compete in any multi-year bake-off; its right home is the LIVE production
+page where it has same-day data.
+
+**Verdict — cascade stays available, not promoted to default.** Per "ships only
+where it wins": `production_allocator` continues to pick the classical winner
+unless cascade (or QAOA) measurably beats it on the latest bake-off. Cascade is
+flag-free (no gating env var) because it's a μ-substitution variant; QAOA stays
+gated behind `QAOA_ALLOCATOR_ENABLED` because it has a genuine deploy story
+(quantum hardware) the others don't.
+
+**Tests (`portfolio/test_cascade_allocator.py`, 5).** Falls back to signal
+(identical book) when cascade empty; cascade-flipped ranks reverse the selection;
+partial-overlap cascade promotes its winner without dragging signal-only worsts
+in; missing-asof safety; long-only selection book. Full portfolio suite
+`pytest portfolio/` 35 green; `lint-imports` 4/4.
+
+---
+
+## Layer 3 closure: Live Portfolio production page
+
+**What was built.** `pages/14_Live_Portfolio.py` — the first production-grade
+Layer-3 surface, gated by `PRODUCTION_PORTFOLIO_ENABLED` (default off). End to
+end: signal/panel/vol/risk-method controls → runs the 4-way allocator bake-off
+on the chosen config → calls `portfolio.compete.production_allocator()` to pick
+the winner under the "ships only where it wins" policy → renders today's target
+weights from the winner, with risk decomposition (gross/net/vol/name counts)
+and a cascade-coverage info pane.
+
+Read-only helper `evaluation/reporting.production_targets(...)` encapsulates the
+full bake-off → winner → today's allocation pipeline behind a defensive
+empty-on-failure API so the page degrades gracefully. Page is thin (no math);
+all computation stays in `portfolio.*`. Computation imports
+`portfolio` from the page — the dependency direction (presentation → portfolio
+→ risk → data) is correct.
+
+End-to-end smoke: value / long_core / 21d / 126d / 10bps → bake-off table shows
+classical_mv (+0.54) tied with cascade, risk_parity within noise, qaoa losing
+(+0.35) → winner = classical_mv → today's targets: OJ + Sugar + Rough Rice + Oats
++ Natural Gas, equal-weight, vol-targeted to 10%, gross 0.36. Live. Functioning.
+
+**Nav.** Sidebar link `Live Portfolio ⚙️` appears only when its flag is on,
+mirroring the Signal Lab pattern. Rollback = flag flip.
+
+**Tests.** No new dedicated tests for the page — by design (presentation is
+intentionally thin and depends entirely on `portfolio.*` and the
+`evaluation.reporting` helper, which are exhaustively tested). The same 65 tests
+that pass in `portfolio/` + `evaluation/` cover every component the page depends
+on.
+
+**Layer 3 status — all 6 substeps now closed.** 3.1 risk model (LW + factor),
+3.2 vol-targeted/capped/sleeved allocator, 3.3 net-of-cost portfolio backtest,
+3.4 Signal Lab backtest surface, QAOA as gated allocator, cascade as gated
+allocator, production page consuming the bake-off winner. Layer 3 is COMPLETE
+against both the user-asked substeps AND the original CLAUDE.md charter
+("volatility, covariance, sizing, cascade").
+
+---
+
+## 2026-06-08 — Causal cascade through the GATE: sub-threshold, NOT promoted (aligned PROMOTE was a single-regime artifact)
+
+**What was tested.** Whether the current (admittedly surface-level) causal cascade
+/ QS-engine ranking carries a realised, cost-surviving cross-sectional edge, by
+wrapping its per-commodity `final_forecast` as a gate-scorable `Signal`
+(`signals/cascade.py::cascade_qs`, point-in-time with a periodic walk-forward refit)
+and running it through `evaluation/harness.py`. Two-step design (user-approved):
+(1) cascade standalone; (2) `ensemble_v3` = `ensemble_v1` (momentum + cot_risk_premium
++ reversal) + cascade, to test whether the cascade adds orthogonal breadth toward the
+0.30 IC-IR bar. RESEARCH ONLY — nothing registered in the default registry, nothing
+wired into any page or production ensemble. Reversible: delete `signals/cascade.py`
+and `experiments/gate_cascade_experiment.py`.
+
+**Result — aligned panel (production, ~5y, 41 instruments, single regime).**
+- cascade_qs standalone: REJECT at all horizons; wrong-signed at H5/H10
+  (IC −0.004 / −0.006), only weakly positive at H21 (IC +0.026, **IC IR 0.103,
+  t = 0.90** — not significant).
+- ensemble_v3: H5 0.148, H10 0.225 (DOWN from ensemble_v1's best 0.252), **H21
+  0.312 → "PROMOTE"** under the old contract.
+
+**Result — long_core panel (deep ~24y, 25 core futures, multi-regime).**
+- cascade_qs standalone: REJECT, but now **right-signed at ALL horizons**
+  (IC +0.016 / +0.029 / +0.012), best at H10 (IC 0.029, t 2.57, net LS Sharpe +0.42).
+  Sub-threshold (IC IR 0.125 << 0.30).
+- ensemble_v1 (momentum-led): **collapses** on the full cycle — IC ≈ 0.000–0.005,
+  IC IR 0.001/0.002/0.019, NEGATIVE net Sharpe at every horizon. Its 5y IR≈0.25 was
+  itself regime-specific (momentum is regime-dependent over the cycle).
+- ensemble_v3 (+ cascade): H10 IC IR 0.055, net Sharpe ≈ breakeven — the cascade
+  *rescued* the dying ensemble from negative to breakeven, confirming it adds small
+  but genuinely right-signed information.
+
+**Verdict — ❌ NOT promotable; the aligned PROMOTE was a single-regime false positive.**
+The H21 aligned "promotion" was driven by a cascade contribution whose own t-stat is
+0.90 (indistinguishable from zero); on the proper 24-year multi-regime panel it
+evaporates (H21 IC IR 0.051, t 0.80, fails fold sign-stability). Do NOT wire the
+cascade into any ensemble or page.
+
+**But two findings are real and redirect strategy POSITIVELY:**
+1. **The cascade is the most regime-ROBUST component in the project.** It is the only
+   signal that stays right-signed across the full 24-year cycle (cost-surviving,
+   concentrated at H10 — economically where its ~10-day base forecast lives), while
+   the price-momentum factors are regime-fragile. This justifies *deepening* the
+   cascade (true term structure, real inventories, a richer linkage map) rather than
+   abandoning it — it is the seed of the macro-causality moat. Weak now (IC IR 0.125,
+   t 2.57 — marginal), but a real, regime-stable pulse.
+2. **Single-regime panels manufacture false positives.** Both the cascade and
+   ensemble_v1 looked far better on the 5y aligned panel than on the full cycle.
+   Promotion decisions must be made on a multi-regime panel.
+
+**Methodology change shipped (this entry).** `evaluation/harness.py` now enforces a
+**multi-regime promotion rule**: `HarnessConfig.require_multiregime=True` (default)
++ `panel_label`; a metrics pass on a panel NOT in `MULTIREGIME_PANELS` (= {long_core})
+yields a new **`candidate`** verdict, not `promote`. So no signal can ever again
+promote off the single-regime aligned sample alone. Regression test
+`evaluation/test_harness.py::test_single_regime_metrics_pass_is_candidate_not_promote`;
+`pytest evaluation/test_harness.py` 4/4 green; `lint-imports` 4/4.
+
+**External check (MODEL VERIFICATION RULE).** Consistent with the literature already
+cited here: commodity cross-sectional momentum is regime-dependent (Asness-Moskowitz-
+Pedersen 2013), so ensemble_v1's full-cycle collapse is expected, not a bug; and a
+macro-linkage signal being weak-but-persistent across regimes is the economically
+sensible profile for a fundamentals-driven (vs price-driven) edge.
+
+**Code (research branch `exp/cascade-gate`).** `signals/cascade.py` (cascade_qs +
+ensemble_v3, not registered by default), `experiments/gate_cascade_experiment.py`
+(two-step runner, heartbeat, `--eval-stride`), `evaluation/harness.py` (eval_stride +
+multi-regime promotion rule), `experiments/value_reconfirm.py` (next step). Not merged
+to main; not promoted.
+
+**Next.** Redirect to the one edge that cleared the bar on the honest multi-regime
+panel — `value` (H21 IC IR 0.348) — via `experiments/value_reconfirm.py`
+(re-confirm value + value-led ensemble_v2 on long_core under the new rule). Remaining
+caveat: `1d_deep` is raw (not roll-adjusted); a clean confirmation needs a
+roll-adjusted/spot deep series (free-data path: FRED spot/index where available; full
+coverage needs a futures vendor).

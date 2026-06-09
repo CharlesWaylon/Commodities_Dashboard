@@ -150,6 +150,52 @@ def get_asof(
     return rows
 
 
+def load_raw(
+    source: Optional[str] = None,
+    series_ids: Optional[Iterable[str]] = None,
+    instrument: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Return ALL observation rows (every vintage), unfiltered by asof.
+
+    This is the bulk-load companion to ``get_asof``: a signal evaluated at many
+    decision dates loads the raw rows ONCE, then replays the point-in-time filter
+    (``release_date <= asof``, latest vintage per (series_id, reference_date)) in
+    memory per date — avoiding one DB round-trip per eval date. Because every
+    vintage is preserved, the in-memory replay is as PIT-correct as ``get_asof``
+    (revisions included).
+
+    Returns [source, series_id, reference_date, release_date, value, unit,
+    instrument], sorted by (series_id, reference_date, release_date). Empty frame
+    if nothing matches.
+    """
+    from sqlalchemy import select
+
+    from database.db import get_engine
+    from database.models import FundamentalObservation as F
+
+    cols = [F.source, F.series_id, F.reference_date, F.release_date, F.value, F.unit, F.instrument]
+    stmt = select(*cols)
+    if source is not None:
+        stmt = stmt.where(F.source == source)
+    if series_ids is not None:
+        stmt = stmt.where(F.series_id.in_(list(series_ids)))
+    if instrument is not None:
+        stmt = stmt.where(F.instrument == instrument)
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = pd.DataFrame(
+            conn.execute(stmt).fetchall(),
+            columns=["source", "series_id", "reference_date", "release_date", "value", "unit", "instrument"],
+        )
+    if rows.empty:
+        return rows
+    rows["reference_date"] = pd.to_datetime(rows["reference_date"])
+    rows["release_date"] = pd.to_datetime(rows["release_date"])
+    return rows.sort_values(["series_id", "reference_date", "release_date"]).reset_index(drop=True)
+
+
 def latest_series(asof: date, series_id: str) -> pd.Series:
     """Convenience: one series as a reference_date-indexed pd.Series, PIT as-of ``asof``."""
     df = get_asof(asof, series_ids=[series_id])

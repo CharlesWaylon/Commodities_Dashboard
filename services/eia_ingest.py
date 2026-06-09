@@ -33,6 +33,16 @@ DEFAULT_SERIES = {
 }
 NAT_GAS_LAG_DAYS = {"NG.NW2_EPG0_SWO_R48_BCF.W": 6}
 
+# EIA series -> canonical instrument display name (data.universe). Distillate is
+# the deliverable behind the Heating Oil / ULSD contract, so it maps there. This
+# lets the inventory-surprise signal join straight onto price-panel columns.
+SERIES_TO_INSTRUMENT = {
+    "PET.WCESTUS1.W": "WTI Crude Oil",
+    "PET.WGTSTUS1.W": "Gasoline (RBOB)",
+    "PET.WDISTUS1.W": "Heating Oil",
+    "NG.NW2_EPG0_SWO_R48_BCF.W": "Natural Gas",
+}
+
 
 def run(series_ids: Optional[Iterable[str]] = None, start: Optional[str] = None) -> int:
     load_env()
@@ -49,6 +59,7 @@ def run(series_ids: Optional[Iterable[str]] = None, start: Optional[str] = None)
     if df.empty:
         logger.warning("eia_ingest: no observations returned for %d series.", len(ids))
         return 0
+    df["instrument"] = df["series_id"].map(SERIES_TO_INSTRUMENT)
     n = store.write_observations(df)
     logger.info("eia_ingest: wrote %d rows across %d series.", n, df["series_id"].nunique())
     return n
