@@ -184,10 +184,38 @@ class ValidatorOutput:
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
+def _scale_factor_for_value(value: float, lo: float, hi: float) -> Optional[float]:
+    """
+    Power-of-ten divisor that maps a SINGLE out-of-band value into [lo, hi].
+
+    Returns the divisor (e.g. 100.0 to fix a cents-quoted ~1250 → 12.5, or 0.01
+    to fix a per-pound ~0.124 → 12.4) or None when the value is already in band,
+    non-positive, or no listed factor lands it inside the band.
+
+    This is the per-row primitive behind scale correction. It is deliberately
+    used row-by-row rather than on a batch median: a single yfinance fetch can
+    mix units (some rows cents/cwt, some USD/cwt), and a median-derived factor
+    applied uniformly would corrupt the rows that were already correct.
+    """
+    if value is None or not np.isfinite(value) or value <= 0:
+        return None
+    if lo <= value <= hi:
+        return None
+    for factor in SCALE_FACTORS:
+        if lo <= value / factor <= hi:
+            return factor
+    return None
+
+
 def _detect_scale_factor(ticker: str, close: pd.Series) -> Optional[float]:
     """
     Test whether dividing the series by a standard factor brings its median
     inside the sanity band for ticker. Returns the divisor (e.g. 100.0) or None.
+
+    NOTE: this is a median-based, series-wide heuristic. It is retained for the
+    display-layer helper in services/price_data.py, but the ingestion validator
+    no longer uses it for correction — see _scale_factor_for_value / Layer 1,
+    which decides per row so a mixed-unit batch cannot be miscorrected.
     """
     band = SANITY_BANDS.get(ticker)
     if band is None:
@@ -283,84 +311,81 @@ def validate_price_series(
     def _dt_to_date(dt) -> date_type:
         return dt.date() if hasattr(dt, "date") else dt
 
-    # ── Layer 1a: Absolute sanity band ─────────────────────────────────────────
+    # ── Layer 1: Per-row sanity band + scale normalisation ─────────────────────
+    # Every close outside the band is handled INDEPENDENTLY:
+    #   1. If a power-of-ten factor lands THIS row inside the band, it is a unit
+    #      error (cents/cwt vs USD/cwt, per-lb vs per-cwt, …) → snap its OHLC by
+    #      that factor.
+    #   2. Otherwise it is a genuine bad tick → interpolate from neighbours, or
+    #      exclude if interpolation can't produce an in-band value.
+    # Rows already in band are never touched.
+    #
+    # WHY PER ROW (regression guard, 2026-06-09): yfinance can return a single
+    # fetch that MIXES units — some ZR=F rows at ~1250 (cents/cwt) and some at
+    # ~12.4 (USD/cwt). The old code chose ONE factor from the batch median and
+    # divided every row by it, so the rows that were already correct (12.4) got
+    # crushed to 0.124 — below the floor — and were silently accepted because the
+    # post-rescale sanity layers were skipped. Deciding per row makes that
+    # impossible. POST-CONDITION: for any ticker with a band, no surviving row
+    # leaves this layer outside [lo, hi].
     band = SANITY_BANDS.get(ticker)
     if band is not None:
         lo, hi = band
-        outside_mask = (close < lo) | (close > hi)
-        outside_pct  = float(outside_mask.sum()) / len(close)
+        rescale_factors: list[float] = []
+        already_flagged: set[date_type] = set()
 
-        if outside_pct > SCALE_OUTLIER_PCT:
-            # ── Layer 1b: Scale factor detection ───────────────────────────────
-            factor = _detect_scale_factor(ticker, close)
+        # Snapshot out-of-band dates up front; close/df mutate as we correct.
+        outside_dates = [
+            dt for dt in list(close.index)
+            if not (lo <= float(close.loc[dt]) <= hi)
+        ]
+
+        for dt in outside_dates:
+            dt_date = _dt_to_date(dt)
+            if dt_date in already_flagged:
+                continue
+            raw_val = float(close.loc[dt])
+            pos_idx = close.index.get_loc(dt)
+            factor  = _scale_factor_for_value(raw_val, lo, hi)
+
             if factor is not None:
-                scale_factor_applied = factor
-                corrected_close = close / factor
-                for dt in close.index:
-                    raw_val  = float(close.loc[dt])
-                    corr_val = float(corrected_close.loc[dt])
-                    anomalies.append(AnomalyRecord(
-                        ticker=ticker, name=name,
-                        date=_dt_to_date(dt),
-                        raw_close=raw_val,
-                        corrected_close=corr_val,
-                        reason_code=RC_SCALING,
-                        action=ACT_RESCALED,
-                        details=(
-                            f"Series-wide scale correction ÷{factor:.0f}. "
-                            f"Raw median={close.median():.2f}; "
-                            f"sanity band=[{lo},{hi}]."
-                        ),
-                    ))
-                close = corrected_close
-                df["Close"] = close
+                # Unit/scale error — snap this row's OHLC by its own factor.
+                corr_val = raw_val / factor
+                close.iloc[pos_idx] = corr_val
+                df.iloc[pos_idx, df.columns.get_loc("Close")] = corr_val
                 for col in ("Open", "High", "Low"):
                     if col in df.columns:
-                        df[col] = df[col].astype(float) / factor
-                log.warning(
-                    "  [validator] %s: applied ÷%.0f scale correction to %d rows.",
-                    ticker, factor, len(close),
-                )
+                        cur = df.iloc[pos_idx, df.columns.get_loc(col)]
+                        if not pd.isna(cur):
+                            df.iloc[pos_idx, df.columns.get_loc(col)] = float(cur) / factor
+                rescale_factors.append(factor)
+                anomalies.append(AnomalyRecord(
+                    ticker=ticker, name=name,
+                    date=dt_date,
+                    raw_close=raw_val,
+                    corrected_close=corr_val,
+                    reason_code=RC_SCALING,
+                    action=ACT_RESCALED,
+                    details=(
+                        f"Per-row scale correction ÷{factor:g}: "
+                        f"{raw_val:.4f} → {corr_val:.4f} ∈ [{lo},{hi}]."
+                    ),
+                ))
             else:
-                # Scale unknown — quarantine out-of-band rows; circuit breaker
-                # will fire below because excluded_count will be high.
-                for dt in close[outside_mask].index:
-                    raw_val = float(close.loc[dt])
-                    anomalies.append(AnomalyRecord(
-                        ticker=ticker, name=name,
-                        date=_dt_to_date(dt),
-                        raw_close=raw_val,
-                        corrected_close=None,
-                        reason_code=RC_SANITY,
-                        action=ACT_QUARANTINED,
-                        details=(
-                            f"Price {raw_val:.2f} outside sanity band [{lo},{hi}]. "
-                            f"{outside_pct*100:.0f}% of batch violates band; "
-                            f"no correctable scale factor found."
-                        ),
-                    ))
-                    excluded_count += 1  # count as un-fixable for circuit breaker
-        else:
-            # Minority of rows outside band → individual correction
-            already_flagged: set[date_type] = set()
-            for dt in close[outside_mask].index:
-                dt_date = _dt_to_date(dt)
-                if dt_date in already_flagged:
-                    continue
-                raw_val = float(close.loc[dt])
-                pos_idx = close.index.get_loc(dt)
-                interp  = _interpolate_point(close, pos_idx)
-
-                if interp is not None:
+                # No power-of-ten factor fits → genuine bad tick, not a unit
+                # error. Interpolate from neighbours; exclude if the result is
+                # still out of band (or unavailable) so the post-condition holds.
+                interp = _interpolate_point(close, pos_idx)
+                if interp is not None and lo <= interp <= hi:
                     action = ACT_INTERPOLATED
                     close.iloc[pos_idx] = interp
                     df.iloc[pos_idx, df.columns.get_loc("Close")] = interp
                 else:
                     action = ACT_EXCLUDED
+                    interp = None
                     excluded_count += 1
                     close = close.drop(dt)
                     df = df.drop(dt)
-
                 anomalies.append(AnomalyRecord(
                     ticker=ticker, name=name,
                     date=dt_date,
@@ -368,9 +393,26 @@ def validate_price_series(
                     corrected_close=interp,
                     reason_code=RC_SANITY,
                     action=action,
-                    details=f"Price {raw_val:.4f} outside sanity band [{lo},{hi}].",
+                    details=(
+                        f"Price {raw_val:.4f} outside sanity band [{lo},{hi}]; "
+                        f"no power-of-ten scale factor fits."
+                    ),
                 ))
-                already_flagged.add(dt_date)
+            already_flagged.add(dt_date)
+
+        if rescale_factors:
+            log.warning(
+                "  [validator] %s: per-row scale correction on %d row(s) "
+                "(factors: %s).",
+                ticker, len(rescale_factors),
+                sorted({f"÷{f:g}" for f in rescale_factors}),
+            )
+            # Preserve the single-factor output contract for callers: only set
+            # scale_factor_applied when every rescaled row used the SAME factor.
+            # When set, Layers 2/3 are skipped (returns are now self-consistent);
+            # when factors were mixed it stays None so those layers re-scrutinise.
+            if len(set(rescale_factors)) == 1:
+                scale_factor_applied = rescale_factors[0]
 
     # ── Layer 2: Single-period return spikes ────────────────────────────────────
     # For series that had a wholesale scale correction, returns are now valid;
@@ -492,18 +534,31 @@ def validate_price_series(
 
 # ── Retroactive DB fix ─────────────────────────────────────────────────────────
 
-def retroactive_fix_scaling(ticker: str) -> int:
+def retroactive_fix_scaling(ticker: str, interval: Optional[str] = None) -> int:
     """
     One-time corrective pass for a ticker whose existing price_history rows
-    are stored at the wrong scale (e.g., ZR=F close ~1,100 instead of ~11).
+    are stored at the wrong scale (e.g., ZR=F close ~1,250 instead of ~12.5,
+    or ~0.124 instead of ~12.4).
 
-    IMPORTANT: This targets only rows where close is outside the sanity band.
-    Rows already at the correct scale are untouched. adjusted_close is also
-    left alone — roll_adjust.py computes it from ratios (which are scale-invariant),
-    so it is usually already correct even when raw close is wrong.
+    Scale is decided PER ROW (via _scale_factor_for_value), not from a batch
+    median. This matters when a single commodity_id holds rows at different
+    scales — e.g. ZR=F whose 1d_deep history is in cents/cwt (~1250) while a
+    handful of recent 1d rows were over-corrected to per-pound (~0.124). A
+    median-based factor would push the two groups in the SAME direction and
+    corrupt one of them; per-row correction snaps each toward its own band.
 
-    After running this, re-run roll_adjust to resync adjusted_close with the
-    corrected close values:
+    Parameters
+    ----------
+    interval : str | None
+        Restrict the fix to a single storage interval ("1d", "1d_deep",
+        "1d_m2", …). None touches every interval for the commodity. Use this to
+        repair the front-month series without disturbing the deep-history or
+        constant-maturity series, which may legitimately live at another scale.
+
+    Rows already at the correct scale are untouched. A row outside the band for
+    which no power-of-ten factor fits is left as-is and logged (genuine bad tick,
+    not a unit error). adjusted_close is left alone — roll_adjust.py recomputes
+    it from scale-invariant ratios; re-run it afterwards:
         python -m pipeline.roll_adjust
 
     Returns the number of rows updated.
@@ -511,7 +566,7 @@ def retroactive_fix_scaling(ticker: str) -> int:
     Run from the terminal:
         python -c "
         from pipeline.price_validator import retroactive_fix_scaling
-        n = retroactive_fix_scaling('ZR=F')
+        n = retroactive_fix_scaling('ZR=F', interval='1d')
         print(f'Updated {n} rows.')
         "
     """
@@ -531,37 +586,32 @@ def retroactive_fix_scaling(ticker: str) -> int:
             log.warning("retroactive_fix_scaling: ticker %s not in DB", ticker)
             return 0
 
-        rows = db.query(PriceHistory).filter_by(commodity_id=commodity.id).all()
+        q = db.query(PriceHistory).filter_by(commodity_id=commodity.id)
+        if interval is not None:
+            q = q.filter_by(interval=interval)
+        rows = q.all()
         if not rows:
             return 0
 
-        # Only examine rows whose close is currently outside the sanity band
+        scope = f"{ticker} (interval={interval})" if interval else ticker
+
+        # Only examine rows whose close is currently outside the sanity band.
         bad_rows = [r for r in rows if r.close is not None and not (lo <= r.close <= hi)]
         if not bad_rows:
             log.info(
                 "retroactive_fix_scaling: %s — all %d rows already within [%.1f, %.1f].",
-                ticker, len(rows), lo, hi,
+                scope, len(rows), lo, hi,
             )
             return 0
-
-        bad_closes = pd.Series([r.close for r in bad_rows])
-        factor = _detect_scale_factor(ticker, bad_closes)
-        if factor is None:
-            log.warning(
-                "retroactive_fix_scaling: %s — %d out-of-band rows found but no "
-                "correctable scale factor detected. Manual review required.",
-                ticker, len(bad_rows),
-            )
-            return 0
-
-        log.info(
-            "retroactive_fix_scaling: %s — applying ÷%.0f to %d out-of-band rows "
-            "(%d rows already correct; adjusted_close left as-is).",
-            ticker, factor, len(bad_rows), len(rows) - len(bad_rows),
-        )
 
         updated = 0
+        uncorrectable = 0
+        factors_used: dict[float, int] = {}
         for row in bad_rows:
+            factor = _scale_factor_for_value(float(row.close), lo, hi)
+            if factor is None:
+                uncorrectable += 1
+                continue  # genuine bad tick — leave it for manual review
             if row.close is not None:
                 row.close = row.close / factor
             if row.open is not None:
@@ -571,9 +621,18 @@ def retroactive_fix_scaling(ticker: str) -> int:
             if row.low is not None:
                 row.low = row.low / factor
             # Do NOT touch adjusted_close — roll_adjust.py computes it from
-            # proportional ratios which are scale-invariant; it is likely already
-            # correct. Re-run roll_adjust after this function to resync.
+            # proportional ratios which are scale-invariant; re-run it after.
+            factors_used[factor] = factors_used.get(factor, 0) + 1
             updated += 1
 
-    log.info("retroactive_fix_scaling: committed %d updates for %s.", updated, ticker)
+        log.info(
+            "retroactive_fix_scaling: %s — corrected %d/%d out-of-band rows "
+            "per row (factors: %s; %d uncorrectable; %d rows already in band; "
+            "adjusted_close left as-is).",
+            scope, updated, len(bad_rows),
+            {f"÷{f:g}": n for f, n in sorted(factors_used.items())},
+            uncorrectable, len(rows) - len(bad_rows),
+        )
+
+    log.info("retroactive_fix_scaling: committed %d updates for %s.", updated, scope)
     return updated
