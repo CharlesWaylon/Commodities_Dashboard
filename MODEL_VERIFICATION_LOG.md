@@ -1764,3 +1764,36 @@ outside), with the per-row corrector + return-spike layer as backstops.
 **Tests.** `pipeline/test_price_validator.py` +2 cases (real 2026 metal levels pass
 the band unchanged; `ALI=F` $/tonne band accepts real prices and lifts a stray
 per-lb-scale value). 11/11 green.
+
+---
+
+## 2026-06-09 — Cross-asset proxy-integrity check (belt-and-suspenders backstop)
+
+**Trigger.** The metals-band fix (entry above) exposed a blind spot: a value can be
+rescaled to the WRONG number yet still land INSIDE its sanity band, so the per-ticker
+validator cannot see it. SIVR was the case — real ~$73 rescaled ÷10 to ~$7.3, a
+perfectly "sane" SIVR price. Only the relationship to its underlying revealed it.
+
+**What was added (additive, non-destructive).** `pipeline/proxy_integrity.py` — for
+each physically-backed ETF it compares the proxy close to its futures underlying and
+flags any day whose ratio deviates from the robust historical median by >2×. Wired
+into `pipeline/alert_reporter.py` as a new "🔵 DATA INTEGRITY — Proxy Tracking Break"
+section that runs after every ingest (flags only; a `fix_proxy_ratio_breaks()` helper
+provides opt-in remediation). Tracked pairs: `SGOL`→`GC=F`, `SIVR`→`SI=F`.
+
+**External / empirical verification (MODEL VERIFICATION RULE).** The proxy↔underlying
+ratios are mechanically tight and stable on the cleaned data: SGOL/GC=F median 0.00957
+(range 0.00938–0.00981, ±2.5%); SIVR/SI=F median 0.95843 (range 0.898–1.012, ±6%).
+The smallest scale error is 10× (≈ +900% / −90% on the ratio), so a 2× break threshold
+sits ~8× above the worst real tracking noise and well below any unit slip — it cannot
+fire on legitimate divergence. **Verdict: CONFIRMED appropriate.** A full-window live
+scan post-remediation returns 0 breaks (clean data, no false positives); unit tests
+confirm it detects the ÷10 (SIVR-style) and ×10 corruptions and ignores normal noise.
+
+**Scope note.** Only physically-backed ETFs with a tight futures link qualify. Equity/
+sector proxies (URA, KRBN, SLX, LIT, REMX, WOOD, LNG, BTU, HCC, GLNCY) track company
+baskets, not spot metal, so their single-future ratio is noisy and intentionally
+excluded.
+
+**Tests.** `pipeline/test_proxy_integrity.py` (6 cases) + existing validator suite =
+17/17 green.

@@ -243,7 +243,18 @@ def generate_alert_report(run_id: str) -> Path:
 
     mkt_evts = _scan_market_events(already_flagged)
 
-    needs_review = len(quarantined) + len(excluded) + len(cb_rows) + len(mkt_evts)
+    # Cross-asset proxy-integrity check: catches scale errors that landed INSIDE a
+    # sanity band (so the per-ticker validator was blind to them) by comparing each
+    # physically-backed ETF to its futures underlying. Non-destructive (flags only).
+    try:
+        from pipeline.proxy_integrity import scan_proxy_ratio_breaks
+        proxy_breaks = scan_proxy_ratio_breaks()
+    except Exception as e:
+        log.warning("proxy-integrity scan failed (non-fatal): %s", e)
+        proxy_breaks = []
+
+    needs_review = (len(quarantined) + len(excluded) + len(cb_rows)
+                    + len(mkt_evts) + len(proxy_breaks))
     auto_count   = len(auto_fixed)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -283,6 +294,34 @@ def generate_alert_report(run_id: str) -> Path:
             L.append(f"### {a['name']} (`{a['ticker']}`) — {a['date']}\n")
             L.append(f"- **Close:** {a['raw_close']}\n")
             L.append(f"- **Flag:** {a['detail']}\n\n")
+
+    # ── 🔵 Proxy tracking breaks ───────────────────────────────────────────────
+    if proxy_breaks:
+        L.append("## 🔵 DATA INTEGRITY — Proxy Tracking Break\n\n")
+        L.append(
+            "A physically-backed ETF diverged from its futures underlying by far "
+            "more than normal tracking error — almost always a scale error that "
+            "slipped INSIDE the sanity band (so the per-ticker validator missed "
+            "it). This is the SIVR-style corruption.\n\n"
+            "**To repair** (verify first, then commit, then re-run roll_adjust + "
+            "align):\n"
+            "```\n"
+            "python -c \"from pipeline.proxy_integrity import fix_proxy_ratio_breaks; "
+            "print(fix_proxy_ratio_breaks('<TICKER>', dry_run=False))\"\n"
+            "python -m pipeline.roll_adjust && python -m pipeline.align_calendar\n"
+            "```\n\n"
+        )
+        for b in sorted(proxy_breaks, key=lambda x: x["date"], reverse=True):
+            sf = b.get("suggested_factor")
+            sf_txt = f"×{sf:g}" if sf else "n/a"
+            L.append(
+                f"### {b['proxy']} vs {b['underlying']} — {b['date']}\n"
+                f"- **{b['proxy']} close:** {b['proxy_close']:.4f}  ·  "
+                f"**{b['underlying']} close:** {b['underlying_close']:.4f}\n"
+                f"- **Ratio:** {b['observed_ratio']:.5f}  vs expected "
+                f"{b['expected_ratio']:.5f}  (**{b['deviation_x']:.1f}× off**)\n"
+                f"- **Suggested fix:** multiply {b['proxy']} by {sf_txt}\n\n"
+            )
 
     # ── 🟡 Quarantined ────────────────────────────────────────────────────────
     if quarantined:
@@ -354,7 +393,7 @@ def generate_alert_report(run_id: str) -> Path:
     log.info("Alert report written → %s", report_path)
 
     # ── macOS notification ────────────────────────────────────────────────────
-    if cb_rows or mkt_evts or excluded:
+    if cb_rows or mkt_evts or excluded or proxy_breaks:
         parts = []
         if cb_rows:
             parts.append(f"{len(cb_rows)} circuit breaker(s)")
@@ -362,6 +401,8 @@ def generate_alert_report(run_id: str) -> Path:
             parts.append(f"{len(mkt_evts)} market event(s)")
         if excluded:
             parts.append(f"{len(excluded)} excluded row(s)")
+        if proxy_breaks:
+            parts.append(f"{len(proxy_breaks)} proxy break(s)")
         _macos_notify(
             title="⚠️ Commodities Alert",
             subtitle=", ".join(parts),
