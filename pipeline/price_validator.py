@@ -95,12 +95,22 @@ SANITY_BANDS: dict[str, tuple[float, float]] = {
     "RB=F":  (0.5,    6.0),      # RBOB Gasoline (USD/gal)
     "HO=F":  (0.5,    6.0),      # Heating Oil (USD/gal)
     # Metals
-    "GC=F":  (200.0,  5000.0),   # Gold (USD/oz)
-    "SI=F":  (3.0,    100.0),    # Silver (USD/oz)
+    # ⚠️ Ceilings widened 2026-06-09 after the precious-metals rally pushed real
+    # prices through the old (stale) ceilings, causing the validator to wrongly
+    # rescale genuine highs DOWN by 10×. Ranges verified against external sources
+    # (gold record >$5,100/oz, silver ~$113/oz, platinum >$2,900/oz in Jan 2026;
+    # Goldman gold target $5,400). Bands keep generous headroom for the bull
+    # continuation while still catching order-of-magnitude unit errors. See
+    # MODEL_VERIFICATION_LOG.md (2026-06-09 metals-band entry).
+    "GC=F":  (200.0,  10000.0),  # Gold (USD/oz) — real 255–5318; record $5.1k
+    "SI=F":  (3.0,    300.0),    # Silver (USD/oz) — real 4–115
     "HG=F":  (0.5,    10.0),     # Copper (USD/lb)
-    "ALI=F": (0.5,    5.0),      # Aluminum (USD/lb)
-    "PL=F":  (200.0,  2500.0),   # Platinum (USD/oz)
-    "PA=F":  (300.0,  4000.0),   # Palladium (USD/oz)
+    # ALI=F is CME Aluminum, quoted USD per METRIC TON (~$2,400–3,950), NOT $/lb.
+    # The old [0.5,5.0] band assumed $/lb and forced a ÷1000 rescale of every real
+    # price. Verified: CME contract unit = USD/metric ton (25 t/contract).
+    "ALI=F": (1000.0, 8000.0),   # Aluminum (USD/metric ton)
+    "PL=F":  (200.0,  6000.0),   # Platinum (USD/oz) — real 412–2852; record >$2.9k
+    "PA=F":  (100.0,  4000.0),   # Palladium (USD/oz) — real 148 (2001) – 2985
     # Livestock
     "LE=F":  (40.0,   350.0),    # Live Cattle (USc/lb)
     "GF=F":  (80.0,   450.0),    # Feeder Cattle (USc/lb)
@@ -109,8 +119,11 @@ SANITY_BANDS: dict[str, tuple[float, float]] = {
     # ── ETF proxies ────────────────────────────────────────────────────────────
     # Wide bands — ETF/equity prices move freely; we're only catching obvious
     # data errors (near-zero or implausible magnitudes), not normal volatility.
-    "SGOL":  (15.0,   80.0),     # Aberdeen Physical Gold ETF (tracks LBMA gold)
-    "SIVR":  (5.0,    60.0),     # Aberdeen Physical Silver ETF
+    "SGOL":  (15.0,   80.0),     # Aberdeen Physical Gold ETF (tracks LBMA gold; ~gold/100)
+    # Ceiling widened 2026-06-09: SIVR ≈ silver_spot × ~0.95, so the silver rally
+    # to ~$113/oz pushed SIVR to ~$110 — through the old $60 ceiling, which then
+    # rescaled real values DOWN 10× (24 rows, May–Jun 2026; repaired separately).
+    "SIVR":  (5.0,    250.0),    # Aberdeen Physical Silver ETF — real ~15–110
     "URA":   (5.0,    120.0),    # Global X Uranium ETF
     "KRBN":  (3.0,    80.0),     # KraneShares Global Carbon ETF
     "SLX":   (15.0,   200.0),    # VanEck Steel ETF

@@ -1713,3 +1713,54 @@ separately a systematic $/tonne-vs-$/lb mess (1,260 of ~1,285 rows at ~2,488; co
 conversion is ÷2204.6, not a power of 10). **No metal data was altered.** Recommended
 follow-up: widen/re-derive `SANITY_BANDS` ceilings for the precious metals against an
 external reference and treat `ALI=F` unit normalisation as a separate, explicit fix.
+
+---
+
+## 2026-06-09 — Metals sanity-band review: stale ceilings + ALI=F unit fix
+
+**Trigger.** Follow-up to the per-row validator fix (entry above), which surfaced a
+NEGATIVE finding: several metal `SANITY_BANDS` ceilings were too tight, and `ALI=F`
+was banded in the wrong unit. Both caused the validator to rescale REAL prices.
+
+**External verification (MODEL VERIFICATION RULE).**
+- **2026 precious-metals rally is real.** Gold crossed $5,100/oz (Jan 2026; Goldman
+  Dec-2026 target $5,400), silver ~$107–113/oz, platinum record >$2,900/oz, palladium
+  +114%. Sources: CNBC 2026-01-26 & 2026-01-23, Kitco 2025-12-08, BullionVault. The
+  dataset's maxima (gold 5318, silver 115.08, platinum 2852.4) are genuine — the
+  stale ceilings were clipping real data, not catching errors.
+- **`ALI=F` is CME Aluminum, quoted USD per METRIC TON** (25 t/contract, $0.25/t tick),
+  NOT $/lb. Source: CME Group contract specs. Real range ~$2,400–3,950/t. The old
+  `[0.5, 5.0]` band assumed $/lb and forced a ÷1000 rescale of every genuine price.
+
+**Verdict: CONFIRMED — bands were wrong; data was being corrupted. Remediated.**
+
+**Band changes (`pipeline/price_validator.py::SANITY_BANDS`).**
+- `GC=F`  200–5000   → 200–10000  (real 255–5318; headroom to $5.4k+ forecast)
+- `SI=F`  3–100      → 3–300      (real 4–115)
+- `PL=F`  200–2500   → 200–6000   (real 412–2852)
+- `PA=F`  300–4000   → 100–4000   (floor lowered: 2001 palladium ~$148 was being
+  mis-rescaled UP by the old $300 floor)
+- `ALI=F` 0.5–5.0    → 1000–8000  (UNIT FIX: $/lb → $/metric ton)
+- `SIVR`  5–60       → 5–250      (SIVR ≈ silver × ~0.95; the $113 silver pushed it
+  to ~$110, through the old $60 ceiling)
+
+Bands retain order-of-magnitude error-catching (a ×10/÷1000 unit slip still lands
+outside), with the per-row corrector + return-spike layer as backstops.
+
+**Data remediation (DB, all interval='1d').**
+- `ALI=F`: 25 rows (2026-05-06 → 06-09) had been rescaled ÷1000 by the buggy
+  validator; `retroactive_fix_scaling('ALI=F', interval='1d')` restored them ×1000
+  (~3.5 → ~3500). Series now continuous across the old break (2026-04-28 = 3501.75 →
+  2026-05-06 = 3498).
+- `SIVR`: 24–25 rows (2026-05-06 → 06-09) had been rescaled ÷10 (real ~$73 → ~$7.3,
+  because they exceeded the old $60 ceiling). These sat INSIDE the band so the
+  band-based fixer can't see them; repaired with a targeted ×10 using the silver
+  cross-reference (SIVR/silver ratio restored from ~0.10 to ~0.95).
+- `roll_adjust` + `align_calendar` re-run; the spurious `ALI=F` "−99.9% / 35.7σ" roll
+  artifact is gone (now 3 sensible rolls, worst +10.4%).
+- `GC=F` / `SI=F` / `PL=F` needed NO data repair — their highs were stored correctly
+  and were only being *flagged*; the band widening stops future mis-rescaling.
+
+**Tests.** `pipeline/test_price_validator.py` +2 cases (real 2026 metal levels pass
+the band unchanged; `ALI=F` $/tonne band accepts real prices and lifts a stray
+per-lb-scale value). 11/11 green.
