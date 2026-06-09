@@ -1660,3 +1660,56 @@ panel — `value` (H21 IC IR 0.348) — via `experiments/value_reconfirm.py`
 caveat: `1d_deep` is raw (not roll-adjusted); a clean confirmation needs a
 roll-adjusted/spot deep series (free-data path: FRED spot/index where available; full
 coverage needs a futures vendor).
+
+---
+
+## 2026-06-09 — Price validator: per-row scale normalisation (mixed-unit corruption fix)
+
+**Trigger.** `reports/latest_alert.md` flagged Rough Rice (`ZR=F`) on 2026-06-09 with
+a +9,887.9% one-day return. Investigation traced this to a data-quality defect, not a
+market event.
+
+**What changed in code.** `pipeline/price_validator.py`:
+- The ingestion validator chose ONE scale factor from the *batch median* and divided
+  every row by it. When a single yfinance fetch MIXED units — some `ZR=F` rows at
+  ~1250 (cents/cwt), some already at ~12.4 (USD/cwt) — the median-derived ÷100 was
+  applied uniformly, crushing the already-correct rows to ~0.124 (below the sanity
+  floor). The post-rescale return/z-score layers were skipped, so the corrupted values
+  were silently accepted. The idempotent `(commodity_id, date, interval)` upsert then
+  locked the first-written (bad) value in permanently.
+- New `_scale_factor_for_value()` decides a power-of-ten factor PER ROW. Layer 1 now
+  corrects each out-of-band row independently and interpolates/excludes rows no factor
+  fits, with the post-condition that **no surviving row leaves the layer outside its
+  band** — an over-correction below the floor is now impossible.
+- `retroactive_fix_scaling()` made per-row + `interval`-aware (the old median version
+  would have corrupted the 19 `1d` rows by lumping them with the 5,966 `1d_deep`
+  cents-scale rows).
+- Regression tests: `pipeline/test_price_validator.py` (9/9 green), incl. the
+  mixed-unit case that previously corrupted correct rows.
+
+**Data remediation.** `retroactive_fix_scaling('ZR=F', interval='1d')` corrected 19
+rows (2026-05-11 → 06-08, all ÷0.01 i.e. ×100); `roll_adjust` + `align_calendar`
+re-run. Post-fix the `ZR=F` `1d` series is continuous ~$12.4/cwt, zero out-of-band
+rows, and the market-event scan is **All clear**.
+
+**External verification (MODEL VERIFICATION RULE).** CBOT Rough Rice (`ZR=F`) is
+quoted in USD per hundredweight (cwt); realistic range ≈ $10–$20/cwt, and
+$12.4/cwt = $0.124/lb — exactly the corrupted per-pound figure. The corrected values
+(~12.4) match the surrounding in-band series (median 15.2), so the fix REMOVES a
+discontinuity rather than creating one. **Verdict: CONFIRMED unit error, correctly
+remediated.**
+
+**NEGATIVE / NEW FINDING — stale sanity-band ceilings on metals (NOT fixed; needs
+review).** A portfolio-wide scan for out-of-band `1d` rows found that `GC=F`, `SI=F`,
+`PL=F`, and `SIVR` have recent (Jan–Mar 2026) rows ~2.5–4.5× their in-band medians —
+**not** a clean power of 10. The continuity test shows that dividing them by 10 would
+push them far BELOW their historical norms, i.e. rescaling would CREATE a break. These
+read as **real bull-market metal prices exceeding sanity-band ceilings that are now too
+tight** (e.g. gold in-band median ≈ $1,994 but Jan-2026 ≈ $5,100; ref close 2026-06-09
+≈ $4,284). Implication: the validator's power-of-ten rescaler — under BOTH the old and
+new logic — will mis-rescale a genuine out-of-ceiling price down 10×. The 2026-06-09
+alert's "Aluminum 4 rows / SIVR 5 rows auto-corrected" may be exactly this. `ALI=F` is
+separately a systematic $/tonne-vs-$/lb mess (1,260 of ~1,285 rows at ~2,488; correct
+conversion is ÷2204.6, not a power of 10). **No metal data was altered.** Recommended
+follow-up: widen/re-derive `SANITY_BANDS` ceilings for the precious metals against an
+external reference and treat `ALI=F` unit normalisation as a separate, explicit fix.
