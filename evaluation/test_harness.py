@@ -55,12 +55,42 @@ def test_planted_edge_is_detected():
     log_ret = np.log(panel).diff()
     fwd5 = log_ret.rolling(5).sum().shift(-5)  # the true future the oracle "knows" (noisily)
 
+    # panel_label="long_core" marks this as a multi-regime panel so a genuine edge
+    # is allowed to PROMOTE (the multi-regime promotion gate, 2026-06-08).
     card = run_signal(NoisyOracle(fwd5), panel, horizons=(5,),
-                      config=HarnessConfig(min_history=260))
+                      config=HarnessConfig(min_history=260, panel_label="long_core"))
     h = card.horizons[0]
     assert h.ic_mean > 0.3, f"noisy oracle should still have a strong positive IC, got {h.ic_mean}"
     assert np.isfinite(h.ic_ir) and h.ic_ir > 0
     assert h.verdict == "promote", f"reasons: {h.reasons}"
+
+
+def test_single_regime_metrics_pass_is_candidate_not_promote():
+    """The SAME genuine edge on a SINGLE-regime panel is a CANDIDATE, not a promotion."""
+
+    class NoisyOracle(Signal):
+        name = "noisy_oracle_sr"
+        economic_rationale = "test fixture: a noisy peek at the future"
+        def __init__(self, fwd):
+            self._fwd = fwd
+        def compute(self, asof, panel):
+            asof = pd.Timestamp(asof)
+            sub = self._fwd.loc[:asof]
+            out = self._empty_frame(panel.columns)
+            if sub.empty:
+                return out
+            row = sub.iloc[-1]
+            noisy = row + np.random.default_rng(0).normal(0, 0.02, len(row))
+            out.loc[panel.columns, (5, FORECAST_FIELD)] = pd.Series(noisy, index=panel.columns)
+            out.loc[panel.columns, (5, CONFIDENCE_FIELD)] = 0.5
+            return out
+
+    panel = make_synthetic_panel(n_days=700, seed=5)
+    fwd5 = np.log(panel).diff().rolling(5).sum().shift(-5)
+    # panel_label="aligned" is single-regime → a metrics pass must be CANDIDATE.
+    card = run_signal(NoisyOracle(fwd5), panel, horizons=(5,),
+                      config=HarnessConfig(min_history=260, panel_label="aligned"))
+    assert card.horizons[0].verdict == "candidate", card.horizons[0].reasons
 
 
 def test_cost_model_reduces_pnl():

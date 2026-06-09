@@ -1582,3 +1582,81 @@ on.
 allocator, production page consuming the bake-off winner. Layer 3 is COMPLETE
 against both the user-asked substeps AND the original CLAUDE.md charter
 ("volatility, covariance, sizing, cascade").
+
+---
+
+## 2026-06-08 — Causal cascade through the GATE: sub-threshold, NOT promoted (aligned PROMOTE was a single-regime artifact)
+
+**What was tested.** Whether the current (admittedly surface-level) causal cascade
+/ QS-engine ranking carries a realised, cost-surviving cross-sectional edge, by
+wrapping its per-commodity `final_forecast` as a gate-scorable `Signal`
+(`signals/cascade.py::cascade_qs`, point-in-time with a periodic walk-forward refit)
+and running it through `evaluation/harness.py`. Two-step design (user-approved):
+(1) cascade standalone; (2) `ensemble_v3` = `ensemble_v1` (momentum + cot_risk_premium
++ reversal) + cascade, to test whether the cascade adds orthogonal breadth toward the
+0.30 IC-IR bar. RESEARCH ONLY — nothing registered in the default registry, nothing
+wired into any page or production ensemble. Reversible: delete `signals/cascade.py`
+and `experiments/gate_cascade_experiment.py`.
+
+**Result — aligned panel (production, ~5y, 41 instruments, single regime).**
+- cascade_qs standalone: REJECT at all horizons; wrong-signed at H5/H10
+  (IC −0.004 / −0.006), only weakly positive at H21 (IC +0.026, **IC IR 0.103,
+  t = 0.90** — not significant).
+- ensemble_v3: H5 0.148, H10 0.225 (DOWN from ensemble_v1's best 0.252), **H21
+  0.312 → "PROMOTE"** under the old contract.
+
+**Result — long_core panel (deep ~24y, 25 core futures, multi-regime).**
+- cascade_qs standalone: REJECT, but now **right-signed at ALL horizons**
+  (IC +0.016 / +0.029 / +0.012), best at H10 (IC 0.029, t 2.57, net LS Sharpe +0.42).
+  Sub-threshold (IC IR 0.125 << 0.30).
+- ensemble_v1 (momentum-led): **collapses** on the full cycle — IC ≈ 0.000–0.005,
+  IC IR 0.001/0.002/0.019, NEGATIVE net Sharpe at every horizon. Its 5y IR≈0.25 was
+  itself regime-specific (momentum is regime-dependent over the cycle).
+- ensemble_v3 (+ cascade): H10 IC IR 0.055, net Sharpe ≈ breakeven — the cascade
+  *rescued* the dying ensemble from negative to breakeven, confirming it adds small
+  but genuinely right-signed information.
+
+**Verdict — ❌ NOT promotable; the aligned PROMOTE was a single-regime false positive.**
+The H21 aligned "promotion" was driven by a cascade contribution whose own t-stat is
+0.90 (indistinguishable from zero); on the proper 24-year multi-regime panel it
+evaporates (H21 IC IR 0.051, t 0.80, fails fold sign-stability). Do NOT wire the
+cascade into any ensemble or page.
+
+**But two findings are real and redirect strategy POSITIVELY:**
+1. **The cascade is the most regime-ROBUST component in the project.** It is the only
+   signal that stays right-signed across the full 24-year cycle (cost-surviving,
+   concentrated at H10 — economically where its ~10-day base forecast lives), while
+   the price-momentum factors are regime-fragile. This justifies *deepening* the
+   cascade (true term structure, real inventories, a richer linkage map) rather than
+   abandoning it — it is the seed of the macro-causality moat. Weak now (IC IR 0.125,
+   t 2.57 — marginal), but a real, regime-stable pulse.
+2. **Single-regime panels manufacture false positives.** Both the cascade and
+   ensemble_v1 looked far better on the 5y aligned panel than on the full cycle.
+   Promotion decisions must be made on a multi-regime panel.
+
+**Methodology change shipped (this entry).** `evaluation/harness.py` now enforces a
+**multi-regime promotion rule**: `HarnessConfig.require_multiregime=True` (default)
++ `panel_label`; a metrics pass on a panel NOT in `MULTIREGIME_PANELS` (= {long_core})
+yields a new **`candidate`** verdict, not `promote`. So no signal can ever again
+promote off the single-regime aligned sample alone. Regression test
+`evaluation/test_harness.py::test_single_regime_metrics_pass_is_candidate_not_promote`;
+`pytest evaluation/test_harness.py` 4/4 green; `lint-imports` 4/4.
+
+**External check (MODEL VERIFICATION RULE).** Consistent with the literature already
+cited here: commodity cross-sectional momentum is regime-dependent (Asness-Moskowitz-
+Pedersen 2013), so ensemble_v1's full-cycle collapse is expected, not a bug; and a
+macro-linkage signal being weak-but-persistent across regimes is the economically
+sensible profile for a fundamentals-driven (vs price-driven) edge.
+
+**Code (research branch `exp/cascade-gate`).** `signals/cascade.py` (cascade_qs +
+ensemble_v3, not registered by default), `experiments/gate_cascade_experiment.py`
+(two-step runner, heartbeat, `--eval-stride`), `evaluation/harness.py` (eval_stride +
+multi-regime promotion rule), `experiments/value_reconfirm.py` (next step). Not merged
+to main; not promoted.
+
+**Next.** Redirect to the one edge that cleared the bar on the honest multi-regime
+panel — `value` (H21 IC IR 0.348) — via `experiments/value_reconfirm.py`
+(re-confirm value + value-led ensemble_v2 on long_core under the new rule). Remaining
+caveat: `1d_deep` is raw (not roll-adjusted); a clean confirmation needs a
+roll-adjusted/spot deep series (free-data path: FRED spot/index where available; full
+coverage needs a futures vendor).

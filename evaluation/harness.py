@@ -57,6 +57,14 @@ class PassFailConfig:
     min_ls_sharpe_net: float = 0.0    # net-of-cost long-short Sharpe must be positive
 
 
+# Panels that span multiple commodity regimes (a full bull/bear/shock cycle).
+# A signal may only be PROMOTED on one of these — a metrics pass on a single-regime
+# panel (e.g. the ~5y "aligned" production sample) is a CANDIDATE, not a promotion,
+# because single-regime samples manufacture false positives (the cascade H21 PROMOTE
+# on aligned 2026-06-08 that evaporated on long_core is the cautionary case).
+MULTIREGIME_PANELS = frozenset({"long_core"})
+
+
 @dataclass
 class HarnessConfig:
     n_splits: int = 5                 # walk-forward folds for sign-stability
@@ -64,6 +72,12 @@ class HarnessConfig:
     min_cross_section: int = 5        # min instruments with a view to score a date
     cost_bps: float = 10.0            # per-side transaction cost (basis points)
     long_short_quantile: float = 0.0  # 0 => rank-weighted book; >0 => top/bottom q only
+    eval_stride: int = 1              # score every k-th eval date (1 = every date).
+                                      # >1 speeds up expensive signals (e.g. the
+                                      # cascade refit replay) with a minor loss of
+                                      # IC-series density; default 1 = no change.
+    panel_label: str = "unknown"      # name of the panel being scored; gates promotion
+    require_multiregime: bool = True  # promotion requires a MULTIREGIME_PANELS panel
     passfail: PassFailConfig = field(default_factory=PassFailConfig)
 
 
@@ -98,7 +112,11 @@ class SignalScorecard:
     config_json: str
 
     def overall_verdict(self) -> str:
-        return "promote" if any(h.verdict == "promote" for h in self.horizons) else "reject"
+        if any(h.verdict == "promote" for h in self.horizons):
+            return "promote"
+        if any(h.verdict == "candidate" for h in self.horizons):
+            return "candidate"
+        return "reject"
 
 
 # ── Metric helpers ─────────────────────────────────────────────────────────────
@@ -167,6 +185,8 @@ def run_signal(
 
     # Evaluable dates: enough history behind, and >= max_h rows ahead for a target.
     eval_dates = list(index[config.min_history : len(index) - max_h])
+    if config.eval_stride and config.eval_stride > 1:
+        eval_dates = eval_dates[:: config.eval_stride]
 
     # Generate point-in-time forecasts once per date (all horizons at once).
     forecasts: Dict[pd.Timestamp, pd.DataFrame] = {}
@@ -270,7 +290,18 @@ def run_signal(
             reasons.append(f"fold sign-stability {fold_sign_frac:.2f} < {pf.min_fold_sign_frac}")
         if not (np.isfinite(ls_sharpe) and ls_sharpe >= pf.min_ls_sharpe_net):
             reasons.append(f"net LS Sharpe {ls_sharpe:.3f} < {pf.min_ls_sharpe_net}")
-        verdict = "promote" if not reasons else "reject"
+        # Multi-regime gate: metrics passing on a SINGLE-regime panel is a CANDIDATE,
+        # not a promotion — single-regime samples manufacture false positives.
+        if reasons:
+            verdict = "reject"
+        elif config.require_multiregime and config.panel_label not in MULTIREGIME_PANELS:
+            verdict = "candidate"
+            reasons.append(
+                f"metrics pass but promotion requires a multi-regime panel "
+                f"(one of {sorted(MULTIREGIME_PANELS)}); ran on '{config.panel_label}'"
+            )
+        else:
+            verdict = "promote"
 
         horizon_cards.append(
             HorizonScorecard(
@@ -477,6 +508,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         n_splits=args.n_splits,
         cost_bps=args.cost_bps,
         min_cross_section=args.min_cross_section,
+        panel_label=args.panel,
     )
 
     card = run_signal(signal, panel, horizons=horizons, config=config)
