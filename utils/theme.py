@@ -490,6 +490,10 @@ def render_sidebar_nav():
             if not _flag_on("SIGNAL_RESEARCH_ENABLED"):
                 st.divider()
             st.page_link("pages/14_Live_Portfolio.py",   label="Live Portfolio ⚙️")
+        if _flag_on("RESEARCH_LIBRARY_ENABLED"):
+            if not (_flag_on("SIGNAL_RESEARCH_ENABLED") or _flag_on("PRODUCTION_PORTFOLIO_ENABLED")):
+                st.divider()
+            st.page_link("pages/15_Research_Library.py", label="Research Library 📚")
 
 
 def panel_header(title: str, badge: str = "", badge_color: str = SIGNAL):
