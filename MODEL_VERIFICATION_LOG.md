@@ -1797,3 +1797,41 @@ excluded.
 
 **Tests.** `pipeline/test_proxy_integrity.py` (6 cases) + existing validator suite =
 17/17 green.
+
+---
+
+## 2026-06-11 — Headline Insight Weighting skeleton (Word2Vec, background-only)
+
+**What was built.** `models/headline_insight.py` — a flag-gated
+(`NEWS_INSIGHT_ENABLED`, default **false**) scorer that assigns each news
+headline an `insight_weight ∈ [0,1]`: how much genuine decision-relevant
+information it carries (specific commodity market tied to a real-world
+sociopolitical/physical shift) versus generic market-wrap noise. Orthogonal to
+the FinBERT/AV sentiment stack (tone), this measures *informativeness*.
+Decomposition: Word2Vec cosine proximity to an INSIGHT anchor lexicon, minus
+proximity to a GENERIC boilerplate lexicon, plus commodity-specificity (reuses
+`features/sentiment.py::COMMODITY_KEYWORDS`) and batch novelty (redundancy
+penalty). Corpus accumulates to `data/headline_corpus.parquet` via the news
+page hook; Word2Vec trains via `train()` once ≥500 headlines exist, persisting
+to `data/headline_w2v.model`. Lexicon-overlap heuristic fallback covers cold
+start / missing gensim, so the flag is always safe to flip.
+
+**Verification status: ⚠️ NOT YET VERIFIED — placeholders, intentionally
+unshipped.** The anchor lexicons and component weights (0.45 insight / 0.30
+generic / 0.20 specificity / 0.15 novelty) are first-pass priors, not validated
+against outside sources. Per the Model Verification Rule, before any public
+surface uses these scores we must: (1) check the insight-anchor event classes
+against commodity event-study literature (which news event types actually move
+prices — e.g. export bans, OPEC decisions, weather shocks); (2) tune/validate
+weights on a labelled holdout of historical headlines; (3) confirm the trained
+Word2Vec neighbourhoods are semantically sane (e.g. "blockade" ≈ "embargo").
+Reported per the rule: verdict **INCONCLUSIVE (pending)** — this entry exists
+so the placeholder status is on the record, not hidden.
+
+**Environment note.** gensim 4.3.2 was broken against scipy ≥1.13
+(`scipy.linalg.triu` removed); upgraded to gensim 4.4.0, Word2Vec imports and
+trains cleanly.
+
+**Tests.** `models/test_headline_insight.py` — 7/7 green, covering tokenizer,
+score bounds/columns, heuristic ranking (sociopolitical > generic), corpus
+dedup, min-corpus training gate, and the full Word2Vec train→score path.
