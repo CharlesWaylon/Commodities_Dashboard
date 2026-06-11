@@ -1169,6 +1169,35 @@ def run_daily_retrain(
         except Exception as exc:
             log.warning("Causal monitoring skipped (non-fatal): %s", exc)
 
+    # ── 10b. Headline insight corpus + Word2Vec brew (non-fatal, flag-gated) ───
+    # Background-only model (see models/headline_insight.py). Pulls the latest
+    # RSS batch into the persistent corpus and retrains the Word2Vec embedding
+    # once the corpus clears MIN_CORPUS_SIZE. Gated on NEWS_INSIGHT_ENABLED so
+    # the default retrain path is unchanged; needs network (runs on the Mac via
+    # launchd, not in sandboxes).
+    if not cfg.dry_run:
+        try:
+            from models.headline_insight import (
+                NEWS_INSIGHT_ENABLED,
+                HeadlineInsightModel,
+            )
+            if NEWS_INSIGHT_ENABLED:
+                from services.news_data import fetch_news
+                insight_model = HeadlineInsightModel()
+                news_df = fetch_news(max_per_feed=20, filter_keywords=True)
+                corpus_n = insight_model.append_corpus(news_df)
+                trained = insight_model.train()
+                log.info(
+                    "Headline insight brew: +%d articles fetched, corpus=%d, "
+                    "w2v %s.",
+                    len(news_df), corpus_n,
+                    "retrained" if trained else "skipped (corpus below minimum)",
+                )
+            else:
+                log.info("Headline insight brew skipped (NEWS_INSIGHT_ENABLED=false).")
+        except Exception as exc:
+            log.warning("Headline insight brew skipped (non-fatal): %s", exc)
+
     # ── 11. Persist audit log (always, even on failure) ────────────────────────
     if not cfg.dry_run:
         _persist_training_log(summary)
