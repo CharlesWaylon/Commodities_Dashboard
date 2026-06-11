@@ -446,6 +446,100 @@ def render_topbar(df=None):
 """, unsafe_allow_html=True)
 
 
+def _nav_flag_on(name: str) -> bool:
+    """True when an env-var feature flag is set to an affirmative value."""
+    import os
+    return os.getenv(name, "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _nav_section(label: str):
+    """Render a four-layer section header in the sidebar directory."""
+    st.markdown(
+        f"<div style='font-size:0.68rem; letter-spacing:0.12em; font-weight:600; "
+        f"text-transform:uppercase; color:{ICE_MID}; margin:0.6rem 0 0.15rem 0;'>"
+        f"{label}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_sidebar_nav_v2():
+    """
+    Four-layer page taxonomy (spec 4.1) — the sidebar mirrors how the system
+    thinks, so a user navigates the four architectural layers:
+
+      Markets & Data     → data-layer surface  (pricing, charts, data-health)
+      Signals & Research → signal-layer surface (models, causal/cascade engine)
+      Portfolio & Risk   → risk-layer surface   (target book, scenarios, alerts)
+      Macro Context      → cross-cutting narrative (news, events, macro exposure)
+
+    Flagged surfaces are listed inside the layer they belong to, only when their
+    own feature flag is on.
+    """
+    _nav_section("Markets & Data")
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/5_Database.py",              label="Data Health")
+
+    _nav_section("Signals & Research")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    if _nav_flag_on("SIGNAL_RESEARCH_ENABLED"):
+        st.page_link("pages/13_Signal_Lab.py",       label="Signal Lab ⚗️")
+    if _nav_flag_on("RESEARCH_LIBRARY_ENABLED"):
+        st.page_link("pages/15_Research_Library.py", label="Research Library 📚")
+
+    _nav_section("Portfolio & Risk")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
+    st.page_link("pages/9_Scenarios.py",             label="Scenarios")
+    st.page_link("pages/12_Alerts.py",               label="Alerts")
+    if _nav_flag_on("PRODUCTION_PORTFOLIO_ENABLED"):
+        st.page_link("pages/14_Live_Portfolio.py",   label="Live Portfolio ⚙️")
+
+    _nav_section("Macro Context")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/10_Event_Ribbon.py",         label="Event Ribbon")
+    st.page_link("pages/11_Macro_Exposure.py",       label="Macro Exposure")
+
+
+def _render_sidebar_nav_legacy():
+    """Original three-group directory. Default until the v2 taxonomy is proven."""
+    # Group 1 — core data
+    st.page_link("app.py",                           label="Home")
+    st.page_link("pages/1_Pricing.py",               label="Pricing")
+    st.page_link("pages/2_Charts.py",                label="Charts")
+    st.page_link("pages/3_News.py",                  label="News")
+    st.page_link("pages/4_Models.py",                label="Models")
+    st.page_link("pages/5_Database.py",              label="Database")
+    st.divider()
+
+    # Group 2 — analytics
+    st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
+    st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
+    st.page_link("pages/8_Portfolio.py",             label="Portfolio")
+    st.page_link("pages/9_Scenarios.py",             label="Scenarios")
+    st.divider()
+
+    # Group 3 — live signals
+    st.page_link("pages/10_Event_Ribbon.py",         label="Event Ribbon")
+    st.page_link("pages/11_Macro_Exposure.py",       label="Macro Exposure")
+    st.page_link("pages/12_Alerts.py",               label="Alerts")
+
+    # Research-grade surface — only listed when its feature flag is on.
+    if _nav_flag_on("SIGNAL_RESEARCH_ENABLED"):
+        st.divider()
+        st.page_link("pages/13_Signal_Lab.py",       label="Signal Lab ⚗️")
+    if _nav_flag_on("PRODUCTION_PORTFOLIO_ENABLED"):
+        if not _nav_flag_on("SIGNAL_RESEARCH_ENABLED"):
+            st.divider()
+        st.page_link("pages/14_Live_Portfolio.py",   label="Live Portfolio ⚙️")
+    if _nav_flag_on("RESEARCH_LIBRARY_ENABLED"):
+        if not (_nav_flag_on("SIGNAL_RESEARCH_ENABLED") or _nav_flag_on("PRODUCTION_PORTFOLIO_ENABLED")):
+            st.divider()
+        st.page_link("pages/15_Research_Library.py", label="Research Library 📚")
+
+
 def render_sidebar_nav():
     """
     Render the canonical Accendio sidebar directory.
@@ -454,46 +548,18 @@ def render_sidebar_nav():
     page (inside or outside a `with st.sidebar:` block — it manages its own).
     Page-specific filters/controls must live in the main page body, NOT here,
     so the sidebar stays a clean directory across all pages.
+
+    The four-layer taxonomy (spec 4.1) is gated behind NAV_TAXONOMY_V2_ENABLED.
+    The legacy three-group directory stays the default until v2 is proven, so
+    rollback in production is a flag flip — no redeploy.
     """
     with st.sidebar:
         st.image("assets/accendio_logo_dark_630x120.png", use_container_width=True)
         st.divider()
-
-        # Group 1 — core data
-        st.page_link("app.py",                           label="Home")
-        st.page_link("pages/1_Pricing.py",               label="Pricing")
-        st.page_link("pages/2_Charts.py",                label="Charts")
-        st.page_link("pages/3_News.py",                  label="News")
-        st.page_link("pages/4_Models.py",                label="Models")
-        st.page_link("pages/5_Database.py",              label="Database")
-        st.divider()
-
-        # Group 2 — analytics
-        st.page_link("pages/6_Causal_QS_Engine.py",      label="Causal QS Engine")
-        st.page_link("pages/7_Macro_Market_Cascade.py",  label="Macro-Market Cascade")
-        st.page_link("pages/8_Portfolio.py",             label="Portfolio")
-        st.page_link("pages/9_Scenarios.py",             label="Scenarios")
-        st.divider()
-
-        # Group 3 — live signals
-        st.page_link("pages/10_Event_Ribbon.py",         label="Event Ribbon")
-        st.page_link("pages/11_Macro_Exposure.py",       label="Macro Exposure")
-        st.page_link("pages/12_Alerts.py",               label="Alerts")
-
-        # Research-grade surface — only listed when its feature flag is on.
-        import os
-        _flag_on = lambda n: os.getenv(n, "false").strip().lower() in {"1", "true", "yes", "on"}
-        if _flag_on("SIGNAL_RESEARCH_ENABLED"):
-            st.divider()
-            st.page_link("pages/13_Signal_Lab.py",       label="Signal Lab ⚗️")
-        if _flag_on("PRODUCTION_PORTFOLIO_ENABLED"):
-            if not _flag_on("SIGNAL_RESEARCH_ENABLED"):
-                st.divider()
-            st.page_link("pages/14_Live_Portfolio.py",   label="Live Portfolio ⚙️")
-        if _flag_on("RESEARCH_LIBRARY_ENABLED"):
-            if not (_flag_on("SIGNAL_RESEARCH_ENABLED") or _flag_on("PRODUCTION_PORTFOLIO_ENABLED")):
-                st.divider()
-            st.page_link("pages/15_Research_Library.py", label="Research Library 📚")
+        if _nav_flag_on("NAV_TAXONOMY_V2_ENABLED"):
+            _render_sidebar_nav_v2()
+        else:
+            _render_sidebar_nav_legacy()
 
 
 def panel_header(title: str, badge: str = "", badge_color: str = SIGNAL):

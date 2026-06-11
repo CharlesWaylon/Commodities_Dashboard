@@ -12,6 +12,12 @@
       "runtimeExecutable": "bash",
       "runtimeArgs": ["-lc", "RESEARCH_LIBRARY_ENABLED=true streamlit run app.py --server.headless true --server.port 8512"],
       "port": 8512
+    },
+    {
+      "name": "dashboard-nav-v2",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-lc", "NAV_TAXONOMY_V2_ENABLED=true SIGNAL_RESEARCH_ENABLED=true PRODUCTION_PORTFOLIO_ENABLED=true RESEARCH_LIBRARY_ENABLED=true streamlit run app.py --server.headless true --server.port 8513"],
+      "port": 8513
     }
   ]
 }
