@@ -10,6 +10,7 @@ import pandas as pd
 from datetime import datetime, timezone
 from services.news_data import fetch_news, RSS_FEEDS
 from utils.theme import apply_theme, render_topbar, render_sidebar_nav
+from models.headline_insight import HeadlineInsightModel, NEWS_INSIGHT_ENABLED
 
 st.set_page_config(page_title="Accendio | News", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
 apply_theme()
@@ -41,6 +42,26 @@ with st.spinner("Fetching news feeds..."):
 if df.empty:
     st.warning("No articles found. Try disabling the keyword filter.")
     st.stop()
+
+# ── Headline insight weighting (background model, flag-gated) ──────────────────
+# All computation lives in models/headline_insight.py; this hook only feeds the
+# corpus and renders scores. Invisible unless NEWS_INSIGHT_ENABLED=true.
+if NEWS_INSIGHT_ENABLED:
+    _insight_model = HeadlineInsightModel()
+    _corpus_n = _insight_model.append_corpus(df)   # idempotent — brews the training corpus
+    df = _insight_model.score_headlines(df)
+    with st.expander("🧪 Insight weighting (experimental — internal only)"):
+        st.caption(
+            f"Corpus: **{_corpus_n}** headlines · scoring mode: "
+            f"**{df['scoring_mode'].iloc[0]}** · weights are unverified placeholders"
+        )
+        st.dataframe(
+            df.sort_values("insight_weight", ascending=False)[
+                ["insight_weight", "title", "insight_sim", "generic_sim",
+                 "commodity_specificity", "novelty", "source"]
+            ],
+            use_container_width=True, hide_index=True,
+        )
 
 # ── Filter Controls ────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 2])
