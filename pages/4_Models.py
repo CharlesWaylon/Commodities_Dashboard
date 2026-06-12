@@ -291,8 +291,9 @@ def _render_tier_spark(tier: str, label: str, color: str, *, compact: bool = Fal
         showlegend=False,
     )
 
+    chart_key = f"tier_spark_{tier}_{'compact' if compact else 'full'}"
     if compact:
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
         st.markdown(
             f'<div style="text-align:center;font-size:0.72rem;font-weight:600;'
             f'color:{badge_color};margin-top:-8px;">'
@@ -302,7 +303,7 @@ def _render_tier_spark(tier: str, label: str, color: str, *, compact: bool = Fal
     else:
         sp_col, lbl_col = st.columns([8, 1])
         with sp_col:
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
         with lbl_col:
             st.markdown(
                 f'<div style="text-align:right;font-size:0.75rem;font-weight:600;'
