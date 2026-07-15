@@ -742,9 +742,18 @@ with tab1:
 
     col_sel, col_per = st.columns([2, 1])
     with col_sel:
-        stat_commodity = st.selectbox(
-            "Commodity", list(MODELING_COMMODITIES.keys()), index=0, key="stat_comm"
-        )
+        # Deep link (spec §F2): ?commodity= query param or a one-shot session
+        # hint from Home's "→ model" hop pre-selects the instrument. Only a
+        # fresh signal may override the widget state — never a manual pick.
+        from utils.interactions import resolve_commodity_hint
+        _names = list(MODELING_COMMODITIES.keys())
+        _qp = st.query_params.get("commodity")
+        _hint = st.session_state.pop("models_commodity", None)
+        _idx = resolve_commodity_hint(_qp, _hint, _names)
+        if (_hint in _names) or ("stat_comm" not in st.session_state and _qp in _names):
+            st.session_state["stat_comm"] = _names[_idx]
+        stat_commodity = st.selectbox("Commodity", _names, key="stat_comm")
+        st.query_params["commodity"] = stat_commodity   # keeps the URL shareable
     with col_per:
         stat_horizon = st.slider("ARIMA forecast horizon (days)", 1, 30, 5, key="stat_hor")
 
