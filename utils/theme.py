@@ -1,6 +1,9 @@
 """Accendio brand theme — global CSS and shared UI components."""
 
+import copy
 import datetime
+import os
+
 import streamlit as st
 
 # ── Color constants ───────────────────────────────────────────────────────────
@@ -47,6 +50,39 @@ PLOTLY_LAYOUT = dict(
         font=dict(color=ICE, size=11),
     ),
 )
+
+# ── Depth Zones (spec §A) — approved mockup values; minor tuning in visual QA OK
+ZONES = {
+    "data":    dict(label="MARKETS & DATA",     accent="#5A8CFF", bg_top="#060B1A",
+                    bg_bot="#0A1430", panel="#0A1430", border="rgba(90,140,255,0.22)",
+                    glow="rgba(90,140,255,0.5)"),
+    "signals": dict(label="SIGNALS & RESEARCH", accent="#A78BFF", bg_top="#0A0920",
+                    bg_bot="#141238", panel="#12102E", border="rgba(167,139,255,0.25)",
+                    glow="rgba(167,139,255,0.5)"),
+    "risk":    dict(label="PORTFOLIO & RISK",   accent="#F5A65B", bg_top="#140D08",
+                    bg_bot="#2A1A0E", panel="#1E130A", border="rgba(245,166,91,0.25)",
+                    glow="rgba(245,166,91,0.5)"),
+    "macro":   dict(label="MACRO CONTEXT",      accent="#4EC9A8", bg_top="#061410",
+                    bg_bot="#0D2A20", panel="#0B241B", border="rgba(78,201,168,0.25)",
+                    glow="rgba(78,201,168,0.5)"),
+}
+
+
+def _ecosystem_on() -> bool:
+    return os.getenv("ECOSYSTEM_UI_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def zone_plotly_layout(zone: str | None = None) -> dict:
+    """Per-zone PLOTLY_LAYOUT variant. Falls back to the brand default."""
+    layout = copy.deepcopy(PLOTLY_LAYOUT)
+    if zone in ZONES and _ecosystem_on():
+        z = ZONES[zone]
+        layout["paper_bgcolor"] = z["panel"]
+        layout["plot_bgcolor"] = z["bg_top"]
+        layout["legend"]["bordercolor"] = z["border"]
+        layout["hoverlabel"]["bordercolor"] = z["border"]
+    return layout
+
 
 _CSS = """
 <style>
@@ -300,9 +336,34 @@ body:has([data-testid="stSpinner"]) #_ac_busy_bar {
 """
 
 
-def apply_theme():
-    """Inject the Accendio CSS theme. Call once per page after set_page_config."""
-    st.markdown(_CSS, unsafe_allow_html=True)
+def theme_css(zone: str | None = None) -> str:
+    """Full CSS for a page. zone=None (or flag off) → legacy CSS, unchanged."""
+    if zone not in ZONES or not _ecosystem_on():
+        return _CSS
+    z = ZONES[zone]
+    return _CSS + f"""<style>
+/* ── Depth Zone override: {zone} ── (topbar + sidebar deliberately untouched) */
+[data-testid="stAppViewContainer"], .stApp {{
+  background: linear-gradient(180deg, {z['bg_top']} 0%, {z['bg_bot']} 140%) !important;
+}}
+[data-testid="stMetric"], details {{
+  background: {z['panel']} !important;
+  border-color: {z['border']} !important;
+}}
+[data-baseweb="tab"][aria-selected="true"] {{
+  color: {z['accent']} !important;
+  border-bottom-color: {z['accent']} !important;
+}}
+:root {{ --zone-accent: {z['accent']}; --zone-border: {z['border']}; }}
+</style>"""
+
+
+def apply_theme(zone: str | None = None):
+    """Inject the Accendio CSS theme (+ optional Depth Zone override).
+
+    Call once per page after set_page_config. zone=None or flag off → legacy.
+    """
+    st.markdown(theme_css(zone), unsafe_allow_html=True)
 
 
 def _macro_trigger_pill_html() -> str:
