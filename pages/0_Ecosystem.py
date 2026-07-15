@@ -34,4 +34,11 @@ st.markdown("""<style>
 }
 </style>""", unsafe_allow_html=True)
 
-render_ecosystem_map()
+# Fragment (spec §F4): statuses refresh every 2 min without a full-page rerun;
+# cached_fact's ttl=120 means each refresh costs at most one DB round per fact.
+@st.fragment(run_every=120)
+def _live_map():
+    render_ecosystem_map()
+
+
+_live_map()

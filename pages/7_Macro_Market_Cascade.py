@@ -1713,5 +1713,23 @@ border-radius:8px;padding:14px 18px;display:flex;justify-content:space-between;a
 )
 st.page_link("pages/6_Causal_QS_Engine.py", label="→ Open Causal QS Engine")
 
+# ── What-if: transmission priors (spec §F3) ──────────────────────────────────
+import pandas as _whatif_pd
+from models.whatif import prior_table
+from models.config import UPSTREAM_PRIOR_STRENGTH
+
+with st.expander("🧪 What-if: transmission priors (SANDBOX — in-memory only)"):
+    st.caption(
+        "Explore how the economic-prior blend reshapes upstream transmission. "
+        "Nothing here writes to the database or model files; live forecasts are untouched."
+    )
+    _wc1, _wc2 = st.columns(2)
+    _wa = _wc1.slider("Prior strength α", 0.0, 1.0, float(UPSTREAM_PRIOR_STRENGTH), 0.05,
+                      help="0 = pure measured correlation (legacy); 1 = full economic prior.")
+    _wd = _wc2.slider("Upstream damping ×", 0.25, 2.0, 1.0, 0.05)
+    _wtbl = _whatif_pd.DataFrame(prior_table(alpha=_wa, damping=_wd))
+    st.dataframe(_wtbl, use_container_width=True, hide_index=True)
+    st.caption("Illustrative corr=0.40, upstream forecast=+1.0% — constants isolate the α/damping effect.")
+
 from components.flow_footer import render_flow_footer
 render_flow_footer("cascade")
