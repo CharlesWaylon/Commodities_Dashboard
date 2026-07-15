@@ -415,10 +415,29 @@ def _cached_active_trigger_count() -> int:
         return 0
 
 
-def render_topbar(df=None):
+def _zone_dots_html(zone: str | None) -> str:
+    """Topbar zone indicator (spec §C). Empty string when flag off / no zone."""
+    if zone not in ZONES or not _ecosystem_on():
+        return ""
+    dots = ""
+    for key in ("data", "signals", "risk", "macro"):
+        z = ZONES[key]
+        if key == zone:
+            dots += (f'<span style="width:7px;height:7px;border-radius:50%;background:{z["accent"]};'
+                     f'box-shadow:0 0 6px {z["glow"]};display:inline-block"></span>')
+        else:
+            dots += (f'<span style="width:5px;height:5px;border-radius:50%;background:{z["accent"]};'
+                     f'opacity:.35;display:inline-block"></span>')
+    word = ZONES[zone]["label"].split(" ")[0]
+    return (f'<div style="display:flex;align-items:center;gap:4px;margin-right:18px;flex-shrink:0">{dots}'
+            f'<span style="font-size:8px;color:{ZONES[zone]["accent"]};letter-spacing:.1em;'
+            f'margin-left:4px">{word}</span></div>')
+
+
+def render_topbar(df=None, zone=None):
     """
     Render the fixed top context bar (44px, always visible):
-      Accendio mark | sector momentum | signal count | market sessions | timestamp
+      Accendio mark | zone dots | sector momentum | signal count | market sessions | timestamp
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     ts  = now.strftime("%H:%M UTC")
@@ -486,6 +505,7 @@ def render_topbar(df=None):
     <span style="color:#EEF2FF;font-size:11px;font-weight:400;letter-spacing:.16em">ACCENDIO</span>
   </div>
   <div style="height:18px;width:0.5px;background:rgba(123,156,255,0.2);margin-right:18px;flex-shrink:0"></div>
+  {_zone_dots_html(zone)}
   <div style="display:flex;align-items:center;flex:1;min-width:0;overflow:hidden">{gpills}</div>
   <div style="height:18px;width:0.5px;background:rgba(123,156,255,0.2);margin:0 16px;flex-shrink:0"></div>
   <div style="margin-right:18px;flex-shrink:0;display:flex;align-items:center;gap:6px">
