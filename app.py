@@ -149,35 +149,46 @@ def _load_sector_timeline():
     return result if not result.empty else None
 
 
+# Sector representative instruments for the correlation matrix + pair strip.
+_CORR_REPS = [
+    "WTI Crude Oil", "Brent Crude Oil", "Natural Gas (Henry Hub)",
+    "Gold (COMEX)", "Silver (COMEX)", "Copper (COMEX)",
+    "Corn (CBOT)", "Wheat (CBOT SRW)", "Soybeans (CBOT)",
+    "Live Cattle",
+]
+_CORR_LABELS = {
+    "WTI Crude Oil":           "WTI",
+    "Brent Crude Oil":         "Brent",
+    "Natural Gas (Henry Hub)": "Nat Gas",
+    "Gold (COMEX)":            "Gold",
+    "Silver (COMEX)":          "Silver",
+    "Copper (COMEX)":          "Copper",
+    "Corn (CBOT)":             "Corn",
+    "Wheat (CBOT SRW)":        "Wheat",
+    "Soybeans (CBOT)":         "Soybeans",
+    "Live Cattle":             "Cattle",
+}
+
+
+@st.cache_data(ttl=600)
+def _load_rep_pivot():
+    """Close-price pivot (short labels) for the correlation representatives."""
+    from services.data_contract import fetch_price_history
+    df = fetch_price_history(names=_CORR_REPS, days=100)
+    if df.empty or df["name"].nunique() < 3:
+        return None
+    pivot = df.pivot_table(index="date", columns="name", values="adjusted_close", aggfunc="last")
+    return pivot.rename(columns=_CORR_LABELS)
+
+
 @st.cache_data(ttl=600)
 def _load_correlations():
     """60-day pairwise return correlations for sector representative instruments."""
-    from services.data_contract import fetch_price_history
-    reps = [
-        "WTI Crude Oil", "Brent Crude Oil", "Natural Gas (Henry Hub)",
-        "Gold (COMEX)", "Silver (COMEX)", "Copper (COMEX)",
-        "Corn (CBOT)", "Wheat (CBOT SRW)", "Soybeans (CBOT)",
-        "Live Cattle",
-    ]
-    label_map = {
-        "WTI Crude Oil":           "WTI",
-        "Brent Crude Oil":         "Brent",
-        "Natural Gas (Henry Hub)": "Nat Gas",
-        "Gold (COMEX)":            "Gold",
-        "Silver (COMEX)":          "Silver",
-        "Copper (COMEX)":          "Copper",
-        "Corn (CBOT)":             "Corn",
-        "Wheat (CBOT SRW)":        "Wheat",
-        "Soybeans (CBOT)":         "Soybeans",
-        "Live Cattle":             "Cattle",
-    }
-    df = fetch_price_history(names=reps, days=100)
-    if df.empty or df["name"].nunique() < 3:
+    pivot = _load_rep_pivot()
+    if pivot is None:
         return None
-    pivot   = df.pivot_table(index="date", columns="name", values="adjusted_close", aggfunc="last")
     returns = pivot.pct_change().dropna()
-    corr    = returns.corr().round(2)
-    return corr.rename(index=label_map, columns=label_map)
+    return returns.corr().round(2)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -472,14 +483,24 @@ with tab_live:
             height=300,
         )
         st.plotly_chart(fig_heat, use_container_width=True, config={"displayModeBar": False})
+        # Sector cross-filter (spec §F1). Native segmented control instead of
+        # treemap on_select: Streamlit selection events only fire for
+        # scatter/bar-family traces, never treemap/heatmap (verified 2026-07-15).
+        _pick = st.segmented_control(
+            "Focus sector", ["All"] + sorted(_sectors),
+            default="All", key="home_sector_filter", label_visibility="collapsed",
+        )
+        sector_filter = None if _pick in (None, "All") else _pick
 
     # Panel 2 — Top Active Signals
     with col_sig:
-        n_active = int((df["Pct_Change"].abs() > 1.0).sum())
-        panel_header("Top Active Signals", badge=f"{n_active} active")
+        df_view = df[df["Sector"] == sector_filter] if sector_filter else df
+        n_active = int((df_view["Pct_Change"].abs() > 1.0).sum())
+        badge_txt = f"{n_active} active · {sector_filter}" if sector_filter else f"{n_active} active"
+        panel_header("Top Active Signals", badge=badge_txt)
         docent("home_signals")
 
-        top8 = df.sort_values("Pct_Change", key=abs, ascending=False).head(8)
+        top8 = df_view.sort_values("Pct_Change", key=abs, ascending=False).head(8)
 
         for _, row in top8.iterrows():
             p  = row["Pct_Change"]
@@ -495,7 +516,9 @@ with tab_live:
             if len(nm) > 22:
                 nm = nm[:20] + "…"
 
-            st.markdown(f"""
+            c_card, c_hop = st.columns([6, 1])
+            with c_card:
+                st.markdown(f"""
 <div style="padding:8px 12px;background:{DEPTH};border:0.5px solid rgba(123,156,255,0.1);
 border-radius:6px;margin-bottom:5px">
   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -508,14 +531,21 @@ border-radius:6px;margin-bottom:5px">
     background:rgba(123,156,255,0.06);border:0.5px solid {c}40">{dl}</span>
   </div>
 </div>""", unsafe_allow_html=True)
+            with c_hop:
+                if st.button("→", key=f"sig_model_{row['Name']}", help=f"Open {nm} in Models"):
+                    st.session_state["models_commodity"] = row["Name"]
+                    st.switch_page("pages/4_Models.py")
 
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
     # ── Row 2: Sector Performance Timeline (full width) ───────────────────────
-    panel_header("Sector Performance Timeline", badge="30 TRADING DAYS")
+    tl_badge = f"30 TRADING DAYS · {sector_filter}" if sector_filter else "30 TRADING DAYS"
+    panel_header("Sector Performance Timeline", badge=tl_badge)
     docent("home_timeline")
 
     timeline = _load_sector_timeline()
+    if sector_filter and timeline is not None and sector_filter in timeline.index:
+        timeline = timeline.loc[[sector_filter]]
     if timeline is not None and not timeline.empty:
         _bad_idx = {"undefined", "none", "null", "nan", ""}
         timeline = timeline[
@@ -602,6 +632,31 @@ border-radius:6px;margin-bottom:5px">
             })
             st.plotly_chart(fig_corr, use_container_width=True, config={"displayModeBar": False})
             st.caption("60-day rolling Pearson correlation · sector representative instruments")
+
+            # Pair drill-down (spec §F1): 60d normalized overlay for any pair,
+            # strongest |ρ| first. Native selectbox instead of heatmap on_select
+            # (heatmap traces never emit Streamlit selection events).
+            import itertools
+            _pairs = sorted(
+                itertools.combinations(corr.columns, 2),
+                key=lambda ab: -abs(corr.loc[ab[1], ab[0]]),
+            )
+            _pair_lbls = [f"{a} × {b}   (ρ {corr.loc[b, a]:+.2f})" for a, b in _pairs]
+            _pair_sel = st.selectbox("Pair detail", _pair_lbls, index=0, key="home_pair")
+            a, b = _pairs[_pair_lbls.index(_pair_sel)]
+            pivot = _load_rep_pivot()
+            if pivot is not None and {a, b} <= set(pivot.columns):
+                pair = pivot[[a, b]].dropna().tail(60)
+                if len(pair) > 1:
+                    pair = pair / pair.iloc[0] * 100.0
+                    panel_header(f"Pair detail — {a} vs {b}", badge="60D · indexed to 100")
+                    fig_pair = go.Figure()
+                    for col_name in pair.columns:
+                        fig_pair.add_trace(go.Scatter(
+                            x=pair.index, y=pair[col_name], name=col_name, mode="lines"))
+                    fig_pair.update_layout(**PLOTLY_LAYOUT, height=220)
+                    st.plotly_chart(fig_pair, use_container_width=True,
+                                    config={"displayModeBar": False})
         else:
             st.markdown(
                 f'<div style="padding:28px;background:{DEPTH};border:0.5px solid {BORDER};'
