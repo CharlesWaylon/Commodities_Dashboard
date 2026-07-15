@@ -21,6 +21,7 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional
 
 from utils.theme import apply_theme, render_topbar, render_sidebar_nav, PLOTLY_LAYOUT
+from components.docent import docent
 from utils.macro_narrative import (
     SECTORS, MACRO_EFFECTS, MACRO_EFFECTS_RISK_ON, MACRO_EFFECTS_RISK_OFF,
     load_macro, get_macro_state, compute_forecasts, build_narrative,
@@ -1182,6 +1183,7 @@ st.divider()
 
 # ── SECTION 1: Macro State ────────────────────────────────────────────────────
 st.subheader("① Current Macro State")
+docent("cascade_state")
 st.caption(
     f"Signals as of {_macro_state['date']} — "
     "green = bullish for commodities, red = headwind."
@@ -1309,6 +1311,7 @@ st.markdown(
 # Reads the latest cascade_forecasts row's macro_detail JSON, which the
 # cascade orchestrator now stamps with `regime_hint` + `n_active_triggers`.
 # Hidden when there is no cascade data yet or no triggers are active.
+docent("cascade_triggers")
 try:
     from models.cascade_orchestrator import load_cascade_forecasts as _load_cf
     _cf_df = _load_cf()
@@ -1519,6 +1522,7 @@ st.divider()
 
 # ── SECTION 2: Cascade Flow Diagram ──────────────────────────────────────────
 st.subheader("② Real-Time Cascade Flow")
+docent("cascade_flow")
 st.caption(
     "How macro channels route through sectors to individual commodity forecasts. "
     "Link width = signal magnitude · Link colour = forecast direction (green = bullish, red = bearish)."
@@ -1535,6 +1539,7 @@ st.divider()
 
 # ── SECTION 3: Sector Forecast Breakdown ─────────────────────────────────────
 st.subheader("③ Sector Forecast Breakdown")
+docent("cascade_forecast")
 st.caption(
     "Base forecast = 21-day momentum signal (5 trading-day horizon). "
     "Macro adjustment = causal overlay from DXY, VIX, TLT channels. "
