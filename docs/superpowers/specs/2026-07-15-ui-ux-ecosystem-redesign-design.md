@@ -30,7 +30,7 @@ Rejected: parallel v2 pages (double maintenance for little safety over flags); c
 | `risk` | Portfolio, Scenarios, Alerts, Live Portfolio | Ember amber | `#F5A65B` |
 | `macro` | News, Event Ribbon, Macro Exposure | Canopy teal-green | `#4EC9A8` |
 
-Each zone defines: background gradient pair, accent, panel border tint, and a zone-specific `PLOTLY_LAYOUT` variant so charts inherit the palette automatically. Exact hues to be finalized during implementation from the mockup values (deep water `#060B1A→#0A1430`, biolume `#0A0920→#141238`, ember `#140D08→#2A1A0E`, canopy `#061410→#0D2A20`).
+Each zone defines: background gradient pair, accent, panel border tint, and a zone-specific `PLOTLY_LAYOUT` variant so charts inherit the palette automatically. Background gradients are the approved mockup values: deep water `#060B1A→#0A1430`, biolume `#0A0920→#141238`, ember `#140D08→#2A1A0E`, canopy `#061410→#0D2A20` (minor tuning during visual QA is fine; character stays fixed).
 
 **Continuity anchors:** topbar and sidebar stay brand-navy on every page. `apply_theme()` with no zone renders today's theme exactly — unmigrated pages are untouched.
 
@@ -98,7 +98,7 @@ Rollout — seven branches, each independently shippable/revertible:
 1. Zone theme core in `theme.py` (invisible; no page opts in)
 2. Ecosystem registry + topbar dots + flow footer on pilot page (Macro-Market Cascade); flip `NAV_TAXONOMY_V2_ENABLED`
 3. Ecosystem Map page
-4. Docent on pilot pages + sidebar toggle
+4. Docent on pilot pages (Home + Macro-Market Cascade) + sidebar toggle
 5. Cross-filtering + drill-down on Home and Models
 6. What-if sandboxes + live fragments
 7. Roadmap page
