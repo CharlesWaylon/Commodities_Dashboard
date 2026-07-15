@@ -469,6 +469,26 @@ if "qaoa_result" in st.session_state:
                 f"optimal params: {', '.join(f'{v:.3f}' for v in res.optimal_params)}"
             )
 
+    # ── What-if: trigger risk gates (spec §F3) ────────────────────────────────
+    with st.expander("🧪 What-if: trigger risk gates (SANDBOX — in-memory only)"):
+        st.caption("Simulate gate firings against the currently displayed weights. No DB writes.")
+        from models.config import TRIGGER_RISK_GATES
+        from models.portfolio_optimizer import apply_trigger_risk_gates
+
+        fams = st.multiselect(
+            "Fire these gate families",
+            sorted(TRIGGER_RISK_GATES.keys()),
+            key="whatif_gate_fams",
+        )
+        if fams and res.weights:
+            simulated = [dict(family=f, strength=1.0) for f in fams]
+            gated, actions = apply_trigger_risk_gates(dict(res.weights), simulated)
+            cmp_df = pd.DataFrame({"current": res.weights, "gated": gated}).fillna(0.0)
+            cmp_df["Δ"] = (cmp_df["gated"] - cmp_df["current"]).round(4)
+            st.dataframe(cmp_df, use_container_width=True)
+            for a in actions:
+                st.caption(f"gate applied: {a}")
+
 else:
     st.info(
         "Click **⚛️ Run QAOA Optimizer** above to compute an allocation. "
