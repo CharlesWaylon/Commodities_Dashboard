@@ -558,6 +558,8 @@ def _render_sidebar_nav_v2():
     """
     _nav_section("Markets & Data")
     st.page_link("app.py",                           label="Home")
+    if _ecosystem_on():
+        st.page_link("pages/0_Ecosystem.py",         label="Ecosystem")
     st.page_link("pages/1_Pricing.py",               label="Pricing")
     st.page_link("pages/2_Charts.py",                label="Charts")
     st.page_link("pages/5_Database.py",              label="Data Health")
