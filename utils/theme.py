@@ -644,6 +644,11 @@ def render_sidebar_nav():
         else:
             _render_sidebar_nav_legacy()
 
+        from components.docent import docent_toggle, _enabled as _docent_enabled
+        if _docent_enabled():
+            st.divider()
+            docent_toggle()
+
 
 def panel_header(title: str, badge: str = "", badge_color: str = SIGNAL):
     """Styled panel section label with optional badge."""

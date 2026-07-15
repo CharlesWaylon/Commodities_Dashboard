@@ -26,6 +26,7 @@ from utils.theme import (
     VOID, ABYSS, DEPTH, SIGNAL, ICE, ICE_MID,
     ASCEND, DESCEND, AMBER, BORDER,
 )
+from components.docent import docent
 
 
 _MACRO_QUEUE_PATH = Path(os.getenv("MACRO_QUEUE_PATH", "logs/macro_events.jsonl"))
@@ -418,6 +419,7 @@ with tab_live:
     # Panel 1 — Global Commodity Heatmap
     with col_heat:
         panel_header("Global Commodity Heatmap", badge="LIVE")
+        docent("home_heatmap")
 
         df_tm = df.copy()
         df_tm["label"] = df_tm.apply(
@@ -475,6 +477,7 @@ with tab_live:
     with col_sig:
         n_active = int((df["Pct_Change"].abs() > 1.0).sum())
         panel_header("Top Active Signals", badge=f"{n_active} active")
+        docent("home_signals")
 
         top8 = df.sort_values("Pct_Change", key=abs, ascending=False).head(8)
 
@@ -510,6 +513,7 @@ border-radius:6px;margin-bottom:5px">
 
     # ── Row 2: Sector Performance Timeline (full width) ───────────────────────
     panel_header("Sector Performance Timeline", badge="30 TRADING DAYS")
+    docent("home_timeline")
 
     timeline = _load_sector_timeline()
     if timeline is not None and not timeline.empty:
@@ -568,6 +572,7 @@ border-radius:6px;margin-bottom:5px">
     # Panel 4 — Cross-Market Correlations
     with col_net:
         panel_header("Cross-Market Correlations", badge="60D")
+        docent("home_corr")
 
         corr = _load_correlations()
         if corr is not None and not corr.empty:
