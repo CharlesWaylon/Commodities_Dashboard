@@ -41,8 +41,8 @@ st.set_page_config(
     page_icon="assets/accendio_icon_transparent_32.png",
     layout="wide",
 )
-apply_theme()
-render_topbar()
+apply_theme(zone="signals")
+render_topbar(zone="signals")
 
 # ── Theme constants ────────────────────────────────────────────────────────────
 BG      = "#060912"
@@ -1314,3 +1314,7 @@ border-radius:8px;padding:14px 18px;display:flex;justify-content:space-between;a
     unsafe_allow_html=True,
 )
 st.page_link("pages/7_Macro_Market_Cascade.py", label="→ Open Macro-Market Cascade")
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("causal")

@@ -28,8 +28,8 @@ def _enabled() -> bool:
 
 st.set_page_config(page_title="Accendio | Live Portfolio",
                    page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
-apply_theme()
-render_topbar()
+apply_theme(zone="risk")
+render_topbar(zone="risk")
 render_sidebar_nav()
 
 st.title("Live Portfolio")
@@ -139,3 +139,7 @@ if out["cascade_view_asof"] is not None and out["cascade_view_n"] > 0:
     )
 else:
     st.caption("No cascade forecasts available at the current asof — cascade is falling back to the signal view.")
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("live_portfolio")

@@ -14,8 +14,8 @@ from services.price_data import COMMODITY_TICKERS, COMMODITY_UNITS, fetch_histor
 from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 
 st.set_page_config(page_title="Accendio | Charts", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
-apply_theme()
-render_topbar()
+apply_theme(zone="data")
+render_topbar(zone="data")
 render_sidebar_nav()
 
 st.title("Price Charts")
@@ -218,3 +218,7 @@ if compare_names:
     comp_fig.update_xaxes(gridcolor="#2C3347")
     comp_fig.update_yaxes(gridcolor="#2C3347")
     st.plotly_chart(comp_fig, use_container_width=True)
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("charts")

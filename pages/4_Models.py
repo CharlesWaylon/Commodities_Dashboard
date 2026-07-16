@@ -30,8 +30,8 @@ from models.meta_predictor import (
 from models.config import MODELING_COMMODITIES
 
 st.set_page_config(page_title="Accendio | Models", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
-apply_theme()
-render_topbar()
+apply_theme(zone="signals")
+render_topbar(zone="signals")
 
 # ── Shimmer skeleton ──────────────────────────────────────────────────────────
 _SHIMMER_CSS = (
@@ -3613,3 +3613,7 @@ def _render_model_health():
 
 with tab7:
     _render_model_health()
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("models")

@@ -9,8 +9,8 @@ from utils.theme import apply_theme, render_topbar, render_sidebar_nav, panel_he
 from components.docent import docent
 
 st.set_page_config(page_title="Accendio | Roadmap", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
-apply_theme()
-render_topbar()
+apply_theme(zone="signals")
+render_topbar(zone="signals")
 render_sidebar_nav()
 
 st.title("Accendio Intelligence Roadmap | Alpha Phase")
@@ -58,3 +58,7 @@ def _feedback_dialog():
 
 if st.button("Provide Alpha Feedback"):
     _feedback_dialog()
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("roadmap")

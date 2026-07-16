@@ -13,12 +13,12 @@ from utils.formatting import sector_emoji
 from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 
 st.set_page_config(page_title="Accendio | Pricing", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
-apply_theme()
+apply_theme(zone="data")
 
 with st.spinner(""):
     df = fetch_current_prices()
 
-render_topbar(df)
+render_topbar(df, zone="data")
 render_sidebar_nav()
 
 _title_col, _refresh_col = st.columns([6, 1])
@@ -128,3 +128,7 @@ fig.update_traces(
     hovertemplate="<b>%{label}</b><br>Daily Change: %{color:.2f}%<extra></extra>",
 )
 st.plotly_chart(fig, use_container_width=True)
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("pricing")
