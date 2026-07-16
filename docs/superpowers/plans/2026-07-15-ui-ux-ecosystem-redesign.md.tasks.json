@@ -4,50 +4,50 @@
     {
       "id": 10,
       "subject": "Task 1: Zone theme core (utils/theme.py)",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** `apply_theme(zone=None)` + `zone_plotly_layout(zone)` with four Depth Zone palettes; no-zone output byte-identical to today.\n\n**Files:**\n- Modify: utils/theme.py (ZONES, _ecosystem_on, zone_plotly_layout, theme_css, apply_theme)\n- Test: utils/test_theme_zones.py (new)\n\n**Acceptance Criteria:**\n- [ ] ZONES dict with data/signals/risk/macro (label, accent, bg_top, bg_bot, panel, border, glow)\n- [ ] theme_css(None) == legacy _CSS exactly\n- [ ] theme_css(\"signals\") flag OFF == _CSS; flag ON appends zone CSS containing the accent\n- [ ] zone_plotly_layout deep-copies PLOTLY_LAYOUT; swaps paper/plot bg when flag ON\n- [ ] Flag ECOSYSTEM_UI_ENABLED, default off\n\n**Verify:** python -m pytest utils/test_theme_zones.py -v → 6 passed\n\n```json:metadata\n{\"files\": [\"utils/theme.py\", \"utils/test_theme_zones.py\"], \"verifyCommand\": \"python -m pytest utils/test_theme_zones.py -v\", \"acceptanceCriteria\": [\"ZONES complete\", \"no-zone CSS unchanged\", \"flag-off unchanged\", \"deep-copied plotly layout\", \"flag default off\"], \"modelTier\": \"standard\"}\n```"
     },
     {
       "id": 11,
       "subject": "Task 2: Ecosystem registry + topbar dots + flow footer",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [10],
       "description": "**Goal:** config/ecosystem_registry.py (PAGES/facts/GLOSSARY/DOCENT) + topbar zone-dot indicator + components/flow_footer.py, piloted on pages/7_Macro_Market_Cascade.py.\n\n**Files:**\n- Create: config/ecosystem_registry.py, components/flow_footer.py\n- Modify: utils/theme.py (render_topbar zone arg + _zone_dots_html), pages/7_Macro_Market_Cascade.py\n- Test: config/test_ecosystem_registry.py (new)\n\n**Acceptance Criteria:**\n- [ ] Registry entries for all 16 surfaces; valid zones; nav paths exist\n- [ ] Edge targets are registry keys\n- [ ] safe_fact never raises (DB-down monkeypatch ⇒ \"—\")\n- [ ] Topbar dots only when flag ON + zone passed; flag OFF HTML unchanged\n- [ ] Cascade footer: upstream/downstream page_links with live facts\n\n**Verify:** python -m pytest config/test_ecosystem_registry.py -v → 4 passed\n\n```json:metadata\n{\"files\": [\"config/ecosystem_registry.py\", \"config/test_ecosystem_registry.py\", \"components/flow_footer.py\", \"utils/theme.py\", \"pages/7_Macro_Market_Cascade.py\"], \"verifyCommand\": \"python -m pytest config/test_ecosystem_registry.py -v\", \"acceptanceCriteria\": [\"complete registry\", \"valid edges\", \"non-fatal facts\", \"flag-gated topbar dots\", \"pilot footer live\"], \"modelTier\": \"standard\"}\n```"
     },
     {
       "id": 12,
       "subject": "Task 3: Vertical Ecosystem Map page",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [11],
       "description": "**Goal:** pages/0_Ecosystem.py — vertical water-column map (Data→Signals→Risk bands + Macro full-height column) with live-status node cards linking to every page.\n\n**Files:**\n- Create: pages/0_Ecosystem.py, components/ecosystem_map.py\n- Modify: utils/theme.py (_render_sidebar_nav_v2 Ecosystem link)\n- Test: components/test_ecosystem_map.py (new)\n\n**Acceptance Criteria:**\n- [ ] Bands in ZONE_ORDER with labelled falling edges; Macro column with MACRO_FEEDS labels\n- [ ] One card per registry page: name + cached fact (\"—\" on failure) + page_link\n- [ ] Flag off ⇒ st.info + st.stop()\n- [ ] build_map_bands() pure; covers every PAGES key exactly once\n\n**Verify:** python -m pytest components/test_ecosystem_map.py -v → 2 passed\n\n```json:metadata\n{\"files\": [\"pages/0_Ecosystem.py\", \"components/ecosystem_map.py\", \"components/test_ecosystem_map.py\", \"utils/theme.py\"], \"verifyCommand\": \"python -m pytest components/test_ecosystem_map.py -v\", \"acceptanceCriteria\": [\"ordered bands + macro column\", \"live-status cards\", \"flag gate\", \"pure band builder\"], \"modelTier\": \"standard\"}\n```"
     },
     {
       "id": 13,
       "subject": "Task 4: Docent Mode",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [11],
       "description": "**Goal:** components/docent.py — Guided/Analyst sidebar toggle + docent(panel_id) ⓘ popovers from registry, wired on pilot pages (Home + Cascade, 8 panels).\n\n**Files:**\n- Create: components/docent.py\n- Modify: app.py (4 docent calls), pages/7_Macro_Market_Cascade.py (4 docent calls), utils/theme.py (render_sidebar_nav calls docent_toggle)\n- Test: components/test_docent.py (new)\n\n**Acceptance Criteria:**\n- [ ] DOCENT_ENABLED flag (default off) ⇒ off renders nothing\n- [ ] Toggle default Guided, persists in st.session_state[\"docent_mode\"]\n- [ ] Analyst mode ⇒ docent() renders nothing\n- [ ] Coverage test: every docent(\"<id>\") in app.py + pages/*.py has a DOCENT key\n- [ ] DOCENT texts contain **What:**/**Read it:**/**Why:** tags\n\n**Verify:** python -m pytest components/test_docent.py -v → 2 passed\n\n```json:metadata\n{\"files\": [\"components/docent.py\", \"components/test_docent.py\", \"utils/theme.py\", \"app.py\", \"pages/7_Macro_Market_Cascade.py\"], \"verifyCommand\": \"python -m pytest components/test_docent.py -v\", \"acceptanceCriteria\": [\"flag gate\", \"guided default persists\", \"analyst hides all\", \"registry coverage\", \"what/read/why format\"], \"modelTier\": \"standard\"}\n```"
     },
     {
       "id": 14,
       "subject": "Task 5: Cross-filtering + drill-down (Home, Models)",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Heatmap/correlation clicks filter Home panels; signal rows deep-link into Models pre-selected; ?commodity= URLs shareable.\n\n**Files:**\n- Create: utils/interactions.py\n- Modify: app.py (on_select heatmap+corr, signal-row buttons), pages/4_Models.py (query-param pre-select)\n- Test: utils/test_interactions.py (new)\n\n**Acceptance Criteria:**\n- [ ] Sector tile click filters signals + timeline; clear-chip restores\n- [ ] Corr-cell click renders 60d normalized pair strip\n- [ ] \"→ model\" button opens Models with instrument selected (session hint)\n- [ ] Models?commodity=<name> pre-selects in fresh tab; query param wins over hint\n- [ ] selected_labels() never raises on malformed events\n\n**Verify:** python -m pytest utils/test_interactions.py -v → 3 passed\n\n```json:metadata\n{\"files\": [\"utils/interactions.py\", \"utils/test_interactions.py\", \"app.py\", \"pages/4_Models.py\"], \"verifyCommand\": \"python -m pytest utils/test_interactions.py -v\", \"acceptanceCriteria\": [\"sector cross-filter + clear\", \"pair detail strip\", \"signal-row hop\", \"shareable deep link\", \"robust event parsing\"], \"modelTier\": \"standard\"}\n```"
     },
     {
       "id": 15,
       "subject": "Task 6: What-if sandboxes + live fragments",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [11, 12],
       "description": "**Goal:** In-memory what-if panels (cascade α/damping; portfolio risk-gate toggles) + st.fragment(run_every=120) refresh on the Ecosystem Map.\n\n**Files:**\n- Create: models/whatif.py\n- Modify: pages/7_Macro_Market_Cascade.py (sandbox expander), pages/8_Portfolio.py (gate sandbox), pages/0_Ecosystem.py (fragment wrap)\n- Test: models/test_whatif.py (new)\n\n**Acceptance Criteria:**\n- [ ] models/whatif.py pure — AST test asserts no database/sqlalchemy imports\n- [ ] blended_prior(p,0)==1.0; blended_prior(p,1)==p; contribution monotone in damping\n- [ ] Cascade sandbox re-tabulates every SECTOR_TRANSMISSION_PRIORS edge live, badged SANDBOX\n- [ ] Portfolio sandbox re-runs apply_trigger_risk_gates on displayed weights; before/after/Δ table + actions\n- [ ] Map statuses refresh via fragment without full-page rerun\n\n**Verify:** python -m pytest models/test_whatif.py -v → 4 passed\n\n```json:metadata\n{\"files\": [\"models/whatif.py\", \"models/test_whatif.py\", \"pages/7_Macro_Market_Cascade.py\", \"pages/8_Portfolio.py\", \"pages/0_Ecosystem.py\"], \"verifyCommand\": \"python -m pytest models/test_whatif.py -v\", \"acceptanceCriteria\": [\"pure module (AST-checked)\", \"prior math bounds\", \"live cascade sandbox\", \"gate sandbox before/after\", \"fragment refresh\"], \"modelTier\": \"standard\"}\n```"
     },
     {
       "id": 16,
       "subject": "Task 7: Roadmap page (Alpha Phase)",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [13],
       "description": "**Goal:** pages/16_Roadmap.py — Signal Lab + Research Library alpha panels (extracted to components/roadmap_panels.py), JSON milestones, feedback dialog → new alpha_feedback table.\n\n**Files:**\n- Create: pages/16_Roadmap.py, components/roadmap_panels.py, config/roadmap_milestones.json\n- Modify: database/models.py (AlphaFeedback), pages/13_Signal_Lab.py, pages/15_Research_Library.py, utils/theme.py (nav), config/ecosystem_registry.py (roadmap entry + docent)\n- Test: components/test_roadmap.py (new)\n\n**Acceptance Criteria:**\n- [ ] ROADMAP_ENABLED gate (default off)\n- [ ] Pages 13/15 render identically post-extraction (NOT deleted)\n- [ ] Milestones from config/roadmap_milestones.json (done/in_progress/planned)\n- [ ] Feedback dialog inserts row into alpha_feedback (SELECT-verified)\n- [ ] Functional description = docent(\"roadmap_description\")\n\n**Verify:** python -m pytest components/test_roadmap.py -v → 2 passed; psql SELECT shows feedback row\n\n```json:metadata\n{\"files\": [\"pages/16_Roadmap.py\", \"components/roadmap_panels.py\", \"components/test_roadmap.py\", \"config/roadmap_milestones.json\", \"database/models.py\", \"pages/13_Signal_Lab.py\", \"pages/15_Research_Library.py\", \"utils/theme.py\", \"config/ecosystem_registry.py\"], \"verifyCommand\": \"python -m pytest components/test_roadmap.py -v\", \"acceptanceCriteria\": [\"flag gate\", \"13/15 unchanged\", \"json milestones\", \"feedback row inserted\", \"docent description\"], \"modelTier\": \"standard\"}\n```"
     }
   ],
-  "lastUpdated": "2026-07-15T00:00:00Z"
+  "lastUpdated": "2026-07-15T19:40:00Z"
 }
