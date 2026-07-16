@@ -7,7 +7,9 @@ from config.ecosystem_registry import DOCENT
 
 
 def _enabled() -> bool:
-    return os.getenv("DOCENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    # Default ON as of 2026-07-15 (ecosystem UI is the default experience);
+    # rollback = DOCENT_ENABLED=false.
+    return os.getenv("DOCENT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def docent_mode() -> str:

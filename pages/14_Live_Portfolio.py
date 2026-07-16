@@ -23,7 +23,7 @@ from utils.theme import (  # noqa: F401
 
 
 def _enabled() -> bool:
-    return os.getenv("PRODUCTION_PORTFOLIO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("PRODUCTION_PORTFOLIO_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 st.set_page_config(page_title="Accendio | Live Portfolio",
