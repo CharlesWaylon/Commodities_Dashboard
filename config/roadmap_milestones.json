@@ -1,0 +1,5 @@
+[
+  {"label": "Model A/B Sandbox",  "status": "done",        "note": "Signal Lab backtesting sandbox"},
+  {"label": "Contextual Archive", "status": "in_progress", "note": "Research Library with data snapshots"},
+  {"label": "BETA RELEASE",       "status": "planned",     "note": "Feature-flag defaults flip on"}
+]
