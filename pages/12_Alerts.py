@@ -41,8 +41,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-apply_theme()
-render_topbar()
+apply_theme(zone="risk")
+render_topbar(zone="risk")
 render_sidebar_nav()
 
 
@@ -524,3 +524,7 @@ st.markdown(
     f'snapshot at {now_str}</div>',
     unsafe_allow_html=True,
 )
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("alerts")

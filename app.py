@@ -117,7 +117,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-apply_theme()
+apply_theme(zone="data")
 
 
 # ── Cached data helpers ───────────────────────────────────────────────────────
@@ -288,7 +288,7 @@ padding:8px 12px;display:flex;justify-content:space-between;align-items:center">
 with st.spinner(""):
     df = fetch_current_prices()
 
-render_topbar(df)
+render_topbar(df, zone="data")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 render_sidebar_nav()
@@ -753,3 +753,7 @@ with tab_alerts:
         ),
         unsafe_allow_html=True,
     )
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("home")

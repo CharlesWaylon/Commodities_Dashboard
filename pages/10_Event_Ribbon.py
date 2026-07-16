@@ -47,8 +47,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-apply_theme()
-render_topbar()
+apply_theme(zone="macro")
+render_topbar(zone="macro")
 render_sidebar_nav()
 
 
@@ -638,3 +638,7 @@ else:
         f"No active scenario triggers. Inject one above to preview its impact across the "
         f"dashboard. Synthetic events auto-expire after {SYNTHETIC_TTL_MINUTES} minutes."
     )
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("events")

@@ -15,8 +15,8 @@ from datetime import date
 from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 
 st.set_page_config(page_title="Accendio | Database", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
-apply_theme()
-render_topbar()
+apply_theme(zone="data")
+render_topbar(zone="data")
 render_sidebar_nav()
 
 st.title("Database Inspector")
@@ -212,3 +212,7 @@ if info["price_rows"] > 0:
 
 else:
     st.info("No data in the database yet. Use the ingestion buttons above to populate it.")
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("data_health")

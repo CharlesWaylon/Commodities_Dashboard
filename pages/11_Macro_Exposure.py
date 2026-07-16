@@ -36,8 +36,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-apply_theme()
-render_topbar()
+apply_theme(zone="macro")
+render_topbar(zone="macro")
 render_sidebar_nav()
 
 
@@ -246,3 +246,7 @@ if _has_active:
     # Trigger rerun after interval (Streamlit polling pattern)
     time.sleep(_REFRESH_INTERVAL)
     st.rerun()
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("exposure")

@@ -45,8 +45,8 @@ st.set_page_config(
     page_icon="assets/accendio_icon_transparent_32.png",
     layout="wide",
 )
-apply_theme()
-render_topbar()
+apply_theme(zone="risk")
+render_topbar(zone="risk")
 
 # ── Theme constants (match pages/4_Models.py) ─────────────────────────────────
 BG, PLOT_BG, GRID = "#060912", "#0C1228", "#1A2A5E"
@@ -1084,3 +1084,7 @@ with st.expander("Phase 1 status & next steps"):
 **Phase 5** — Stress-test toggle, model-attribution heatmap, historical-analog overlay.
         """
     )
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("scenarios")

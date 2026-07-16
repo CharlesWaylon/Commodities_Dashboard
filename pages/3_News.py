@@ -13,8 +13,8 @@ from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 from models.headline_insight import HeadlineInsightModel, NEWS_INSIGHT_ENABLED
 
 st.set_page_config(page_title="Accendio | News", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")
-apply_theme()
-render_topbar()
+apply_theme(zone="macro")
+render_topbar(zone="macro")
 render_sidebar_nav()
 
 st.title("Market News")
@@ -122,3 +122,7 @@ with st.expander("📡 News Sources"):
     for name, url in RSS_FEEDS.items():
         st.markdown(f"- **{name}**: `{url}`")
     st.caption("To add a source, edit `services/news_data.py` → `RSS_FEEDS` dict.")
+
+
+from components.flow_footer import render_flow_footer
+render_flow_footer("news")
