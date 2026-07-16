@@ -102,6 +102,8 @@ PAGES: dict[str, dict] = {
                        upstream=[], downstream=[dict(page="cascade", label="trigger events", fact="active_triggers")]),
     "exposure":   dict(zone="macro",   name="Macro Exposure",       nav="pages/11_Macro_Exposure.py",
                        upstream=[dict(page="pricing", label="returns")], downstream=[]),
+    "roadmap":    dict(zone="signals", name="Roadmap (Alpha)",      nav="pages/16_Roadmap.py",
+                       upstream=[dict(page="signal_lab", label="sandbox results")], downstream=[]),
 }
 
 ZONE_ORDER = ("data", "signals", "risk")   # vertical map bands, top → bottom
@@ -131,4 +133,5 @@ DOCENT: dict[str, str] = {
     "cascade_flow":     "**What:** how a macro shock travels: macro channel → sector → commodity. **Read it:** thicker ribbons carry more of the shock. **Why:** energy dominates transmission into agriculture — natural gas is 70–80% of nitrogen-fertiliser cost, so energy shocks become food shocks.",
     "cascade_forecast": "**What:** each sector's forecast before and after macro adjustment. **Read it:** the 'final' column is what downstream portfolio logic consumes. **Why:** shows exactly how much the macro layer changed the model's mind.",
     "cascade_triggers": "**What:** the macro events (CPI surprises, OPEC actions, weather) currently steering the model. **Read it:** stronger triggers push forecasts harder. **Why:** this is the audit trail for 'why did the forecast move today?'",
+    "roadmap_description": "**What:** a transparent view of the platform's development pipeline — the Signal Lab sandbox for A/B backtesting, the Research Library archive of past briefs and signals, and the milestone tracker toward beta. **Read it:** amber badges mark alpha surfaces still under construction. **Why:** you can watch (and steer, via feedback) how the intelligence layer is evolving before it ships.",
 }

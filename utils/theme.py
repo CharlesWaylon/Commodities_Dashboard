@@ -572,6 +572,8 @@ def _render_sidebar_nav_v2():
         st.page_link("pages/13_Signal_Lab.py",       label="Signal Lab ⚗️")
     if _nav_flag_on("RESEARCH_LIBRARY_ENABLED"):
         st.page_link("pages/15_Research_Library.py", label="Research Library 📚")
+    if _nav_flag_on("ROADMAP_ENABLED"):
+        st.page_link("pages/16_Roadmap.py",          label="Roadmap 🚧")
 
     _nav_section("Portfolio & Risk")
     st.page_link("pages/8_Portfolio.py",             label="Portfolio")

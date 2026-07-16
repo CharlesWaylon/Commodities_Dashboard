@@ -57,7 +57,8 @@ SCHEMA DESIGN:
 
 from sqlalchemy import (
     Column, Integer, String, Float, BigInteger, Boolean,
-    Date, DateTime, UniqueConstraint, ForeignKey, Index, Text
+    Date, DateTime, UniqueConstraint, ForeignKey, Index, Text,
+    func as _sa_func,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 from datetime import datetime, timezone
@@ -743,3 +744,18 @@ class FundamentalObservation(Base):
     def __repr__(self):
         return (f"<FundamentalObservation {self.source}:{self.series_id} "
                 f"ref={self.reference_date} rel={self.release_date} v={self.value}>")
+
+
+class AlphaFeedback(Base):
+    """Alpha-phase user feedback captured from the Roadmap page (spec §G)."""
+
+    __tablename__ = "alpha_feedback"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime(timezone=True), server_default=_sa_func.now())
+    page       = Column(String(64),  nullable=False)
+    message    = Column(Text,        nullable=False)
+    contact    = Column(String(128), nullable=True)
+
+    def __repr__(self):
+        return f"<AlphaFeedback {self.page} at={self.created_at}>"
