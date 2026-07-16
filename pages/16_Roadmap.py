@@ -16,7 +16,7 @@ render_sidebar_nav()
 st.title("Accendio Intelligence Roadmap | Alpha Phase")
 docent("roadmap_description")
 
-if os.getenv("ROADMAP_ENABLED", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+if os.getenv("ROADMAP_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
     st.info("**Roadmap is off.** Set `ROADMAP_ENABLED=true` to enable this alpha surface.")
     st.stop()
 

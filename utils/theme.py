@@ -68,8 +68,22 @@ ZONES = {
 }
 
 
+# Flags that default ON — the ecosystem UI is the default experience as of
+# 2026-07-15 (user decision to promote the redesign out of soak). Rollback for
+# any single surface is still a flag flip: set its env var to "false".
+_DEFAULT_ON_FLAGS = {
+    "ECOSYSTEM_UI_ENABLED", "DOCENT_ENABLED", "ROADMAP_ENABLED",
+    "NAV_TAXONOMY_V2_ENABLED", "SIGNAL_RESEARCH_ENABLED",
+    "RESEARCH_LIBRARY_ENABLED", "PRODUCTION_PORTFOLIO_ENABLED",
+}
+
+
+def _flag_default(name: str) -> str:
+    return "true" if name in _DEFAULT_ON_FLAGS else "false"
+
+
 def _ecosystem_on() -> bool:
-    return os.getenv("ECOSYSTEM_UI_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("ECOSYSTEM_UI_ENABLED", _flag_default("ECOSYSTEM_UI_ENABLED")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def zone_plotly_layout(zone: str | None = None) -> dict:
@@ -528,9 +542,10 @@ def render_topbar(df=None, zone=None):
 
 
 def _nav_flag_on(name: str) -> bool:
-    """True when an env-var feature flag is set to an affirmative value."""
+    """True when an env-var feature flag is affirmative. Flags in
+    _DEFAULT_ON_FLAGS default ON; all others default OFF."""
     import os
-    return os.getenv(name, "false").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv(name, _flag_default(name)).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _nav_section(label: str):

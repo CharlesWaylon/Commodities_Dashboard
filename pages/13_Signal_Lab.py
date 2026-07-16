@@ -20,7 +20,7 @@ from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 
 
 def _enabled() -> bool:
-    return os.getenv("SIGNAL_RESEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("SIGNAL_RESEARCH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 st.set_page_config(page_title="Accendio | Signal Lab", page_icon="assets/accendio_icon_transparent_32.png", layout="wide")

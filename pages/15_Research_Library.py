@@ -21,7 +21,7 @@ from utils.theme import apply_theme, render_topbar, render_sidebar_nav
 
 
 def _enabled() -> bool:
-    return os.getenv("RESEARCH_LIBRARY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("RESEARCH_LIBRARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 st.set_page_config(
