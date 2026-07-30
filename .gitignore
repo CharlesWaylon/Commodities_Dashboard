@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 .streamlit/secrets.toml
+# Local Claude Code permissions/config — machine-local, leaks local DB user & paths
+.claude/settings.local.json
 
 # ── Local Database & model artifacts ────────────────────────────────────────────
 # The SQLite database contains your 5-year historical data. It is large,
