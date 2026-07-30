@@ -18,6 +18,8 @@ data/sector_params.json
 *.sqlite
 *.sqlite3
 *.pkl
+*.parquet
+*.model
 
 # ── Internal Reports ───────────────────────────────────────────────────────────
 reports/
